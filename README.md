@@ -129,6 +129,10 @@ Bilingual (English default, Romanian via the EN/RO switch in the top bar).
 
 ![What Claude sees](docs/screenshots/inject.png)
 
+*Git history — the memory timeline with per-commit diffs and commit-from-UI:*
+
+![Git history](docs/screenshots/git-history.png)
+
 *(Screenshots use demo data.)*
 
 - **System dashboard**: counters, health checks (store/staging/index/queue/hooks/git), recent
@@ -138,6 +142,8 @@ Bilingual (English default, Romanian via the EN/RO switch in the top bar).
   operations (supersede / re-scope / delete), supersede-chain navigation.
 - **"What Claude sees"**: renders the exact SessionStart injection, with its size in bytes/tokens.
 - **Review queue**: candidates extracted by the optional local LLM wait here for human approval.
+- **Git history**: the store's timeline — commits touching `store/` with colored per-commit
+  diffs (the newest opens automatically) and a commit-from-the-UI button (store files only).
 
 ## Optional: offline extraction with a local LLM
 
