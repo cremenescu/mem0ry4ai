@@ -143,7 +143,7 @@ Bilingual (English default, Romanian via the EN/RO switch in the top bar).
 - **"What Claude sees"**: renders the exact SessionStart injection, with its size in bytes/tokens.
 - **Review queue**: candidates extracted by the optional local LLM wait here for human approval.
 - **Git history**: the store's timeline — commits touching `store/` with colored per-commit
-  diffs (the newest opens automatically) and a commit-from-the-UI button (store files only).
+  diffs and a commit-from-the-UI button (store files only).
 
 ## Optional: offline extraction with a local LLM
 

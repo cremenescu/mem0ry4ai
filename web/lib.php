@@ -208,7 +208,7 @@ function ro_strings(): array {
         '(diff unavailable)' => '(diff indisponibil)',
         'git.help' => 'Fiecare commit pe store/ = un pas in evolutia memoriei: ce s-a invatat, ce s-a supersedat, cand.',
         'Diff' => 'Diff',
-        'git.help.diff' => 'Click pe un commit → diff-ul lui (doar fisierele din store). Verde = adaugat, rosu = scos. Cel mai recent se deschide automat.',
+        'git.help.diff' => 'Click pe un commit → diff-ul lui (doar fisierele din store). Verde = adaugat, rosu = scos.',
         'Commit from the UI' => 'Comite din UI',
         'git.help.commit' => 'Butonul comite DOAR store/, cu autor mem0ry4ai web si fara signing. Functioneaza cand serverul ruleaza ca userul tau (server_web.sh).',
     ];

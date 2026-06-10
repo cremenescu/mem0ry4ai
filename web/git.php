@@ -89,7 +89,7 @@ $flash = take_flash();
   <h3><?= t('Git history') ?></h3>
   <p><?= ui_lang() === 'ro' ? t('git.help') : 'Every commit on <code>store/</code> is one step in the memory\'s evolution: what was learned, what got superseded, when.' ?></p>
   <h4><?= t('Diff') ?></h4>
-  <p><?= ui_lang() === 'ro' ? t('git.help.diff') : 'Click a commit → its diff (store files only). Green = added, red = removed. The most recent one opens automatically.' ?></p>
+  <p><?= ui_lang() === 'ro' ? t('git.help.diff') : 'Click a commit → its diff (store files only). Green = added, red = removed.' ?></p>
   <h4><?= t('Commit from the UI') ?></h4>
   <p><?= ui_lang() === 'ro' ? t('git.help.commit') : 'The button commits ONLY <code>store/</code>, authored as <code>mem0ry4ai web</code>, no signing. Works when the server runs as your user (<code>server_web.sh</code>).' ?></p>
 </aside>
@@ -121,9 +121,6 @@ function toggleDiff(head){
     })
     .catch(function(){ box.textContent = TXT.fail; });
 }
-// the newest commit opens expanded by default
-var first = document.querySelector('.gcommit .ghead');
-if (first) toggleDiff(first);
 </script>
 </body>
 </html>
