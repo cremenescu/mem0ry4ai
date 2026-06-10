@@ -185,6 +185,7 @@ function ro_strings(): array {
         'unknown' => 'necunoscut',
         'clean' => 'curat',
         'uncommitted changes' => 'modificari necomise',
+        'uncommitted — auto-checkpoint at session end' => 'necomise — checkpoint automat la final de sesiune',
         'Store writable' => 'Store writable',
         'Staging writable' => 'Staging writable',
         'FTS index' => 'Index FTS',
@@ -531,8 +532,9 @@ function health_checks(): array {
     }
     $out[] = [t('Claude Code hooks'), $hooks, $hdet];
     $dirty = git_dirty();
-    $out[] = [t('Git store'), $dirty === null ? null : !$dirty,
-              $dirty === null ? t('unknown') : ($dirty ? t('uncommitted changes') : t('clean'))];
+    // dirty is not an error: the SessionEnd hook auto-commits the store -> informative gray
+    $out[] = [t('Git store'), $dirty === null ? null : ($dirty ? null : true),
+              $dirty === null ? t('unknown') : ($dirty ? t('uncommitted — auto-checkpoint at session end') : t('clean'))];
     return $out;
 }
 

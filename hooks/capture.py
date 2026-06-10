@@ -54,7 +54,35 @@ def main():
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:
         pass
+    if data.get("hook_event_name") == "SessionEnd":
+        auto_commit_store()
     return 0
+
+
+def auto_commit_store():
+    """Automatic checkpoint: commit store/ at session end (no human action required).
+
+    Memories written during the session land in git history without the user pressing anything.
+    Silent on any error (repo lock from another session, ownership, etc.).
+    """
+    import subprocess
+    try:
+        base = ["git", "-C", PROJ, "-c", f"safe.directory={PROJ}"]
+        r = subprocess.run(base + ["status", "--porcelain", "store"],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode != 0 or not r.stdout.strip():
+            return
+        n = len([l for l in r.stdout.splitlines() if l.strip()])
+        subprocess.run(base + ["add", "store"], capture_output=True, timeout=10)
+        subprocess.run(base + ["-c", "commit.gpgsign=false",
+                               "-c", "user.name=mem0ry4ai hook",
+                               "-c", "user.email=hook@mem0ry4ai.local",
+                               "commit", "-m",
+                               f"store: end-of-session checkpoint ({n} files)",
+                               "--", "store"],
+                       capture_output=True, timeout=15)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
