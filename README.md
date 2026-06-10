@@ -50,7 +50,8 @@ Claude Code session
   ├─ SessionStart hook ─► injects relevant memories (global + current project;
   │                       from a monorepo root: a capped index of ALL projects)
   ├─ [work] the agent proactively writes durable findings ─► mem.py add
-  └─ SessionEnd/PreCompact hook ─► transcript pointer to staging/ (for offline extraction)
+  └─ SessionEnd/PreCompact hook ─► transcript pointer to staging/ + auto-commit of the
+                                    store (end-of-session git checkpoint — no manual chore)
 
 store/*.md   ◄── SOURCE OF TRUTH (markdown + git: audit, diff, rollback, supersede)
    ├─► store/.index.db   (FTS5, ranked search — derived, regenerable)
@@ -177,6 +178,9 @@ Everything is overridable via environment variables — no config file needed:
   committing parser changes.
 - **Concurrency**: atomic writes (tmp + rename), append-mostly files, WAL-free design — the
   store survives multiple sessions because markdown conflicts are rare and git catches the rest.
+- **No commit chore**: the SessionEnd hook auto-commits `store/` (authored `mem0ry4ai hook`),
+  so every session leaves a git checkpoint behind; the git page's button is for mid-session
+  checkpoints with a custom message.
 - **Your data is yours**: if you fork this repo, do not commit your personal `store/` upstream.
   The store is meant to be versioned in *your* clone, locally.
 
