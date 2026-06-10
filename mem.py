@@ -5,9 +5,10 @@
 Commands:
   mem.py add --type gotcha --scope project:my-app --summary "..." [--body "..." | stdin]
   mem.py list [--scope global|project:<slug>] [--type ...] [--status active|superseded|all] [--json]
-  mem.py search "query"            # FTS5 ranked (bm25); substring fallback
+  mem.py search "query" [--since 2026-05-01] [--until ...]   # FTS5 ranked (bm25); substring fallback
   mem.py supersede <id> [--by <new-id>]
   mem.py propose ...               # queue a candidate for human review (NOT written to the store)
+  mem.py audit                     # report secret-like patterns in the store (never modifies)
   mem.py reindex                   # rebuild the derived FTS5 index from markdown
 
 Storage format: see store/FORMAT.md. No external dependencies.
@@ -23,7 +24,27 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-STORE = os.path.join(ROOT, "store")
+sys.path.insert(0, ROOT)
+import redact  # noqa: E402
+
+
+def _data_dir():
+    """Where store/ and staging/ live. Default = next to the code (git-clone install).
+
+    MEM_DATA_DIR overrides. When the code runs from a Claude Code plugin install,
+    data defaults to ~/.mem0ry4ai instead — plugin updates replace the plugin dir,
+    and memories must survive that.
+    """
+    d = os.environ.get("MEM_DATA_DIR")
+    if d:
+        return os.path.abspath(os.path.expanduser(d))
+    if f"{os.sep}.claude{os.sep}plugins{os.sep}" in ROOT + os.sep:
+        return os.path.join(os.path.expanduser("~"), ".mem0ry4ai")
+    return ROOT
+
+
+DATA = _data_dir()
+STORE = os.path.join(DATA, "store")
 GLOBAL_FILE = os.path.join(STORE, "global.md")
 PROJ_DIR = os.path.join(STORE, "projects")
 
@@ -154,24 +175,47 @@ def cmd_add(a):
     body = (body or "").strip()
     if not body:
         sys.exit("empty body")
+    summary = a.summary
+    if not a.no_redact and redact.enabled():
+        body, f1 = redact.redact(body)
+        summary, f2 = redact.redact(summary)
+        if f1 or f2:
+            print(f"redacted secrets: {redact.describe(f1 + f2)} (use --no-redact to keep them)")
     path = scope_file(a.scope)
     ensure_header(path, a.scope)
     rid = gen_id()
-    rec = render_record(rid, a.type, a.scope, a.summary, body,
+    rec = render_record(rid, a.type, a.scope, summary, body,
                         a.confidence, a.source, now_ts(), now_ts(), "active")
     with open(path, "a", encoding="utf-8") as f:
         f.write("\n" + rec)
-    print(f"added {rid}  [{a.type} · {a.scope}]  -> {os.path.relpath(path, ROOT)}")
+    print(f"added {rid}  [{a.type} · {a.scope}]  -> {os.path.relpath(path, DATA)}")
 
 
-def _match_filters(rec, scope, rtype, status):
+def _match_filters(rec, scope, rtype, status, since=None, until=None):
     if scope and rec["meta"].get("scope") != scope:
         return False
     if rtype and rec["meta"].get("type") != rtype:
         return False
     if status != "all" and rec["meta"].get("status", "active") != status:
         return False
+    created = (rec["meta"].get("created") or "")[:19]
+    if since and created < since:
+        return False
+    if until and created > until:
+        return False
     return True
+
+
+def _norm_date(s, end=False):
+    """'2026-05-01' / '2026-05-01 14:30[:00]' -> full timestamp for string comparison."""
+    if not s:
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        return s + (" 23:59:59" if end else " 00:00:00")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?", s):
+        s = s.replace("T", " ")
+        return s if len(s) == 19 else s + (":59" if end else ":00")
+    sys.exit(f"invalid date: {s} (use YYYY-MM-DD or 'YYYY-MM-DD HH:MM')")
 
 
 def record_summary(rec):
@@ -181,7 +225,8 @@ def record_summary(rec):
 
 
 def cmd_list(a):
-    recs = [r for r in all_records() if _match_filters(r, a.scope, a.type, a.status)]
+    since, until = _norm_date(a.since), _norm_date(a.until, end=True)
+    recs = [r for r in all_records() if _match_filters(r, a.scope, a.type, a.status, since, until)]
     if getattr(a, "json", False):
         import json
         out = [{
@@ -279,11 +324,12 @@ def _print_hits(hits):
 
 
 def cmd_search(a):
+    since, until = _norm_date(a.since), _norm_date(a.until, end=True)
     ids = fts_search(a.query)
     if ids is not None:
         by_id = {r["id"]: r for r in all_records()}
         hits = [by_id[i] for i in ids
-                if i in by_id and _match_filters(by_id[i], a.scope, a.type, "all")]
+                if i in by_id and _match_filters(by_id[i], a.scope, a.type, "all", since, until)]
         _print_hits(hits)
         return
     # fallback: substring scan (ripgrep when available) if FTS5 is missing
@@ -301,14 +347,14 @@ def cmd_search(a):
     for path in (cand_files or store_files()):
         for r in parse_file(path):
             blob = f"{r['title']}\n{r['body']}\n{r['meta'].get('scope','')}".lower()
-            if ql in blob and _match_filters(r, a.scope, a.type, "all"):
+            if ql in blob and _match_filters(r, a.scope, a.type, "all", since, until):
                 hits.append(r)
     _print_hits(hits)
 
 
 def cmd_reindex(a):
     if build_index():
-        print(f"FTS5 index rebuilt: {len(all_records())} records -> {os.path.relpath(index_path(), ROOT)}")
+        print(f"FTS5 index rebuilt: {len(all_records())} records -> {os.path.relpath(index_path(), DATA)}")
     else:
         print("FTS5 unavailable in this sqlite — search falls back to substring scan.")
 
@@ -343,13 +389,34 @@ def cmd_supersede(a):
             with open(path, "w", encoding="utf-8") as f:
                 f.writelines(lines)
             extra = f" (replaced by {a.by})" if a.by else ""
-            print(f"superseded {a.id}{extra}  in {os.path.relpath(path, ROOT)}")
+            print(f"superseded {a.id}{extra}  in {os.path.relpath(path, DATA)}")
             return
     sys.exit(f"id not found: {a.id}")
 
 
+def cmd_audit(a):
+    """Report records containing secret-like patterns. Never modifies anything."""
+    recs = [r for r in all_records() if _match_filters(r, a.scope, None, "all")]
+    findings = []
+    for r in recs:
+        labels = redact.scan(record_summary(r) + "\n" + r["body"])
+        if labels:
+            findings.append((r, labels))
+    if not findings:
+        print(f"audit clean: no secret-like patterns in {len(recs)} records")
+        return
+    for r, labels in findings:
+        st = r["meta"].get("status", "active")
+        flag = "" if st == "active" else f"  ({st})"
+        print(f"{r['id']}  [{r['meta'].get('type','?')} · {r['meta'].get('scope','?')}]{flag}  -> {', '.join(labels)}")
+        print(f"    {record_summary(r)[:100]}")
+    print(f"\n{len(findings)} of {len(recs)} records contain secret-like patterns.")
+    print("Nothing was modified — review them (edit in the web UI, or supersede + re-add redacted).")
+    sys.exit(1)
+
+
 def queue_path():
-    return os.path.join(ROOT, "staging", "queue.jsonl")
+    return os.path.join(DATA, "staging", "queue.jsonl")
 
 
 def cmd_propose(a):
@@ -366,6 +433,12 @@ def cmd_propose(a):
     body = (body or "").strip()
     if not body:
         sys.exit("empty body: pass --body \"...\" or pipe it on stdin")
+    summary = a.summary.strip()
+    if not a.no_redact and redact.enabled():
+        body, f1 = redact.redact(body)
+        summary, f2 = redact.redact(summary)
+        if f1 or f2:
+            print(f"redacted secrets: {redact.describe(f1 + f2)} (use --no-redact to keep them)")
     try:
         conf = float(a.confidence)
     except ValueError:
@@ -373,7 +446,7 @@ def cmd_propose(a):
     rec = {
         "qid": gen_id(),
         "type": a.type, "scope": a.scope,
-        "summary": a.summary.strip(), "body": body,
+        "summary": summary, "body": body,
         "confidence": conf, "source": a.source,
         "transcript": None,
         "extracted_at": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -396,12 +469,15 @@ def main():
     pa.add_argument("--body", help="body (or pipe it on stdin)")
     pa.add_argument("--confidence", default="1.0")
     pa.add_argument("--source", default="manual")
+    pa.add_argument("--no-redact", action="store_true", help="keep secret values verbatim (redacted by default)")
     pa.set_defaults(func=cmd_add)
 
     pl = sub.add_parser("list", help="list memories")
     pl.add_argument("--scope")
     pl.add_argument("--type")
     pl.add_argument("--status", default="active", help="active|superseded|all")
+    pl.add_argument("--since", help="created on/after (YYYY-MM-DD or 'YYYY-MM-DD HH:MM')")
+    pl.add_argument("--until", help="created on/before (YYYY-MM-DD or 'YYYY-MM-DD HH:MM')")
     pl.add_argument("--json", action="store_true", help="JSON output (for tooling/tests)")
     pl.set_defaults(func=cmd_list)
 
@@ -409,6 +485,8 @@ def main():
     ps.add_argument("query")
     ps.add_argument("--scope")
     ps.add_argument("--type")
+    ps.add_argument("--since", help="created on/after (YYYY-MM-DD or 'YYYY-MM-DD HH:MM')")
+    ps.add_argument("--until", help="created on/before (YYYY-MM-DD or 'YYYY-MM-DD HH:MM')")
     ps.set_defaults(func=cmd_search)
 
     pp = sub.add_parser("supersede", help="mark a memory as superseded")
@@ -423,7 +501,12 @@ def main():
     pr.add_argument("--body", help="body (or pipe it on stdin)")
     pr.add_argument("--confidence", default="0.8")
     pr.add_argument("--source", default="claude:live")
+    pr.add_argument("--no-redact", action="store_true", help="keep secret values verbatim (redacted by default)")
     pr.set_defaults(func=cmd_propose)
+
+    pu = sub.add_parser("audit", help="report secret-like patterns in the store (read-only)")
+    pu.add_argument("--scope")
+    pu.set_defaults(func=cmd_audit)
 
     px = sub.add_parser("reindex", help="rebuild the derived FTS5 index from markdown")
     px.set_defaults(func=cmd_reindex)

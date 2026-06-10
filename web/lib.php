@@ -8,7 +8,20 @@ declare(strict_types=1);
 const TYPES = ['gotcha', 'fact', 'decision', 'command', 'preference', 'todo', 'status'];
 
 function proj_root(): string { return dirname(__DIR__); }
-function store_dir(): string { return proj_root() . '/store'; }
+
+// Data dir (store/, staging/, git repo). Same resolution as mem.py: MEM_DATA_DIR
+// override > plugin-safe default (~/.mem0ry4ai) > next to the code.
+function data_root(): string {
+    static $d = null;
+    if ($d !== null) return $d;
+    $env = getenv('MEM_DATA_DIR');
+    if ($env !== false && $env !== '') return $d = rtrim($env, '/');
+    if (str_contains(proj_root() . '/', '/.claude/plugins/')) {
+        return $d = rtrim((string)getenv('HOME'), '/') . '/.mem0ry4ai';
+    }
+    return $d = proj_root();
+}
+function store_dir(): string { return data_root() . '/store'; }
 function global_file(): string { return store_dir() . '/global.md'; }
 function proj_dir(): string { return store_dir() . '/projects'; }
 
@@ -499,7 +512,7 @@ function health_checks(): array {
     $out = [];
     $out[] = [t('Store writable'), is_writable(store_dir()) && is_writable(global_file()),
               is_writable(global_file()) ? t('write OK') : 'chmod store + *.md'];
-    $stg = proj_root() . '/staging';
+    $stg = data_root() . '/staging';
     $out[] = [t('Staging writable'), is_dir($stg) ? is_writable($stg) : null,
               is_dir($stg) ? (is_writable($stg) ? t('queue functional') : 'chmod staging') : t('not created yet')];
     // FTS index: stale is not an error — rebuild on the spot (self-healing, cheap)
@@ -525,7 +538,7 @@ function health_checks(): array {
     }
     if ($hooks === null) {
         // settings.json unreadable (different user) -> living proof: the capture hook writes sessions.jsonl
-        $sess = proj_root() . '/staging/sessions.jsonl';
+        $sess = data_root() . '/staging/sessions.jsonl';
         if (is_file($sess) && filesize($sess) > 0) {
             $hooks = true;
             $hdet = t('active — last capture') . ' ' . date('Y-m-d H:i', filemtime($sess));
@@ -636,7 +649,7 @@ function supersede_chain(string $id): array {
 
 /* ---------- review queue (LLM candidates awaiting human approval) ---------- */
 
-function queue_file(): string { return proj_root() . '/staging/queue.jsonl'; }
+function queue_file(): string { return data_root() . '/staging/queue.jsonl'; }
 
 function queue_load(): array {
     $f = queue_file();
@@ -688,7 +701,7 @@ function queue_approve(string $qid, array $over = []): bool {
 /* ---------- git status ---------- */
 
 function git_dirty(): ?bool {
-    $root = proj_root();
+    $root = data_root();
     if (!is_dir("$root/.git")) return null;
     if (!function_exists('exec')) return null;
     // PITFALL: shell_exec returns null BOTH on error AND on empty output (= clean repo) — use exec + exit code.
@@ -705,7 +718,7 @@ function git_dirty(): ?bool {
 /* ---------- git history (git.php page) ---------- */
 
 function git_run(array $args): ?array {
-    $root = proj_root();
+    $root = data_root();
     if (!is_dir("$root/.git") || !function_exists('exec')) return null;
     $cmd = 'git -C ' . escapeshellarg($root) . ' -c safe.directory=' . escapeshellarg($root);
     foreach ($args as $a) $cmd .= ' ' . escapeshellarg($a);
@@ -745,7 +758,7 @@ function git_commit_store(string $msg): array {
     $msg = trim($msg) !== '' ? trim($msg) : 'store: updates from the web UI';
     $r = git_run(['add', 'store']);
     if ($r === null || $r['code'] !== 0) return [false, 'git add failed: ' . implode(' ', $r['lines'] ?? [])];
-    $root = proj_root();
+    $root = data_root();
     $cmd = 'git -C ' . escapeshellarg($root) . ' -c safe.directory=' . escapeshellarg($root)
          . ' -c commit.gpgsign=false -c user.name=' . escapeshellarg('mem0ry4ai web')
          . ' -c user.email=' . escapeshellarg('web@mem0ry4ai.local')

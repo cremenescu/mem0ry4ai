@@ -15,8 +15,21 @@ set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
 PORT="${MEM_WEB_PORT:-8841}"
 HOST="127.0.0.1"
-PIDFILE="$DIR/.web-server.pid"
-LOGFILE="$DIR/.web-server.log"
+
+# Data dir (store/, staging/, pidfile, log). Same resolution as mem.py:
+# MEM_DATA_DIR override > plugin-safe default (~/.mem0ry4ai) > next to the code.
+DATA="${MEM_DATA_DIR:-}"
+if [ -z "$DATA" ]; then
+    case "$DIR" in
+        *"/.claude/plugins/"*) DATA="$HOME/.mem0ry4ai" ;;
+        *)                     DATA="$DIR" ;;
+    esac
+fi
+mkdir -p "$DATA" 2>/dev/null
+export MEM_DATA_DIR="$DATA"   # the PHP UI reads the same env var
+
+PIDFILE="$DATA/.web-server.pid"
+LOGFILE="$DATA/.web-server.log"
 
 find_php() {
     # MEM_PHP env override, otherwise whatever is on PATH

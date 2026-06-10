@@ -17,6 +17,11 @@ Cerinte: Python 3.9+, PHP 8+ (pentru web UI), git. Zero alte dependinte — fara
 baza de date vectoriala, fara chei API.
 
 ```bash
+# Varianta plugin (o comanda; datele traiesc in ~/.mem0ry4ai, repo git propriu)
+claude plugin marketplace add cremenescu/mem0ry4ai
+claude plugin install mem0ry4ai@mem0ry4ai
+
+# SAU git clone (datele raman in clona ta)
 git clone https://github.com/cremenescu/mem0ry4ai.git
 cd mem0ry4ai
 
@@ -24,6 +29,8 @@ cd mem0ry4ai
 ./mem.py add --type gotcha --scope global --summary "..." --body "..."
 ./mem.py list
 ./mem.py search "..."             # FTS5 ranked
+./mem.py search "..." --since 2026-05-01
+./mem.py audit                    # raport secrete in store (read-only, nu modifica)
 
 # 2. Web UI (server propriu, fara Apache)
 ./server_web.sh                    # -> http://127.0.0.1:8841/
@@ -41,6 +48,8 @@ python3 hooks/install.py --target user
   (optionala, prin Ollama) trece printr-o coada de review umana — modelele mici sunt zgomotoase
   si supra-increzatoare (masurat).
 - **Coexista cu CLAUDE.md** — nu atinge fisierele tale, namespace propriu.
+- **Redactare de secrete pe orice cale de scriere** (chei API, token-uri, parole, chei private)
+  + `mem.py audit` pentru ce e deja in store. Dezactivabil cu `--no-redact` / `MEM_REDACT=0`.
 - Tipurile **`todo`** si **`status`** raspund la „unde am ramas?" cand revii la un proiect.
 
 ## Licenta

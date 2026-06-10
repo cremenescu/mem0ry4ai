@@ -18,6 +18,9 @@ HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJ = os.path.dirname(HOOK_DIR)
 MEM = os.path.join(PROJ, "mem.py")
 REPO_ROOT = os.path.dirname(PROJ)  # monorepo root (parent of the mem0ry4ai folder)
+# plugin install: the agent cannot guess the plugin path — inject the full mem.py invocation
+PLUGIN_MODE = f"{os.sep}.claude{os.sep}plugins{os.sep}" in PROJ + os.sep
+MEM_CMD = f"python3 {MEM}" if PLUGIN_MODE else "mem.py"
 
 
 def ensure_web_server():
@@ -72,8 +75,8 @@ def main():
     include_bodies = len(recs) <= BODY_THRESHOLD
 
     where = "all projects" if is_root else f"project `{slug}`"
-    hint = ("Look up details with `mem.py search \"...\"`." if include_bodies
-            else "Summaries only; details: `mem.py search \"...\"` or `mem.py list --scope project:<slug>`.")
+    hint = (f"Look up details with `{MEM_CMD} search \"...\"`." if include_bodies
+            else f"Summaries only; details: `{MEM_CMD} search \"...\"` or `{MEM_CMD} list --scope project:<slug>`.")
     lines = [
         "# Relevant memories (mem0ry4ai)",
         f"Persistent context for {where} (source: mem0ry4ai store/*.md). {hint}",
@@ -108,7 +111,7 @@ def main():
         cutoff = (datetime.datetime.now() - datetime.timedelta(days=ROOT_RECENT_DAYS)).strftime("%Y-%m-%d")
         if newest[:10] < cutoff:
             lines.append(f"## Project: {name}")
-            lines.append(f"- ({len(rs)} memories, not touched recently — `mem.py list --scope {scope}`)")
+            lines.append(f"- ({len(rs)} memories, not touched recently — `{MEM_CMD} list --scope {scope}`)")
             lines.append("")
             return
         # status/todo first, then the rest; within the same type, most recent first (stable double sort)
@@ -119,7 +122,7 @@ def main():
         for r in shown:
             lines.append(f"- **[{r['type']}]** {r['summary']}")
         if rest:
-            lines.append(f"- (+{len(rest)} more — `mem.py list --scope {scope}`)")
+            lines.append(f"- (+{len(rest)} more — `{MEM_CMD} list --scope {scope}`)")
         lines.append("")
 
     emit("global", "Global")

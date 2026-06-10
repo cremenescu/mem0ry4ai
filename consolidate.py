@@ -24,6 +24,20 @@ import time
 PROJ = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJ)
 import llm  # noqa: E402
+import redact  # noqa: E402
+
+
+def _data_dir():
+    """Same resolution as mem.py: MEM_DATA_DIR > plugin-safe default > code dir."""
+    d = os.environ.get("MEM_DATA_DIR")
+    if d:
+        return os.path.abspath(os.path.expanduser(d))
+    if f"{os.sep}.claude{os.sep}plugins{os.sep}" in PROJ + os.sep:
+        return os.path.join(os.path.expanduser("~"), ".mem0ry4ai")
+    return PROJ
+
+
+DATA = _data_dir()
 
 MAX_DIGEST = 14000  # transcript characters sent to the model
 
@@ -91,6 +105,12 @@ def digest_transcript(path):
     digest = "\n\n".join(parts)
     if len(digest) > MAX_DIGEST:
         digest = digest[-MAX_DIGEST:]  # keep the recent part (conclusions)
+    # transcripts routinely contain .env reads / curl headers / passwords —
+    # redact BEFORE the text reaches the model, so secrets never enter the pipeline
+    if redact.enabled():
+        digest, found = redact.redact(digest)
+        if found:
+            print(f"  redacted from transcript: {redact.describe(found)}")
     return digest
 
 
@@ -108,11 +128,11 @@ def extract(path, slug):
 
 
 def staging_path():
-    return os.path.join(PROJ, "staging", "sessions.jsonl")
+    return os.path.join(DATA, "staging", "sessions.jsonl")
 
 
 def queue_path():
-    return os.path.join(PROJ, "staging", "queue.jsonl")
+    return os.path.join(DATA, "staging", "queue.jsonl")
 
 
 def gen_qid():
@@ -125,11 +145,18 @@ def queue_candidates(cands, source_session, transcript):
     n = 0
     with open(queue_path(), "a", encoding="utf-8") as f:
         for c in cands:
+            # safety net: the digest is already redacted, but the model may rephrase
+            # something resembling a secret — redact candidates too before queueing
+            summary = (c.get("summary") or "").strip()
+            body = (c.get("body") or "").strip()
+            if redact.enabled():
+                summary, _ = redact.redact(summary)
+                body, _ = redact.redact(body)
             rec = {
                 "qid": gen_qid(),
                 "type": c.get("type"), "scope": c.get("scope") or "global",
-                "summary": (c.get("summary") or "").strip(),
-                "body": (c.get("body") or "").strip(),
+                "summary": summary,
+                "body": body,
                 "confidence": c.get("confidence"),
                 "source": f"llm:session:{source_session}" if source_session else "llm",
                 "transcript": transcript,

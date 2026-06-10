@@ -15,7 +15,20 @@ import time
 
 HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJ = os.path.dirname(HOOK_DIR)
-STAGING = os.path.join(PROJ, "staging")
+
+
+def _data_dir():
+    """Same resolution as mem.py: MEM_DATA_DIR > plugin-safe default > code dir."""
+    d = os.environ.get("MEM_DATA_DIR")
+    if d:
+        return os.path.abspath(os.path.expanduser(d))
+    if f"{os.sep}.claude{os.sep}plugins{os.sep}" in PROJ + os.sep:
+        return os.path.join(os.path.expanduser("~"), ".mem0ry4ai")
+    return PROJ
+
+
+DATA = _data_dir()
+STAGING = os.path.join(DATA, "staging")
 
 
 def derive_transcript(cwd, session_id):
@@ -67,8 +80,19 @@ def auto_commit_store():
     """
     import subprocess
     try:
-        base = ["git", "-C", PROJ, "-c", f"safe.directory={PROJ}"]
-        r = subprocess.run(base + ["status", "--porcelain", "store"],
+        base = ["git", "-C", DATA, "-c", f"safe.directory={DATA}"]
+        if not os.path.isdir(os.path.join(DATA, ".git")):
+            # standalone data dir (plugin install / MEM_DATA_DIR): it gets its own repo,
+            # so the memory timeline works there too
+            if not os.path.isdir(os.path.join(DATA, "store")):
+                return
+            subprocess.run(["git", "init", "-q", DATA], capture_output=True, timeout=10)
+            gi = os.path.join(DATA, ".gitignore")
+            if not os.path.exists(gi):
+                with open(gi, "w", encoding="utf-8") as f:
+                    f.write("staging/\nstore/.index.db\n.web-server.pid\n.web-server.log\n")
+        # -uall: list untracked files individually ('?? store/' alone would yield an empty label)
+        r = subprocess.run(base + ["status", "--porcelain", "-uall", "store"],
                            capture_output=True, text=True, timeout=10)
         if r.returncode != 0 or not r.stdout.strip():
             return

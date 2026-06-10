@@ -1,0 +1,38 @@
+{
+  "description": "mem0ry4ai hooks: inject scoped memories at SessionStart (also auto-starts the web UI), capture transcript pointer + per-scope git checkpoint at PreCompact/SessionEnd. In plugin installs the data lives in ~/.mem0ry4ai (own git repo), so plugin updates never touch your memories.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/session_start.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/capture.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/capture.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

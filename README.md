@@ -22,6 +22,7 @@ agentmemory, the official MCP memory server). Recurring failure modes shaped thi
 | Auto-extraction noise (small LLMs are over-confident: ~1.0 confidence on everything — we measured) | **Trust-gated writes**: the in-context agent writes directly; batch LLM extraction goes through a human review queue |
 | Tools that vandalize CLAUDE.md / fight native memory | Coexists cleanly — own namespace, never touches your files |
 | Nobody remembers "where was I?" on returning to a project | First-class **`todo`** and **`status`** types, pinned in injection and UI |
+| Credentials accumulate in an unencrypted memory file | **Secret redaction on every write path** (8 patterns: API keys, Bearer/GitHub/OpenAI/Slack tokens, AWS keys, private keys, passwords) + `mem.py audit` for what is already stored |
 
 ## Measured impact (author's real setup)
 
@@ -64,6 +65,21 @@ store/*.md   ◄── SOURCE OF TRUTH (markdown + git: audit, diff, rollback, s
 Requirements: Python 3.9+, PHP 8+ (for the web UI), git. No other dependencies — no Docker,
 no vector database, no API keys.
 
+### Option A — Claude Code plugin (one command)
+
+```bash
+claude plugin marketplace add cremenescu/mem0ry4ai
+claude plugin install mem0ry4ai@mem0ry4ai
+```
+
+Restart Claude Code — hooks (inject at start, capture + git checkpoint at end) register
+automatically and the web UI starts with your first session. In plugin installs your data
+lives in **`~/.mem0ry4ai`** (its own git repo, created on first write), so plugin updates
+never touch your memories. The injected context header shows the exact `mem.py` path to
+use from inside a session.
+
+### Option B — git clone (data stays in your clone)
+
 ```bash
 git clone https://github.com/cremenescu/mem0ry4ai.git
 cd mem0ry4ai
@@ -73,7 +89,9 @@ cd mem0ry4ai
   --summary "openrsync on macOS does not support --chown" \
   --body "Use --rsync-path=\"sudo rsync\" and chown separately over ssh."
 ./mem.py list
-./mem.py search "rsync"          # FTS5 ranked
+./mem.py search "rsync"                    # FTS5 ranked
+./mem.py search "rsync" --since 2026-05-01 # ...only memories created since May
+./mem.py audit                             # report secret-like patterns (read-only)
 
 # 2. Web UI (standalone server, no Apache needed)
 ./server_web.sh                   # -> http://127.0.0.1:8841/
@@ -111,6 +129,29 @@ hooks handle recall, the agent handles capture):
 
 `todo` + `status` are pinned first in injection and in the per-project web page — they answer
 "where was I?" when you return to a project after weeks.
+
+## Secret redaction
+
+The store is plain markdown versioned by git — a credential that lands there is hard to remove
+retroactively (it survives in git history). So **every write path redacts secrets by default**,
+replacing values with `[REDACTED:<label>]`:
+
+- `mem.py add` / `mem.py propose` — the saved memory keeps *what kind* of secret was used
+  ("the command used a Bearer token"), never the value.
+- `consolidate.py` — transcripts routinely contain `.env` reads, curl headers and passwords;
+  they are redacted **before** the text even reaches the local LLM, and candidates are
+  redacted again before queueing.
+- `mem.py audit` — read-only report of secret-like patterns already in the store (exit 1 if
+  any found, handy in CI). It never modifies records — you decide what to clean up.
+
+Patterns: generic API/secret/access keys, Bearer tokens, AWS keys, private key blocks,
+quoted passwords, GitHub/OpenAI/Slack tokens. Opt out per call with `--no-redact`, or
+globally with `MEM_REDACT=0`. Infrastructure facts you store on purpose (hosts, paths,
+ports, usernames) are not touched — only credential-shaped values are.
+
+For secrets the agent should be able to *use* across sessions, store a **pointer, not the
+value**: keep the secret in your OS keychain / password manager, and save a `fact` telling
+the agent where it lives and a `command` that fetches it at use time.
 
 ## Web UI
 
@@ -165,6 +206,8 @@ Everything is overridable via environment variables — no config file needed:
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `MEM_DATA_DIR` | next to the code; `~/.mem0ry4ai` in plugin installs | where `store/` + `staging/` live (own git repo) |
+| `MEM_REDACT` | `1` | set `0` to disable secret redaction on write paths |
 | `MEM_WEB_PORT` | `8841` | web UI port (`server_web.sh`) |
 | `MEM_PHP` | `php` from `PATH` | PHP binary (server + conformance test) |
 | `MEM_PYTHON` | `python3` from `PATH` | Python binary used by the "What Claude sees" page |
