@@ -2,6 +2,8 @@
 
 Memorie persistenta, local-first, pentru agenti de cod — construita pentru [Claude Code](https://claude.com/claude-code).
 
+**Pagina proiectului:** [cremenescu.ro/ro/mem0ry4ai](https://cremenescu.ro/ro/mem0ry4ai/)
+
 Agentul uita totul intre sesiuni. mem0ry4ai rezolva asta: capteaza cunostinte durabile (capcane,
 decizii, fapte, comenzi, preferinte, todos, status de proiect), le stocheaza in **markdown simplu
 versionat cu git** si **injecteaza automat felia relevanta** la inceputul fiecarei sesiuni —

@@ -2,6 +2,8 @@
 
 Persistent, local-first memory for coding agents — built for [Claude Code](https://claude.com/claude-code).
 
+**Landing page:** [cremenescu.ro/en/mem0ry4ai](https://cremenescu.ro/en/mem0ry4ai/)
+
 Your agent forgets everything between sessions. mem0ry4ai fixes that: it captures durable
 knowledge (gotchas, decisions, facts, commands, preferences, todos, project status), stores it
 in **plain markdown versioned by git**, and **injects the relevant slice automatically** at the
