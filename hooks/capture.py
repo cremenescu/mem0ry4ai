@@ -72,15 +72,23 @@ def auto_commit_store():
                            capture_output=True, text=True, timeout=10)
         if r.returncode != 0 or not r.stdout.strip():
             return
-        n = len([l for l in r.stdout.splitlines() if l.strip()])
-        subprocess.run(base + ["add", "store"], capture_output=True, timeout=10)
-        subprocess.run(base + ["-c", "commit.gpgsign=false",
-                               "-c", "user.name=mem0ry4ai hook",
-                               "-c", "user.email=hook@mem0ry4ai.local",
-                               "commit", "-m",
-                               f"store: end-of-session checkpoint ({n} files)",
-                               "--", "store"],
-                       capture_output=True, timeout=15)
+        # one commit PER FILE (= per scope): global never mixes with individual projects
+        files = sorted({l[3:].strip() for l in r.stdout.splitlines() if l.strip()})
+        for f in files:
+            if "/projects/" in f:
+                label = f.rsplit("/", 1)[-1].removesuffix(".md")
+            elif f.endswith("global.md"):
+                label = "global"
+            else:
+                label = f.rsplit("/", 1)[-1]
+            subprocess.run(base + ["add", f], capture_output=True, timeout=10)
+            subprocess.run(base + ["-c", "commit.gpgsign=false",
+                                   "-c", "user.name=mem0ry4ai hook",
+                                   "-c", "user.email=hook@mem0ry4ai.local",
+                                   "commit", "-m",
+                                   f"store: checkpoint {label} (end of session)",
+                                   "--", f],
+                           capture_output=True, timeout=15)
     except Exception:
         pass
 
