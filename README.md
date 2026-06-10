@@ -23,6 +23,26 @@ agentmemory, the official MCP memory server). Recurring failure modes shaped thi
 | Tools that vandalize CLAUDE.md / fight native memory | Coexists cleanly — own namespace, never touches your files |
 | Nobody remembers "where was I?" on returning to a project | First-class **`todo`** and **`status`** types, pinned in injection and UI |
 
+## Measured impact (author's real setup)
+
+This is not a synthetic benchmark — it is the author's actual monorepo (30 sub-projects), before
+and after migrating a monolithic `CLAUDE.md` into mem0ry4ai (217 active memories):
+
+| | Before (one big CLAUDE.md) | After (slim CLAUDE.md + injection) |
+|---|---|---|
+| Fixed context loaded at **every** session start | 242,956 bytes (1,832 lines) ≈ ~61k tokens | repo root: 29,169 bytes ≈ ~7.3k tokens · sub-project: 19,044 bytes ≈ ~4.8k tokens |
+| Reduction | — | **88%** (root) / **92%** (sub-project) |
+| Relevance | everything, everywhere (FreeRDP gotchas while editing a weather app) | scoped: global + the current project; `status`/`todo` first |
+| SessionStart hook overhead | — | 69 ms |
+| Live-update poll (no changes) | — | ~1–4 ms |
+
+At the author's measured pace (34 session starts/day) that is roughly **1.8M tokens/day of
+context that no longer gets loaded** — while recall got *better*, because memories are scoped,
+ranked-searchable and pinned by relevance instead of buried in a 240KB file.
+
+*Honest caveats: tokens estimated at ~4 chars/token; with prompt caching the billed savings are
+smaller than the raw numbers; this is one user's setup, not a controlled study.*
+
 ## How it works
 
 ```
