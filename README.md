@@ -95,6 +95,22 @@ hooks handle recall, the agent handles capture):
 
 Bilingual (English default, Romanian via the EN/RO switch in the top bar).
 
+![Dashboard — system status, health checks, recent activity, grouped memories](docs/screenshots/dashboard.png)
+
+*Per-project "where was I?" page — status and todos pinned first:*
+
+![Project page](docs/screenshots/project.png)
+
+*The review queue — the over-confident junk candidate (conf 0.95 for "updated the changelog") is exactly why nothing auto-writes:*
+
+![Review queue](docs/screenshots/queue.png)
+
+*"What Claude sees" — the exact SessionStart injection, with its cost:*
+
+![What Claude sees](docs/screenshots/inject.png)
+
+*(Screenshots use demo data.)*
+
 - **System dashboard**: counters, health checks (store/staging/index/queue/hooks/git), recent
   activity with source attribution, live updates via cheap polling (4 ms when nothing changed).
 - **Per-project page**: status + todos pinned, knowledge grouped by type.
