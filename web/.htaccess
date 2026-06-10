@@ -1,0 +1,6 @@
+Require all granted
+
+# blocheaza include-only
+<FilesMatch "^lib\.php$">
+  Require all denied
+</FilesMatch>

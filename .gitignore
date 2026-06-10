@@ -1,0 +1,14 @@
+# Derived index (regenerable from store/*.md) — never versioned
+store/.index.db*
+
+# Raw episodic staging (captured by hooks, pre-consolidation)
+staging/
+
+# Standalone web server runtime
+.web-server.pid
+.web-server.log
+
+# macOS / Python
+.DS_Store
+__pycache__/
+*.pyc
