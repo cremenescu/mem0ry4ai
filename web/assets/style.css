@@ -244,3 +244,21 @@ pre.inject { background: var(--panel); border: 1px solid var(--line); border-rad
 .lang-switch a { font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 999px; color: var(--muted); }
 .lang-switch a.on { background: var(--accent); color: #fff; }
 .lang-switch a:hover { text-decoration: none; }
+
+/* git history (git.php) */
+.gitlog { display: flex; flex-direction: column; gap: 6px; }
+.gcommit { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.ghead { display: flex; align-items: baseline; gap: 12px; padding: 9px 14px; cursor: pointer; }
+.ghead:hover { background: var(--sel); }
+.ghash { color: var(--accent); font-size: 12px; flex: 0 0 auto; }
+.gsubj { font-size: 13.5px; font-weight: 600; flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gdate { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.gdiff { margin: 0; padding: 12px 14px; background: var(--panel2); border-top: 1px solid var(--line);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5;
+  white-space: pre-wrap; max-height: 480px; overflow: auto; }
+.dl-add { color: var(--ok); }
+.dl-del { color: var(--err); }
+.dl-meta { color: var(--accent); font-weight: 600; }
+.dirty-list { margin: 0; padding-left: 18px; }
+.dirty-list li { font-size: 13px; padding: 1px 0; }

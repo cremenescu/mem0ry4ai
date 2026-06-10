@@ -191,6 +191,26 @@ function ro_strings(): array {
         'Review queue (health)' => 'Coada review',
         'Claude Code hooks' => 'Hooks Claude Code',
         'Git store' => 'Git store',
+        // git history page
+        'Git history' => 'Istoric git',
+        'the store timeline · last' => 'timeline-ul store-ului · ultimele',
+        'commits' => 'commit-uri',
+        'Git unavailable (not a repo, or exec is disabled in PHP).' => 'Git indisponibil (nu e repo, sau exec e dezactivat in PHP).',
+        'Uncommitted changes' => 'Modificari necomise',
+        'commit message (empty = default message)' => 'mesaj de commit (gol = mesaj implicit)',
+        'Commit the store' => 'Comite store-ul',
+        'Store clean — everything is committed.' => 'Store curat — toate schimbarile sunt comise.',
+        'Only commits touching' => 'Doar commit-urile care ating',
+        '(the memory). Code has its own history in the same repo.' => '(memoria). Codul are istoricul lui in acelasi repo.',
+        'Committed:' => 'Comis:',
+        'Loading...' => 'Se incarca...',
+        'Failed to load the diff.' => 'Eroare la incarcarea diff-ului.',
+        '(diff unavailable)' => '(diff indisponibil)',
+        'git.help' => 'Fiecare commit pe store/ = un pas in evolutia memoriei: ce s-a invatat, ce s-a supersedat, cand.',
+        'Diff' => 'Diff',
+        'git.help.diff' => 'Click pe un commit → diff-ul lui (doar fisierele din store). Verde = adaugat, rosu = scos. Cel mai recent se deschide automat.',
+        'Commit from the UI' => 'Comite din UI',
+        'git.help.commit' => 'Butonul comite DOAR store/, cu autor mem0ry4ai web si fara signing. Functioneaza cand serverul ruleaza ca userul tau (server_web.sh).',
     ];
 }
 
@@ -674,6 +694,61 @@ function git_dirty(): ?bool {
     @exec($cmd, $lines, $code);
     if ($code !== 0) return null;
     return count(array_filter($lines, fn($l) => trim($l) !== '')) > 0;
+}
+
+
+/* ---------- git history (git.php page) ---------- */
+
+function git_run(array $args): ?array {
+    $root = proj_root();
+    if (!is_dir("$root/.git") || !function_exists('exec')) return null;
+    $cmd = 'git -C ' . escapeshellarg($root) . ' -c safe.directory=' . escapeshellarg($root);
+    foreach ($args as $a) $cmd .= ' ' . escapeshellarg($a);
+    $cmd .= ' 2>&1';
+    $lines = []; $code = 1;
+    @exec($cmd, $lines, $code);
+    return ['code' => $code, 'lines' => $lines];
+}
+
+// Commits touching store/ (the memory timeline): hash, date, subject.
+function git_store_log(int $n = 30): array {
+    $r = git_run(['log', "-$n", '--date=format:%Y-%m-%d %H:%M', '--pretty=format:%h|%ad|%s', '--', 'store']);
+    if ($r === null || $r['code'] !== 0) return [];
+    $out = [];
+    foreach ($r['lines'] as $l) {
+        $p = explode('|', $l, 3);
+        if (count($p) === 3) $out[] = ['hash' => $p[0], 'date' => $p[1], 'subject' => $p[2]];
+    }
+    return $out;
+}
+
+function git_store_diff(string $hash): ?string {
+    if (!preg_match('/^[0-9a-f]{7,40}$/', $hash)) return null;
+    $r = git_run(['show', $hash, '--stat', '--patch', '--no-color', '--', 'store']);
+    if ($r === null || $r['code'] !== 0) return null;
+    return implode("\n", $r['lines']);
+}
+
+function git_dirty_files(): array {
+    $r = git_run(['status', '--porcelain', 'store']);
+    if ($r === null || $r['code'] !== 0) return [];
+    return array_values(array_filter(array_map('trim', $r['lines'])));
+}
+
+// Commit store/ changes (runs as the server user; signing off so a locked keychain cannot block it).
+function git_commit_store(string $msg): array {
+    $msg = trim($msg) !== '' ? trim($msg) : 'store: updates from the web UI';
+    $r = git_run(['add', 'store']);
+    if ($r === null || $r['code'] !== 0) return [false, 'git add failed: ' . implode(' ', $r['lines'] ?? [])];
+    $root = proj_root();
+    $cmd = 'git -C ' . escapeshellarg($root) . ' -c safe.directory=' . escapeshellarg($root)
+         . ' -c commit.gpgsign=false -c user.name=' . escapeshellarg('mem0ry4ai web')
+         . ' -c user.email=' . escapeshellarg('web@mem0ry4ai.local')
+         . ' commit -m ' . escapeshellarg($msg) . ' -- store 2>&1';
+    $lines = []; $code = 1;
+    @exec($cmd, $lines, $code);
+    if ($code !== 0) return [false, implode(' ', array_slice($lines, 0, 3))];
+    return [true, $lines[0] ?? 'committed'];
 }
 
 /* ---------- csrf + flash + render ---------- */
