@@ -211,7 +211,10 @@ function ro_strings(): array {
         'Diff' => 'Diff',
         'git.help.diff' => 'Click pe un commit → diff-ul lui (doar fisierele din store). Verde = adaugat, rosu = scos.',
         'Commit from the UI' => 'Comite din UI',
-        'git.help.commit' => 'Butonul comite DOAR store/, cu autor mem0ry4ai web si fara signing. Functioneaza cand serverul ruleaza ca userul tau (server_web.sh).',
+        'git.help.commit' => 'Butonul comite DOAR store/, cu autor mem0ry4ai web si fara signing. Optional — checkpoint-ul automat vine oricum la finalul sesiunii.',
+        'The page updates itself.' => 'Pagina se actualizeaza singura.',
+        'Live' => 'Live',
+        'git.help.live' => 'Lista se actualizeaza singura cand apar commit-uri sau modificari noi (poll la 4s). Diff-urile deschise raman deschise.',
     ];
 }
 

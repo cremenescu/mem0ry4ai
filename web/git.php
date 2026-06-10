@@ -1,9 +1,56 @@
 <?php
 // SPDX-License-Identifier: GPL-2.0-or-later
-// mem0ry4ai — git history of the store: the memory timeline (commits on store/), per-commit diff, commit from the UI.
+// mem0ry4ai — git history of the store: the memory timeline (commits on store/), per-commit diff,
+// commit from the UI, live updates without refresh (poll on HEAD + dirty state).
 declare(strict_types=1);
-session_start();
 require __DIR__ . '/lib.php';
+
+// Page fingerprint: latest commit on store + dirty state. Changes on any checkpoint/write.
+function git_page_version(): string {
+    $head = git_run(['log', '-1', '--format=%H', '--', 'store']);
+    $dirty = git_run(['status', '--porcelain', 'store']);
+    return md5(implode('|', $head['lines'] ?? []) . '#' . implode('|', $dirty['lines'] ?? []));
+}
+
+// Fragment: the uncommitted-changes card (or the "clean" note) — single source for page and poll.
+function render_dirty_card(array $dirty, string $csrf, bool $hasLog): string {
+    ob_start();
+    if ($dirty): ?>
+  <div class="card">
+    <h3><?= t('Uncommitted changes') ?> (<?= count($dirty) ?>)</h3>
+    <ul class="dirty-list">
+      <?php foreach ($dirty as $f): ?><li><code><?= h($f) ?></code></li><?php endforeach; ?>
+    </ul>
+    <form method="post" class="form-actions" style="margin-top:10px">
+      <input type="hidden" name="csrf" value="<?= h($csrf) ?>">
+      <input type="text" name="msg" placeholder="<?= t('commit message (empty = default message)') ?>" style="flex:1 1 280px">
+      <button class="btn btn-primary" type="submit"><?= t('Commit the store') ?></button>
+    </form>
+  </div>
+    <?php elseif ($hasLog): ?>
+  <p class="meta"><?= t('Store clean — everything is committed.') ?></p>
+    <?php endif;
+    return ob_get_clean();
+}
+
+// Fragment: the commit list.
+function render_gitlog(array $log): string {
+    ob_start(); ?>
+  <div class="gitlog">
+    <?php foreach ($log as $c): ?>
+    <div class="gcommit" data-hash="<?= h($c['hash']) ?>">
+      <div class="ghead" onclick="toggleDiff(this)">
+        <code class="ghash"><?= h($c['hash']) ?></code>
+        <span class="gsubj"><?= h($c['subject']) ?></span>
+        <span class="gdate"><?= h($c['date']) ?></span>
+      </div>
+      <pre class="gdiff" style="display:none" data-loaded="0"></pre>
+    </div>
+    <?php endforeach; ?>
+  </div>
+<?php
+    return ob_get_clean();
+}
 
 /* AJAX: one commit's diff */
 if (isset($_GET['diff'])) {
@@ -12,6 +59,32 @@ if (isset($_GET['diff'])) {
     echo $d ?? t('(diff unavailable)');
     exit;
 }
+
+/* AJAX: live poll (hold the session only long enough to grab the CSRF token) */
+if (isset($_GET['poll'])) {
+    session_start();
+    $csrf = csrf_token();
+    session_write_close();
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    $ver = git_page_version();
+    if (($_GET['ver'] ?? '') === $ver) {
+        echo json_encode(['changed' => false, 'ver' => $ver]);
+        exit;
+    }
+    $dirty = git_dirty_files();
+    $log = git_store_log(40);
+    echo json_encode([
+        'changed' => ($_GET['ver'] ?? '') !== '',
+        'ver' => $ver,
+        'count' => count($log),
+        'dirty_html' => render_dirty_card($dirty, $csrf, $log !== []),
+        'log_html' => render_gitlog($log),
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+session_start();
 
 /* POST: commit the store changes */
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -43,7 +116,7 @@ $flash = take_flash();
 <main>
 <div class="layout">
 <div class="content">
-  <h2><?= t('Git history') ?> <span class="count"><?= t('the store timeline · last') ?> <?= count($log) ?> <?= t('commits') ?></span></h2>
+  <h2><?= t('Git history') ?> <span class="count"><?= t('the store timeline · last') ?> <span id="gcount"><?= count($log) ?></span> <?= t('commits') ?></span></h2>
 
   <?php if ($flash): ?><div class="flash flash-<?= h($flash[1]) ?>"><?= h($flash[0]) ?></div><?php endif; ?>
 
@@ -51,47 +124,21 @@ $flash = take_flash();
     <div class="empty"><?= t('Git unavailable (not a repo, or exec is disabled in PHP).') ?></div>
   <?php endif; ?>
 
-  <?php if ($dirty): ?>
-  <div class="card">
-    <h3><?= t('Uncommitted changes') ?> (<?= count($dirty) ?>)</h3>
-    <ul class="dirty-list">
-      <?php foreach ($dirty as $f): ?><li><code><?= h($f) ?></code></li><?php endforeach; ?>
-    </ul>
-    <form method="post" class="form-actions" style="margin-top:10px">
-      <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
-      <input type="text" name="msg" placeholder="<?= t('commit message (empty = default message)') ?>" style="flex:1 1 280px">
-      <button class="btn btn-primary" type="submit"><?= t('Commit the store') ?></button>
-    </form>
-  </div>
-  <?php elseif ($log): ?>
-  <p class="meta"><?= t('Store clean — everything is committed.') ?></p>
-  <?php endif; ?>
+  <div id="dirty-area"><?= render_dirty_card($dirty, csrf_token(), $log !== []) ?></div>
+  <div id="gitlog-area"><?= render_gitlog($log) ?></div>
 
-  <?php if ($log): ?>
-  <div class="gitlog">
-    <?php foreach ($log as $c): ?>
-    <div class="gcommit" data-hash="<?= h($c['hash']) ?>">
-      <div class="ghead" onclick="toggleDiff(this)">
-        <code class="ghash"><?= h($c['hash']) ?></code>
-        <span class="gsubj"><?= h($c['subject']) ?></span>
-        <span class="gdate"><?= h($c['date']) ?></span>
-      </div>
-      <pre class="gdiff" style="display:none" data-loaded="0"></pre>
-    </div>
-    <?php endforeach; ?>
-  </div>
-  <?php endif; ?>
-
-  <p class="foot"><?= t('Only commits touching') ?> <code>store/</code> <?= t('(the memory). Code has its own history in the same repo.') ?></p>
+  <p class="foot"><?= t('Only commits touching') ?> <code>store/</code> <?= t('(the memory). Code has its own history in the same repo.') ?> <?= t('The page updates itself.') ?></p>
 </div><!-- /content -->
 
 <aside class="help">
   <h3><?= t('Git history') ?></h3>
-  <p><?= ui_lang() === 'ro' ? t('git.help') : 'Every commit on <code>store/</code> is one step in the memory\'s evolution: what was learned, what got superseded, when.' ?></p>
+  <p><?= ui_lang() === 'ro' ? t('git.help') : 'Every commit on <code>store/</code> is one step in the memory\'s evolution: what was learned, what got superseded, when. Checkpoints happen automatically at session end, one commit per scope.' ?></p>
   <h4><?= t('Diff') ?></h4>
   <p><?= ui_lang() === 'ro' ? t('git.help.diff') : 'Click a commit → its diff (store files only). Green = added, red = removed.' ?></p>
   <h4><?= t('Commit from the UI') ?></h4>
-  <p><?= ui_lang() === 'ro' ? t('git.help.commit') : 'The button commits ONLY <code>store/</code>, authored as <code>mem0ry4ai web</code>, no signing. Works when the server runs as your user (<code>server_web.sh</code>).' ?></p>
+  <p><?= ui_lang() === 'ro' ? t('git.help.commit') : 'The button commits ONLY <code>store/</code>, authored as <code>mem0ry4ai web</code>, no signing. Optional — the automatic checkpoint comes at session end anyway.' ?></p>
+  <h4><?= t('Live') ?></h4>
+  <p><?= ui_lang() === 'ro' ? t('git.help.live') : 'The list updates itself when new commits or changes appear (4s poll). Open diffs stay open.' ?></p>
 </aside>
 </div><!-- /layout -->
 </main>
@@ -121,6 +168,42 @@ function toggleDiff(head){
     })
     .catch(function(){ box.textContent = TXT.fail; });
 }
+
+/* live poll: the list + dirty card update in place; open diffs are reopened */
+var pollVer = '';
+var pollBusy = false;
+function pollGit(){
+  if (pollBusy || document.hidden) return;
+  pollBusy = true;
+  fetch('git.php?poll=1&ver=' + encodeURIComponent(pollVer))
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      pollBusy = false;
+      if (!j.ver) return;
+      if (pollVer === '') { pollVer = j.ver; return; }
+      if (!j.changed) return;
+      pollVer = j.ver;
+      var open = [];
+      document.querySelectorAll('.gcommit').forEach(function(c){
+        var d = c.querySelector('.gdiff');
+        if (d && d.style.display !== 'none') open.push(c.dataset.hash);
+      });
+      document.getElementById('dirty-area').innerHTML = j.dirty_html;
+      var ga = document.getElementById('gitlog-area');
+      ga.innerHTML = j.log_html;
+      var gc = document.getElementById('gcount'); if (gc) gc.textContent = j.count;
+      flashEl(ga);
+      open.forEach(function(h){
+        var c = document.querySelector('.gcommit[data-hash="' + h + '"] .ghead');
+        if (c) toggleDiff(c);
+      });
+    })
+    .catch(function(){ pollBusy = false; });
+}
+function flashEl(el){ el.style.transition = 'none'; el.style.background = 'rgba(0,111,255,.07)';
+  setTimeout(function(){ el.style.transition = 'background 1.2s'; el.style.background = ''; }, 60); }
+setInterval(pollGit, 4000);
+pollGit();
 </script>
 </body>
 </html>
