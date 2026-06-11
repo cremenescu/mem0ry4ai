@@ -204,6 +204,11 @@ function ro_strings(): array {
         'FTS index' => 'Index FTS',
         'Review queue (health)' => 'Coada review',
         'Claude Code hooks' => 'Hooks Claude Code',
+        'SessionStart injection' => 'Injectare SessionStart',
+        'budget' => 'buget',
+        'critical rules' => 'reguli critice',
+        'critical rule: always injected, first, at SessionStart' => 'regula critica: injectata garantat, prima, la SessionStart',
+        'critical rules are always in; the rest is trimmed deterministically.' => 'regulile critice intra garantat; restul se taie controlat.',
         'Git store' => 'Git store',
         // git history page
         'Git history' => 'Istoric git',
@@ -345,6 +350,7 @@ function render_record(array $r): string {
         "- updated: {$r['updated']}",
         "- status: {$r['status']}",
     ];
+    if (!empty($r['priority'])) $lines[] = "- priority: {$r['priority']}";
     if (!empty($r['superseded-by'])) $lines[] = "- superseded-by: {$r['superseded-by']}";
     $lines[] = "- confidence: {$r['confidence']}";
     $lines[] = "- source: {$r['source']}";
@@ -412,6 +418,7 @@ function update_record(string $id, array $fields): bool {
             'source' => $m['source'] ?? 'web',
             'body' => $fields['body'] ?? $r['body'],
         ];
+        if (!empty($m['priority'])) $data['priority'] = $m['priority'];
         if (!empty($m['superseded-by'])) $data['superseded-by'] = $m['superseded-by'];
         return render_record($data);
     });
@@ -427,6 +434,7 @@ function supersede_record(string $id, string $by = ''): bool {
             'status' => 'superseded', 'confidence' => $m['confidence'] ?? '1.0',
             'source' => $m['source'] ?? 'web', 'body' => $r['body'],
         ];
+        if (!empty($m['priority'])) $data['priority'] = $m['priority'];
         if ($by !== '') $data['superseded-by'] = $by;
         return render_record($data);
     });
@@ -547,11 +555,37 @@ function health_checks(): array {
         }
     }
     $out[] = [t('Claude Code hooks'), $hooks, $hdet];
+    // the injection must fit its own budget (below the harness persist/truncation threshold)
+    [$isz, $ibud, $ncrit] = injection_stats();
+    if ($isz !== null) {
+        $out[] = [t('SessionStart injection'), $isz <= $ibud,
+                  round($isz / 1024, 1) . ' KB / ' . t('budget') . ' ' . round($ibud / 1024, 1) . " KB · $ncrit " . t('critical rules')];
+    }
     $dirty = git_dirty();
     // dirty is not an error: the SessionEnd hook auto-commits the store -> informative gray
     $out[] = [t('Git store'), $dirty === null ? null : ($dirty ? null : true),
               $dirty === null ? t('unknown') : ($dirty ? t('uncommitted — auto-checkpoint at session end') : t('clean'))];
     return $out;
+}
+
+// Real size of the injection (root mode = the maximal case) vs its budget + critical rule count.
+function injection_stats(): array {
+    $py = getenv('MEM_PYTHON') ?: 'python3';
+    $hook = proj_root() . '/hooks/session_start.py';
+    if (!is_file($hook) || !function_exists('exec')) return [null, 0, 0];
+    $bud = (int)(getenv('MEM_INJECT_BUDGET') ?: 8000);
+    $root = dirname(proj_root());
+    $payload = json_encode(['cwd' => $root, 'source' => 'health']);
+    $cmd = 'echo ' . escapeshellarg($payload) . ' | ' . escapeshellarg($py) . ' ' . escapeshellarg($hook) . ' 2>/dev/null';
+    $lines = []; $code = 1;
+    @exec($cmd, $lines, $code);
+    if ($code !== 0) return [null, $bud, 0];
+    $outtxt = implode("\n", $lines);
+    $ncrit = 0;
+    foreach (all_records() as $r) {
+        if (($r['meta']['priority'] ?? '') === 'critical' && ($r['meta']['status'] ?? 'active') === 'active') $ncrit++;
+    }
+    return [strlen($outtxt), $bud, $ncrit];
 }
 
 /* ---------- server-side FTS5 search (same index as mem.py) ---------- */

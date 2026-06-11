@@ -50,6 +50,10 @@ python3 hooks/install.py --target user
 - **Coexista cu CLAUDE.md** — nu atinge fisierele tale, namespace propriu.
 - **Redactare de secrete pe orice cale de scriere** (chei API, token-uri, parole, chei private)
   + `mem.py audit` pentru ce e deja in store. Dezactivabil cu `--no-redact` / `MEM_REDACT=0`.
+- **Reguli critice + buget de injectare**: `mem.py pin <id>` marcheaza regulile care conditioneaza
+  actiunile agentului — intra GARANTAT, primele, cu tot cu body; restul umple `MEM_INJECT_BUDGET`
+  (default 8000 bytes), iar orice taietura e anuntata explicit. Injectarea se taie singura,
+  determinist — niciodata harness-ul, orb.
 - Tipurile **`todo`** si **`status`** raspund la „unde am ramas?" cand revii la un proiect.
 
 ## Licenta

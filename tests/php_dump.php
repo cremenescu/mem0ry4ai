@@ -20,6 +20,7 @@ foreach (all_records() as $r) {
         'created'       => $m['created'] ?? null,
         'updated'       => $m['updated'] ?? null,
         'superseded_by' => $m['superseded-by'] ?? null,
+        'priority'      => $m['priority'] ?? null,
         'body'          => $r['body'],
     ];
 }

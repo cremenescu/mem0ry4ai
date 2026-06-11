@@ -85,7 +85,9 @@ $tokens = (int)round($bytes / 4);   // rough estimate: ~4 chars/token
   <?php elseif (trim((string)$output) === ''): ?>
     <div class="empty"><?= t('The hook injects nothing for') ?> <?= h($label) ?> <?= t('(no relevant memories).') ?></div>
   <?php else: ?>
-    <p class="inject-meta"><?= t('Injection for') ?> <b><?= h($label) ?></b>: <b><?= number_format($bytes) ?> <?= t('bytes') ?></b> ≈ ~<?= number_format($tokens) ?> <?= t('tokens (approx.)') ?>.
+    <?php $ibud = (int)(getenv('MEM_INJECT_BUDGET') ?: 8000); ?>
+    <p class="inject-meta"><?= t('Injection for') ?> <b><?= h($label) ?></b>: <b><?= number_format($bytes) ?> <?= t('bytes') ?></b> ≈ ~<?= number_format($tokens) ?> <?= t('tokens (approx.)') ?>
+      · <?= t('budget') ?> <?= number_format($ibud) ?> bytes (MEM_INJECT_BUDGET) — <?= t('critical rules are always in; the rest is trimmed deterministically.') ?>
       <?= ui_lang() === 'ro' ? t('inject.exact') : 'This is the exact output of the real hook (<code>hooks/session_start.py</code>), not an approximation.' ?></p>
     <pre class="inject"><?= h($output) ?></pre>
   <?php endif; ?>

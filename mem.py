@@ -143,7 +143,8 @@ def all_records():
     return out
 
 
-def render_record(rid, rtype, scope, summary, body, confidence, source, created, updated, status):
+def render_record(rid, rtype, scope, summary, body, confidence, source, created, updated, status,
+                  priority=None):
     lines = [
         f"<!-- mem:start id={rid} -->",
         f"### {rtype} · {scope_label(scope)} · {summary}",
@@ -152,6 +153,10 @@ def render_record(rid, rtype, scope, summary, body, confidence, source, created,
         f"- created: {created}",
         f"- updated: {updated}",
         f"- status: {status}",
+    ]
+    if priority:
+        lines.append(f"- priority: {priority}")
+    lines += [
         f"- confidence: {confidence}",
         f"- source: {source}",
         "",
@@ -185,10 +190,12 @@ def cmd_add(a):
     ensure_header(path, a.scope)
     rid = gen_id()
     rec = render_record(rid, a.type, a.scope, summary, body,
-                        a.confidence, a.source, now_ts(), now_ts(), "active")
+                        a.confidence, a.source, now_ts(), now_ts(), "active",
+                        priority="critical" if a.critical else None)
     with open(path, "a", encoding="utf-8") as f:
         f.write("\n" + rec)
-    print(f"added {rid}  [{a.type} · {a.scope}]  -> {os.path.relpath(path, DATA)}")
+    crit = "  [CRITICAL]" if a.critical else ""
+    print(f"added {rid}  [{a.type} · {a.scope}]{crit}  -> {os.path.relpath(path, DATA)}")
 
 
 def _match_filters(rec, scope, rtype, status, since=None, until=None):
@@ -234,7 +241,8 @@ def cmd_list(a):
             "summary": record_summary(r), "status": r["meta"].get("status", "active"),
             "confidence": r["meta"].get("confidence"), "source": r["meta"].get("source"),
             "created": r["meta"].get("created"), "updated": r["meta"].get("updated"),
-            "superseded_by": r["meta"].get("superseded-by"), "body": r["body"],
+            "superseded_by": r["meta"].get("superseded-by"),
+            "priority": r["meta"].get("priority"), "body": r["body"],
         } for r in recs]
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return
@@ -394,6 +402,42 @@ def cmd_supersede(a):
     sys.exit(f"id not found: {a.id}")
 
 
+def _set_priority(rec_id, priority):
+    """In-place meta edit: set (pin) or remove (unpin) the priority field of a record."""
+    for path in store_files():
+        for r in parse_file(path):
+            if r["id"] != rec_id:
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            new_block = []
+            for k in range(r["start"], r["end"] + 1):
+                line = lines[k]
+                mm = META_RE.match(line.rstrip("\n"))
+                if mm and mm.group("k") == "priority":
+                    continue  # drop the existing priority line; re-added below if pinning
+                if mm and mm.group("k") == "updated":
+                    line = f"- updated: {now_ts()}\n"
+                new_block.append(line)
+                if priority and mm and mm.group("k") == "status":
+                    new_block.append(f"- priority: {priority}\n")
+            lines[r["start"]:r["end"] + 1] = new_block
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            return os.path.relpath(path, DATA)
+    sys.exit(f"id not found: {rec_id}")
+
+
+def cmd_pin(a):
+    rel = _set_priority(a.id, "critical")
+    print(f"pinned {a.id} -> priority: critical (ALWAYS injected, first, at SessionStart)  in {rel}")
+
+
+def cmd_unpin(a):
+    rel = _set_priority(a.id, None)
+    print(f"unpinned {a.id} (normal priority)  in {rel}")
+
+
 def cmd_audit(a):
     """Report records containing secret-like patterns. Never modifies anything."""
     recs = [r for r in all_records() if _match_filters(r, a.scope, None, "all")]
@@ -470,6 +514,8 @@ def main():
     pa.add_argument("--confidence", default="1.0")
     pa.add_argument("--source", default="manual")
     pa.add_argument("--no-redact", action="store_true", help="keep secret values verbatim (redacted by default)")
+    pa.add_argument("--critical", action="store_true",
+                    help="critical action rule: ALWAYS injected, first, regardless of the budget")
     pa.set_defaults(func=cmd_add)
 
     pl = sub.add_parser("list", help="list memories")
@@ -507,6 +553,14 @@ def main():
     pu = sub.add_parser("audit", help="report secret-like patterns in the store (read-only)")
     pu.add_argument("--scope")
     pu.set_defaults(func=cmd_audit)
+
+    pn = sub.add_parser("pin", help="mark a memory as a critical rule (always injected, first)")
+    pn.add_argument("id")
+    pn.set_defaults(func=cmd_pin)
+
+    pf = sub.add_parser("unpin", help="remove the critical-rule mark")
+    pf.add_argument("id")
+    pf.set_defaults(func=cmd_unpin)
 
     px = sub.add_parser("reindex", help="rebuild the derived FTS5 index from markdown")
     px.set_defaults(func=cmd_reindex)

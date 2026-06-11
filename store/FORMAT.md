@@ -32,6 +32,8 @@ REDIRECT_HTTP_AUTHORIZATION, then getallheaders(). Without this every authentica
 - `scope` = `global` or `project:<slug>`
 - `created` / `updated` — `YYYY-MM-DD HH:MM:SS`
 - `status` ∈ `active` | `superseded`
+- `priority: critical` — optional; a critical action rule: ALWAYS injected, first, with its body,
+  regardless of the injection budget (`mem.py pin <id>` / `unpin`, or `add --critical`)
 - `superseded-by: <id>` — present only when `status: superseded` (records are never deleted —
   history is preserved, plus git)
 - `confidence` — `0.0`..`1.0` (manual = `1.0`; LLM-extracted candidates carry the model's score)

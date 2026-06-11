@@ -66,13 +66,33 @@ def main():
     if not recs:
         return 0
 
+    # BUDGET: the injection trims ITSELF below the harness threshold. If the output grew
+    # unbounded, the harness would persist it to a file and show the model only a small
+    # preview — an UNCONTROLLED cut that can silently drop a rule the agent must follow.
+    # Here the cut is ours: critical rules always in, the rest fills the budget, anything
+    # omitted is announced explicitly with the command that retrieves it.
+    BUDGET = int(os.environ.get("MEM_INJECT_BUDGET", "8000"))
+
+    critical = [r for r in recs if r.get("priority") == "critical"]
+    normal = [r for r in recs if r.get("priority") != "critical"]
+
     by_scope = {}
-    for r in recs:
+    for r in normal:
         by_scope.setdefault(r["scope"], []).append(r)
 
     # Progressive disclosure: above the threshold inject summaries only, below it bodies too.
     BODY_THRESHOLD = 12
     include_bodies = len(recs) <= BODY_THRESHOLD
+
+    TYPE_PRIO = {"status": 0, "todo": 1, "gotcha": 2, "decision": 3, "preference": 4, "fact": 5, "command": 6}
+
+    def rec_date(r):
+        return (r.get("created") or "")[:19]
+
+    def ordered(rs):
+        # status/todo first, then the rest; within the same type, most recent first (stable double sort)
+        rs = sorted(rs, key=rec_date, reverse=True)
+        return sorted(rs, key=lambda r: TYPE_PRIO.get(r["type"], 9))
 
     where = "all projects" if is_root else f"project `{slug}`"
     hint = (f"Look up details with `{MEM_CMD} search \"...\"`." if include_bodies
@@ -83,54 +103,105 @@ def main():
         "",
     ]
 
-    def emit(scope, title):
-        rs = by_scope.get(scope)
-        if not rs:
-            return
-        lines.append(f"## {title}")
-        for r in rs:
-            lines.append(f"- **[{r['type']}]** {r['summary']}")
-            if include_bodies:
-                body = (r.get("body") or "").strip()
-                for bl in body.splitlines():
-                    lines.append(f"  {bl}")
+    # --- Critical rules: ALWAYS first, with bodies, outside the budget ---
+    if critical:
+        lines.append("## Critical rules (mandatory in every task)")
+        for r in sorted(critical, key=lambda r: (r["scope"] != "global", rec_date(r))):
+            sl = "global" if r["scope"] == "global" else r["scope"].split(":", 1)[1]
+            lines.append(f"- **[{r['type']} · {sl}]** {r['summary']}")
+            for bl in (r.get("body") or "").strip().splitlines():
+                lines.append(f"  {bl}")
         lines.append("")
 
-    # Root mode: per-project cap + collapse for projects not touched recently (keeps injection lean).
-    ROOT_RECENT_DAYS = 30
-    ROOT_MAX_PER_PROJECT = 10
-    TYPE_PRIO = {"status": 0, "todo": 1, "gotcha": 2, "decision": 3, "preference": 4, "fact": 5, "command": 6}
+    size = lambda: len(("\n".join(lines)).encode("utf-8"))
 
-    def rec_date(r):
-        return (r.get("created") or "")[:19]
+    def emit_budgeted(title, rs, list_hint, limit=None):
+        """Emit a section item by item while the budget allows; announce what was cut.
+
+        `limit` caps THIS section (sub-allocation), so one big section cannot starve
+        the ones after it; the global BUDGET still bounds the total.
+        """
+        if not rs:
+            return True
+        cap = min(limit or BUDGET, BUDGET)
+        head_at = len(lines)
+        lines.append(f"## {title}")
+        shown = 0
+        for r in rs:
+            item = [f"- **[{r['type']}]** {r['summary']}"]
+            if include_bodies:
+                item += [f"  {bl}" for bl in (r.get("body") or "").strip().splitlines()]
+            lines.extend(item)
+            if size() > cap - 120:   # reserve for the omission note
+                del lines[len(lines) - len(item):]
+                break
+            shown += 1
+        if shown < len(rs):
+            if shown == 0:
+                del lines[head_at:]
+                lines.append(f"## {title}")
+                lines.append(f"- ({len(rs)} memories — `{list_hint}`)")
+                lines.append("")
+                return False
+            lines.append(f"- (+{len(rs) - shown} omitted by budget — `{list_hint}`)")
+            lines.append("")
+            return False
+        lines.append("")
+        return True
+
+    ROOT_RECENT_DAYS = 30
+    ROOT_MAX_PER_PROJECT = 6
 
     def emit_project_capped(scope):
+        """Root mode: one capped block per project. Returns False when the budget is gone."""
         rs = by_scope[scope]
         name = scope.split(":", 1)[1]
         newest = max((rec_date(r) for r in rs), default="")
         cutoff = (datetime.datetime.now() - datetime.timedelta(days=ROOT_RECENT_DAYS)).strftime("%Y-%m-%d")
+        hint_cmd = f"{MEM_CMD} list --scope {scope}"
         if newest[:10] < cutoff:
-            lines.append(f"## Project: {name}")
-            lines.append(f"- ({len(rs)} memories, not touched recently — `{MEM_CMD} list --scope {scope}`)")
-            lines.append("")
-            return
-        # status/todo first, then the rest; within the same type, most recent first (stable double sort)
-        rs = sorted(rs, key=rec_date, reverse=True)
-        rs = sorted(rs, key=lambda r: TYPE_PRIO.get(r["type"], 9))
-        shown, rest = rs[:ROOT_MAX_PER_PROJECT], rs[ROOT_MAX_PER_PROJECT:]
-        lines.append(f"## Project: {name}")
-        for r in shown:
-            lines.append(f"- **[{r['type']}]** {r['summary']}")
-        if rest:
-            lines.append(f"- (+{len(rest)} more — `{MEM_CMD} list --scope {scope}`)")
-        lines.append("")
+            block = [f"## Project: {name}",
+                     f"- ({len(rs)} memories, not touched recently — `{hint_cmd}`)", ""]
+        else:
+            rs = ordered(rs)
+            shown, rest = rs[:ROOT_MAX_PER_PROJECT], rs[ROOT_MAX_PER_PROJECT:]
+            block = [f"## Project: {name}"]
+            block += [f"- **[{r['type']}]** {r['summary']}" for r in shown]
+            if rest:
+                block.append(f"- (+{len(rest)} more — `{hint_cmd}`)")
+            block.append("")
+        lines.extend(block)
+        if size() > BUDGET - 120:   # reserve for the omission note
+            # the full block does not fit: try the one-line index, still budget-tracked
+            del lines[len(lines) - len(block):]
+            oneliner = [f"## Project: {name}", f"- ({len(rs)} memories — `{hint_cmd}`)", ""]
+            lines.extend(oneliner)
+            if size() > BUDGET - 120:
+                del lines[len(lines) - len(oneliner):]
+                return False
+        return True
 
-    emit("global", "Global")
     if is_root:
-        for sc in sorted(s for s in by_scope if s.startswith("project:")):
-            emit_project_capped(sc)
+        # global gets at most ~40% of what remains after the rules — the rest belongs to
+        # the project index (the value of root mode = "where was I, everywhere")
+        glimit = size() + int((BUDGET - size()) * 0.4)
+        emit_budgeted("Global", ordered(by_scope.get("global", [])),
+                      f"{MEM_CMD} list --scope global", limit=glimit)
+        # recently touched projects first — under budget pressure they matter, not the alphabet
+        scopes = sorted((s for s in by_scope if s.startswith("project:")),
+                        key=lambda s: max((rec_date(r) for r in by_scope[s]), default=""),
+                        reverse=True)
+        for i, sc in enumerate(scopes):
+            if not emit_project_capped(sc):
+                left = len(scopes) - i
+                lines.append(f"(+{left} projects omitted by budget — `{MEM_CMD} list --scope project:<slug>`)")
+                lines.append("")
+                break
     else:
-        emit(f"project:{slug}", f"Project: {slug}")
+        # the project first (status/todo = "where was I"), then global
+        emit_budgeted(f"Project: {slug}", ordered(by_scope.get(f"project:{slug}", [])),
+                      f"{MEM_CMD} list --scope project:{slug}")
+        emit_budgeted("Global", ordered(by_scope.get("global", [])), f"{MEM_CMD} list --scope global")
 
     sys.stdout.write("\n".join(lines).rstrip() + "\n")
     return 0

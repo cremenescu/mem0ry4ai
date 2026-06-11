@@ -22,7 +22,7 @@ function render_row(array $r): string {
   <td><?= type_badge($type) ?></td>
   <td><a class="scope-tag" href="<?= $scope === 'global' ? 'index.php?scope=global' : 'project.php?slug=' . h(scope_label($scope)) ?>"><?= h(scope_label($scope)) ?></a></td>
   <td class="summary" onclick="toggleBody(this)">
-    <b><?= h($sum) ?></b>
+    <?php if (($m['priority'] ?? '') === 'critical'): ?><span class="badge t-status" title="<?= t('critical rule: always injected, first, at SessionStart') ?>">critical</span> <?php endif; ?><b><?= h($sum) ?></b>
     <?php if ($st === 'superseded'): ?><span class="status-superseded">· superseded<?= !empty($m['superseded-by']) ? ' → <a href="index.php?id=' . h($m['superseded-by']) . '">' . h($m['superseded-by']) . '</a>' : '' ?></span><?php endif; ?>
     <div class="meta"><a href="index.php?id=<?= h($r['id']) ?>"><?= h($r['id']) ?></a> · conf <?= h($m['confidence'] ?? '?') ?> · <?= h($m['source'] ?? '') ?></div>
   </td>

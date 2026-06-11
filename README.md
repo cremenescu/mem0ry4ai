@@ -23,6 +23,7 @@ agentmemory, the official MCP memory server). Recurring failure modes shaped thi
 | Tools that vandalize CLAUDE.md / fight native memory | Coexists cleanly — own namespace, never touches your files |
 | Nobody remembers "where was I?" on returning to a project | First-class **`todo`** and **`status`** types, pinned in injection and UI |
 | Credentials accumulate in an unencrypted memory file | **Secret redaction on every write path** (8 patterns: API keys, Bearer/GitHub/OpenAI/Slack tokens, AWS keys, private keys, passwords) + `mem.py audit` for what is already stored |
+| As memory grows, the injection grows — and the harness truncates it blindly, silently dropping rules the agent must follow | **Self-budgeted injection**: `priority: critical` rules are always in (first, full body); the rest fills `MEM_INJECT_BUDGET`; every cut is announced with the command that retrieves it |
 
 ## Measured impact (author's real setup)
 
@@ -130,6 +131,31 @@ hooks handle recall, the agent handles capture):
 `todo` + `status` are pinned first in injection and in the per-project web page — they answer
 "where was I?" when you return to a project after weeks.
 
+## Critical rules and the injection budget
+
+A memory system has a failure mode nobody talks about: **the more it remembers, the longer the
+injected context gets — until the harness starts truncating it, blindly**. Claude Code persists
+oversized hook output to a file and shows the model only a small preview; whatever falls past
+the cut is invisible, and the model cannot follow a rule it cannot see. We hit this in
+production: a "never add Co-Authored-By to commits" preference fell past the cut and the agent
+violated it.
+
+The fix is that **the injection trims itself, deterministically, before the harness ever has
+to**:
+
+- **`priority: critical`** — pin the rules that gate the agent's actions ("never X in commits",
+  "never touch production", "always test on one device first"):
+  ```bash
+  ./mem.py pin <id>            # or: ./mem.py add ... --critical
+  ```
+  Critical rules are injected **always, first, with their full body**, regardless of budget.
+- **`MEM_INJECT_BUDGET`** (default 8000 bytes) — everything else fills the budget in relevance
+  order (current project's status/todo first, then global knowledge, then recently-touched
+  projects), and **every cut is announced** in the injection itself:
+  `(+12 omitted by budget — mem.py list --scope ...)`. Nothing disappears silently.
+- The dashboard health panel shows the real injection size vs the budget, and the
+  "What Claude sees" page renders exactly what the agent gets.
+
 ## Secret redaction
 
 The store is plain markdown versioned by git — a credential that lands there is hard to remove
@@ -208,6 +234,7 @@ Everything is overridable via environment variables — no config file needed:
 |---|---|---|
 | `MEM_DATA_DIR` | next to the code; `~/.mem0ry4ai` in plugin installs | where `store/` + `staging/` live (own git repo) |
 | `MEM_REDACT` | `1` | set `0` to disable secret redaction on write paths |
+| `MEM_INJECT_BUDGET` | `8000` | max bytes injected at SessionStart (critical rules always fit; cuts are announced) |
 | `MEM_WEB_PORT` | `8841` | web UI port (`server_web.sh`) |
 | `MEM_PHP` | `php` from `PATH` | PHP binary (server + conformance test) |
 | `MEM_PYTHON` | `python3` from `PATH` | Python binary used by the "What Claude sees" page |
