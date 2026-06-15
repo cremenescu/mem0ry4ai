@@ -87,6 +87,7 @@ function endpoint_html(array $r): string {
           <div class="sg-top"><?= type_badge($r['meta']['type'] ?? '?') ?>
             <a class="sg-sum" href="memories.php?id=<?= h($r['id']) ?>"><?= $scl . h(rec_summary($r)) ?></a></div>
           <?php if ($bd !== ''): ?><div class="sg-body"><?= h(mb_substr($bd, 0, 150)) ?><?= mb_strlen($bd) > 150 ? '…' : '' ?></div><?php endif; ?>
+          <div class="sg-full"><?= render_body($r['body']) ?><?= rec_extras_html($r) ?></div>
         </div>
       <?php return ob_get_clean(); };
       foreach ($suggestions as $s): $A = $sb[$s['a']] ?? null; $B = $sb[$s['b']] ?? null; if (!$A || !$B) continue; ?>
@@ -95,6 +96,7 @@ function endpoint_html(array $r): string {
           <span class="sg-act"><button type="button" class="btn btn-primary sg-link"><?= t('Link') ?></button>
             <button type="button" class="btn btn-ghost sg-dismiss"><?= t('Dismiss') ?></button></span></div>
         <div class="sg-pair"><?= $sg_end($A) ?><div class="sg-mid">&harr;</div><?= $sg_end($B) ?></div>
+        <button type="button" class="sg-more"><span class="sg-arrow">&#9662;</span> <?= t('full content') ?></button>
       </li>
       <?php endforeach; ?>
     </ul>
@@ -304,6 +306,10 @@ var GRAPH = { nodes: <?= json_encode($gnodes, JSON_UNESCAPED_UNICODE | JSON_UNES
   var CSRF = <?= json_encode(csrf_token()) ?>;
   document.getElementById('suggest-list').addEventListener('click', function(e){
     var li = e.target.closest('li[data-a]'); if (!li) return;
+    if (e.target.closest('.sg-more')) {           // expand/collapse full content
+      li.classList.toggle('expanded');
+      return;
+    }
     var link = e.target.classList.contains('sg-link');
     var dismiss = e.target.classList.contains('sg-dismiss');
     if (!link && !dismiss) return;

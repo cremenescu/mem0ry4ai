@@ -124,6 +124,7 @@ function ro_strings(): array {
         'Suggested links' => 'Sugestii de legaturi',
         'Link' => 'Leaga',
         'Dismiss' => 'Respinge',
+        'full content' => 'continut complet',
         'No projects yet.' => 'Niciun proiect inca.',
         'memories' => 'memorii',
         'project page →' => 'pagina proiectului →',
