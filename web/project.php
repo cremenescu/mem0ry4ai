@@ -40,16 +40,14 @@ uksort($byType, fn($a, $b) => (array_search($a, $typeOrder) ?? 9) <=> (array_sea
 <link rel="stylesheet" href="<?= h(asset('assets/style.css')) ?>">
 </head>
 <body>
-<div class="topbar">
-  <a class="brand" href="index.php">mem0ry4ai <small><?= t('local memory') ?></small></a>
-  <div class="right"><a href="inject.php?scope=<?= h($scope) ?>"><?= t('What Claude sees here') ?></a> <?= lang_switch_html() ?></div>
-</div>
+<?= render_topbar('projects') ?>
 
 <main>
 <div class="layout">
 <div class="content">
   <div class="crumb"><a href="index.php"><?= t('Dashboard') ?></a> / <a href="projects.php"><?= t('Projects') ?></a> / <?= h($slug) ?></div>
   <h2><?= h($slug) ?> <span class="count"><?= count($active) ?> <?= t('active') ?><?= count($all) - count($active) ? ' · ' . (count($all) - count($active)) . ' superseded' : '' ?></span></h2>
+  <p class="meta" style="margin-top:-6px"><a href="inject.php?scope=<?= h($scope) ?>"><?= t('What Claude sees here') ?> &rarr;</a></p>
 
   <?php if (!$active): ?>
     <div class="empty"><?= t('No active memories for') ?> <code><?= h($scope) ?></code>.</div>

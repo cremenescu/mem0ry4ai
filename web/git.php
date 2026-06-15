@@ -108,10 +108,7 @@ $flash = take_flash();
 <link rel="stylesheet" href="<?= h(asset('assets/style.css')) ?>">
 </head>
 <body>
-<div class="topbar">
-  <a class="brand" href="index.php">mem0ry4ai <small><?= t('local memory') ?></small></a>
-  <div class="right"><a href="index.php">← <?= t('Dashboard') ?></a> <?= lang_switch_html() ?></div>
-</div>
+<?= render_topbar('git') ?>
 
 <main>
 <div class="layout">

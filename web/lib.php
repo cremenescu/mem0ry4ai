@@ -65,6 +65,28 @@ function lang_switch_html(): string {
     return $out . '</span>';
 }
 
+// Shared top bar — identical on every page; $active highlights the current section.
+function render_topbar(string $active = ''): string {
+    $nq = count(queue_pending());
+    $nav = [
+        'dashboard' => ['index.php',    t('Dashboard')],
+        'memories'  => ['memories.php', t('Memories')],
+        'projects'  => ['projects.php', t('Projects')],
+        'git'       => ['git.php',      t('Git history')],
+        'inject'    => ['inject.php',   t('What Claude sees')],
+    ];
+    ob_start(); ?>
+<div class="topbar">
+  <a class="brand" href="index.php">mem0ry4ai <small><?= t('local memory') ?></small></a>
+  <div class="right">
+    <?php foreach ($nav as $key => [$href, $label]): ?><a<?= $active === $key ? ' class="nav-on"' : '' ?> href="<?= $href ?>"><?= h($label) ?></a> <?php endforeach; ?>
+    <?php if ($nq > 0): ?><a class="review-tag" href="queue.php"><?= $nq ?> <?= t('to review') ?></a> <?php endif; ?>
+    <?= lang_switch_html() ?>
+  </div>
+</div>
+<?php return ob_get_clean();
+}
+
 function ro_strings(): array {
     return [
         'local memory' => 'memorie locala',

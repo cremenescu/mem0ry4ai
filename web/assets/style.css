@@ -283,3 +283,6 @@ li.blocked{opacity:.72}
 .projcard{min-height:84px;display:flex;flex-direction:column;justify-content:flex-start}
 .pcstatus{margin-top:7px;font-size:12.5px;color:#4a5a6e;line-height:1.4;
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+
+/* active top-nav link */
+.topbar .right a.nav-on{color:#006fff;font-weight:600}
