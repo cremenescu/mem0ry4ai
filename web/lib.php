@@ -121,6 +121,9 @@ function ro_strings(): array {
         'Dashboard' => 'Panou',
         'Projects' => 'Proiecte',
         'Links' => 'Legaturi',
+        'Suggested links' => 'Sugestii de legaturi',
+        'Link' => 'Leaga',
+        'Dismiss' => 'Respinge',
         'No projects yet.' => 'Niciun proiect inca.',
         'memories' => 'memorii',
         'project page →' => 'pagina proiectului →',
@@ -444,6 +447,85 @@ function related_html(array $r, array $relIn, array $byId): string {
     $ids = array_values(array_unique(array_merge(rec_ids($r, 'related-to'), $relIn[$r['id']] ?? [])));
     if (!$ids) return '';
     return '<div class="rel">↔ ' . implode(' ', array_map(fn($i) => id_chip($i, $byId), $ids)) . '</div>';
+}
+
+/* ---------- B: link suggestions (semantic, human-confirmed) ---------- */
+
+function pair_key(string $a, string $b): string { return $a < $b ? "$a|$b" : "$b|$a"; }
+function dismiss_file(): string { return data_root() . '/staging/link-dismissed.jsonl'; }
+
+function dismissed_pairs(): array {
+    $p = dismiss_file();
+    if (!is_file($p)) return [];
+    $out = [];
+    foreach (file($p, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $l) {
+        $d = json_decode($l, true);
+        if (isset($d['pair'])) $out[$d['pair']] = true;
+    }
+    return $out;
+}
+
+function dismiss_pair(string $a, string $b): bool {
+    $dir = dirname(dismiss_file());
+    if (!is_dir($dir)) @mkdir($dir, 0777, true);
+    return @file_put_contents(dismiss_file(), json_encode(['pair' => pair_key($a, $b)]) . "\n",
+                              FILE_APPEND | LOCK_EX) !== false;
+}
+
+// All fields render_record expects, rebuilt from a parsed record (so callbacks can tweak one).
+function rec_data(array $r): array {
+    $m = $r['meta'];
+    $d = [
+        'id' => $r['id'], 'type' => $m['type'] ?? 'fact', 'scope' => $m['scope'] ?? 'global',
+        'summary' => rec_summary($r), 'created' => $m['created'] ?? date('Y-m-d H:i:s'),
+        'updated' => $m['updated'] ?? date('Y-m-d H:i:s'), 'status' => $m['status'] ?? 'active',
+        'confidence' => $m['confidence'] ?? '1.0', 'source' => $m['source'] ?? 'web', 'body' => $r['body'],
+    ];
+    foreach (['priority', 'files', 'related-to', 'blocked-by', 'superseded-by', 'invalidated', 'invalid-reason'] as $k) {
+        if (!empty($m[$k])) $d[$k] = $m[$k];
+    }
+    return $d;
+}
+
+// Add a related-to edge a->b (idempotent). Same effect as `mem.py link`.
+function link_records(string $a, string $b): bool {
+    if ($a === '' || $b === '' || $a === $b) return false;
+    return rewrite_record($a, function (array $r) use ($b) {
+        $d = rec_data($r);
+        $cur = array_values(array_filter(array_map('trim', explode(',', $d['related-to'] ?? ''))));
+        if (!in_array($b, $cur, true)) $cur[] = $b;
+        $d['related-to'] = implode(', ', $cur);
+        $d['updated'] = date('Y-m-d H:i:s');
+        return render_record($d);
+    });
+}
+
+// Closest UNLINKED pairs (semantic), excluding existing edges + dismissed. [] if no embeddings.
+function suggested_links(int $limit = 12, float $threshold = 0.62): array {
+    $emb = load_embeddings();
+    if (count($emb) < 2) return [];
+    $byId = records_by_id();
+    $emb = array_filter($emb, fn($v, $id) => isset($byId[$id]) && ($byId[$id]['meta']['status'] ?? 'active') === 'active',
+                        ARRAY_FILTER_USE_BOTH);
+    $exist = dismissed_pairs();
+    foreach ($byId as $r) {
+        foreach (array_merge(rec_ids($r, 'related-to'), rec_ids($r, 'blocked-by')) as $to) {
+            $exist[pair_key($r['id'], $to)] = true;
+        }
+    }
+    $ids = array_keys($emb);
+    if (count($ids) > 1500) $ids = array_slice($ids, 0, 1500);  // safety cap on the O(n^2) scan
+    $pairs = [];
+    for ($i = 0; $i < count($ids); $i++) {
+        for ($j = $i + 1; $j < count($ids); $j++) {
+            $k = pair_key($ids[$i], $ids[$j]);
+            if (isset($exist[$k])) continue;
+            $s = cosine_sim($emb[$ids[$i]], $emb[$ids[$j]]);
+            if ($s >= $threshold) $pairs[] = ['a' => $ids[$i], 'b' => $ids[$j], 'sim' => $s];
+        }
+    }
+    usort($pairs, fn($x, $y) => $y['sim'] <=> $x['sim']);
+    return array_slice($pairs, 0, $limit);
 }
 
 // All relation edges across the store: related-to (undirected) + blocked-by (directed).

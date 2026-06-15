@@ -6,7 +6,21 @@ declare(strict_types=1);
 session_start();
 require __DIR__ . '/lib.php';
 
+/* ---------- POST: confirm or dismiss a suggested link (AJAX) ---------- */
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    csrf_check();
+    $action = $_POST['action'] ?? '';
+    $a = trim($_POST['a'] ?? ''); $b = trim($_POST['b'] ?? '');
+    $ok = false;
+    if ($action === 'link')        $ok = link_records($a, $b);
+    elseif ($action === 'dismiss') $ok = dismiss_pair($a, $b);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => $ok]);
+    exit;
+}
+
 $edges = all_links();
+$suggestions = suggested_links();
 
 // graph data: unique node per record that participates in an edge
 $nodeMap = [];
@@ -57,6 +71,25 @@ function endpoint_html(array $r): string {
 <div class="content">
   <div class="crumb"><a href="index.php"><?= t('Dashboard') ?></a> / <?= t('Links') ?></div>
   <h2><?= t('Links') ?> <span class="count"><?= count($edges) ?></span></h2>
+
+  <?php if ($suggestions): $sb = records_by_id(); ?>
+  <div class="suggest">
+    <h3><?= t('Suggested links') ?> <span class="count"><?= count($suggestions) ?></span>
+      <small><?= ui_lang() === 'ro' ? 'semantic — tu confirmi' : 'semantic — you confirm' ?></small></h3>
+    <ul id="suggest-list">
+      <?php foreach ($suggestions as $s): $A = $sb[$s['a']] ?? null; $B = $sb[$s['b']] ?? null; if (!$A || !$B) continue; ?>
+      <li data-a="<?= h($s['a']) ?>" data-b="<?= h($s['b']) ?>">
+        <span class="sg-pct"><?= round($s['sim'] * 100) ?>%</span>
+        <?= type_badge($A['meta']['type'] ?? '?') ?> <span class="sg-sum"><?= h(mb_substr(rec_summary($A), 0, 56)) ?></span>
+        <span class="sg-rel">&harr;</span>
+        <?= type_badge($B['meta']['type'] ?? '?') ?> <span class="sg-sum"><?= h(mb_substr(rec_summary($B), 0, 56)) ?></span>
+        <span class="sg-act"><button type="button" class="btn btn-primary sg-link"><?= t('Link') ?></button>
+          <button type="button" class="btn btn-ghost sg-dismiss"><?= t('Dismiss') ?></button></span>
+      </li>
+      <?php endforeach; ?>
+    </ul>
+  </div>
+  <?php endif; ?>
 
   <?php if (!$edges): ?>
     <div class="empty"><?= ui_lang() === 'ro'
@@ -252,6 +285,31 @@ var GRAPH = { nodes: <?= json_encode($gnodes, JSON_UNESCAPED_UNICODE | JSON_UNES
   (function(){ var a = 1; for (var k = 0; k < 280; k++) { physics(a); a *= 0.985; } })();
   alpha = 0.06;
   render(); requestAnimationFrame(tick);
+})();
+</script>
+<?php endif; ?>
+<?php if ($suggestions): ?>
+<script>
+(function(){
+  var CSRF = <?= json_encode(csrf_token()) ?>;
+  document.getElementById('suggest-list').addEventListener('click', function(e){
+    var li = e.target.closest('li[data-a]'); if (!li) return;
+    var link = e.target.classList.contains('sg-link');
+    var dismiss = e.target.classList.contains('sg-dismiss');
+    if (!link && !dismiss) return;
+    e.target.disabled = true;
+    var fd = new FormData(); fd.set('csrf', CSRF);
+    fd.set('action', link ? 'link' : 'dismiss'); fd.set('a', li.dataset.a); fd.set('b', li.dataset.b);
+    fetch('links.php', { method:'POST', headers:{'X-Requested-With':'XMLHttpRequest'}, body: fd })
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        if (!j.ok) { e.target.disabled = false; return; }
+        if (link) { location.reload(); return; }   // new edge -> refresh graph
+        li.remove();
+        var c = document.querySelector('.suggest .count'); if (c) c.textContent = document.querySelectorAll('#suggest-list li').length;
+      })
+      .catch(function(){ e.target.disabled = false; });
+  });
 })();
 </script>
 <?php endif; ?>
