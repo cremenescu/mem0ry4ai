@@ -183,15 +183,7 @@ $nq = count(queue_pending());
 <link rel="stylesheet" href="<?= h(asset('assets/style.css')) ?>">
 </head>
 <body>
-<div class="topbar">
-  <a class="brand" href="index.php">mem0ry4ai <small><?= t('local memory') ?></small></a>
-  <div class="right">
-    <a href="git.php"><?= t('Git history') ?></a>
-    <a href="inject.php"><?= t('What Claude sees') ?></a>
-    <?php if ($nq > 0): ?><a class="review-tag" href="queue.php"><?= $nq ?> <?= t('to review') ?></a><?php endif; ?>
-    <?= lang_switch_html() ?>
-  </div>
-</div>
+<?= render_topbar('memories') ?>
 
 <main>
 <div class="layout">

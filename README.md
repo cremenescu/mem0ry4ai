@@ -131,6 +131,24 @@ hooks handle recall, the agent handles capture):
 `todo` + `status` are pinned first in injection and in the per-project web page — they answer
 "where was I?" when you return to a project after weeks.
 
+## Relations & ready work
+
+Memories can be linked — deliberately, never auto-guessed by keyword (that only produces noise):
+
+- **`related-to`** — connect related memories (a gotcha ↔ the decision that caused it, a status ↔
+  its todos). Shown both ways in the web UI as clickable chips.
+  ```bash
+  ./mem.py link <id> <other-id>...
+  ```
+- **`blocked-by`** on a `todo` — work that must be done first. **`mem.py ready`** lists the todos
+  with no *open* blocker (a blocker is open while it is still an active todo; finishing it =
+  superseding it frees the dependents). The injection annotates blocked todos; the per-project
+  page splits **ready** vs **blocked**.
+  ```bash
+  ./mem.py block <todo-id> <blocker-id>...
+  ./mem.py ready --scope project:my-app
+  ```
+
 ## Critical rules and the injection budget
 
 A memory system has a failure mode nobody talks about: **the more it remembers, the longer the
@@ -203,11 +221,14 @@ Bilingual (English default, Romanian via the EN/RO switch in the top bar).
 
 *(Screenshots use demo data.)*
 
-- **System dashboard**: counters, health checks (store/staging/index/queue/hooks/git), recent
-  activity with source attribution, live updates via cheap polling (4 ms when nothing changed).
-- **Per-project page**: status + todos pinned, knowledge grouped by type.
-- **Ranked search** (same FTS5 index as the CLI), grouped/sortable/filterable list, bulk
-  operations (supersede / re-scope / delete), supersede-chain navigation.
+- **Dashboard** (`index.php`): stat cards (each deep-links into the list with a filter), health
+  checks (store/staging/index/queue/hooks/git/injection size), recent activity, live updates via
+  cheap polling (~4 ms when nothing changed). Consistent top nav + breadcrumbs on every page.
+- **Memories list** (`memories.php`): ranked search (same FTS5 index as the CLI),
+  grouped/sortable/filterable table, bulk operations (supersede / re-scope / delete),
+  supersede-chain navigation; related/blocked links shown on each record.
+- **Projects** (`projects.php`): every project at a glance — active count, open todos, current
+  status — each card opening its per-project page (status + ready/blocked todos pinned first).
 - **"What Claude sees"**: renders the exact SessionStart injection, with its size in bytes/tokens.
 - **Review queue**: candidates extracted by the optional local LLM wait here for human approval.
 - **Git history**: the store's timeline — commits touching `store/` with colored per-commit
