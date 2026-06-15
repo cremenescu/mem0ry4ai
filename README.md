@@ -149,6 +149,10 @@ Memories can be linked — deliberately, never auto-guessed by keyword (that onl
   ./mem.py ready --scope project:my-app
   ```
 
+The **Links** page in the web UI shows every edge at a glance — a force-directed graph (nodes
+colored by type, sized by degree) over the same `related-to` / `blocked-by` data, with a grouped
+text list below. No external libraries — a small vanilla-JS + SVG simulation, offline-first.
+
 ## Critical rules and the injection budget
 
 A memory system has a failure mode nobody talks about: **the more it remembers, the longer the
@@ -229,6 +233,8 @@ Bilingual (English default, Romanian via the EN/RO switch in the top bar).
   supersede-chain navigation; related/blocked links shown on each record.
 - **Projects** (`projects.php`): every project at a glance — active count, open todos, current
   status — each card opening its per-project page (status + ready/blocked todos pinned first).
+- **Links** (`links.php`): a force-directed graph of all `related-to` / `blocked-by` edges
+  (dependency-free SVG) + a grouped text list — see how memories connect at a glance.
 - **"What Claude sees"**: renders the exact SessionStart injection, with its size in bytes/tokens.
 - **Review queue**: candidates extracted by the optional local LLM wait here for human approval.
 - **Git history**: the store's timeline — commits touching `store/` with colored per-commit

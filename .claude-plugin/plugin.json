@@ -1,6 +1,6 @@
 {
   "name": "mem0ry4ai",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Persistent, local-first memory for Claude Code — typed durable knowledge in a markdown+git store, scoped injection at SessionStart, auto git checkpoints, web UI.",
   "author": {
     "name": "Razvan Cremenescu"

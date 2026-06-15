@@ -57,8 +57,9 @@ python3 hooks/install.py --target user
 - Tipurile **`todo`** si **`status`** raspund la „unde am ramas?" cand revii la un proiect.
 - **Relatii intre memorii**: `mem.py link` (related-to, bidirectional in UI) si `mem.py block` +
   `mem.py ready` pentru todo-uri (ce poti ataca acum, fara blocaj deschis). Legate deliberat, nu automat.
-- **Web UI** = dashboard (status sistem) + Memorii (lista filtrabila) + Proiecte (sumar per proiect),
-  navigare consistenta + breadcrumb pe toate paginile.
+  Pagina **Legaturi** arata toate muchiile ca graf force-directed (SVG, fara dependinte) + lista.
+- **Web UI** = dashboard (status sistem) + Memorii (lista filtrabila) + Proiecte (sumar per proiect)
+  + Legaturi (graf), navigare consistenta + breadcrumb pe toate paginile.
 
 ## Licenta
 
