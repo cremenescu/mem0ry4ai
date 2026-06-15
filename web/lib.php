@@ -428,7 +428,7 @@ function related_in_index(): array {
 // A clickable id chip linking to the record, titled with its summary.
 function id_chip(string $id, array $byId): string {
     $sum = isset($byId[$id]) ? rec_summary($byId[$id]) : '';
-    return '<a class="idchip" href="index.php?id=' . h($id) . '" title="' . h($sum) . '">' . h(substr($id, -6)) . '</a>';
+    return '<a class="idchip" href="memories.php?id=' . h($id) . '" title="' . h($sum) . '">' . h(substr($id, -6)) . '</a>';
 }
 
 // "↔ a, b" line of related links (outgoing + incoming), or '' if none.
@@ -601,7 +601,7 @@ function projects_overview(): array {
 function render_recent_list(array $stats): string {
     ob_start();
     foreach ($stats['recent'] as $r) { $m = $r['meta']; ?>
-          <li><?= type_badge($m['type'] ?? '?') ?> <a href="index.php?id=<?= h($r['id']) ?>"><?= h(mb_substr(rec_summary($r), 0, 52)) ?></a>
+          <li><?= type_badge($m['type'] ?? '?') ?> <a href="memories.php?id=<?= h($r['id']) ?>"><?= h(mb_substr(rec_summary($r), 0, 52)) ?></a>
               <span class="src"><?= h($m['source'] ?? '') ?></span>
               <span class="when"><?= h(mb_substr($m['created'] ?? '', 5, 11)) ?></span></li>
     <?php }
