@@ -16,10 +16,12 @@ Storage format: see store/FORMAT.md. No external dependencies.
 import argparse
 import datetime
 import hashlib
+import math
 import os
 import re
 import shutil
 import sqlite3
+import struct
 import subprocess
 import sys
 
@@ -365,7 +367,7 @@ def _print_hits(hits):
 
 def cmd_search(a):
     since, until = _norm_date(a.since), _norm_date(a.until, end=True)
-    ids = fts_search(a.query)
+    ids = hybrid_search(a.query)
     if ids is not None:
         by_id = {r["id"]: r for r in all_records()}
         hits = [by_id[i] for i in ids
@@ -392,11 +394,114 @@ def cmd_search(a):
     _print_hits(hits)
 
 
+# ----- optional semantic layer: embeddings in a SEPARATE derived db (.embed.db) -----
+# Kept apart from .index.db so rebuilding the FTS index never wipes the (slower) vectors.
+# The embedder is a retrieval helper only — it never decides what is a memory and never writes.
+
+def embed_path():
+    return os.path.join(STORE, ".embed.db")
+
+
+def _rec_text(r):
+    files = r["meta"].get("files", "")
+    return f"{record_summary(r)}\n{r['body']}" + (f"\nfiles: {files}" if files else "")
+
+
+def _rec_hash(r):
+    return hashlib.sha1(_rec_text(r).encode("utf-8")).hexdigest()[:12]
+
+
+def embed_index(force=False):
+    """(Re)build the derived embeddings db. Incremental: only (re)embeds changed records.
+    Returns (embedded, total) or None if no embedder is available."""
+    import llm
+    if not llm.embedder_up():
+        return None
+    con = sqlite3.connect(embed_path())
+    con.execute("CREATE TABLE IF NOT EXISTS emb (id TEXT PRIMARY KEY, hash TEXT, vec BLOB)")
+    have = {row[0]: row[1] for row in con.execute("SELECT id, hash FROM emb")}
+    recs = [r for r in all_records() if r["meta"].get("status", "active") == "active"]
+    ids = {r["id"] for r in recs}
+    n = 0
+    for r in recs:
+        h = _rec_hash(r)
+        if not force and have.get(r["id"]) == h:
+            continue
+        v = llm.embed(_rec_text(r))
+        if v is None:
+            continue
+        con.execute("INSERT OR REPLACE INTO emb (id, hash, vec) VALUES (?, ?, ?)",
+                    (r["id"], h, struct.pack("<" + f"{len(v)}f", *v)))
+        n += 1
+    for gone in set(have) - ids:   # drop removed / superseded
+        con.execute("DELETE FROM emb WHERE id = ?", (gone,))
+    con.commit()
+    con.close()
+    try:
+        os.chmod(embed_path(), 0o666)
+    except OSError:
+        pass
+    return (n, len(recs))
+
+
+def load_embeddings():
+    """id -> vector, from the derived .embed.db ({} if none)."""
+    p = embed_path()
+    if not os.path.exists(p):
+        return {}
+    con = sqlite3.connect(p)
+    try:
+        out = {row[0]: list(struct.unpack("<" + f"{len(row[1]) // 4}f", row[1]))
+               for row in con.execute("SELECT id, vec FROM emb")}
+    except sqlite3.OperationalError:
+        out = {}
+    con.close()
+    return out
+
+
+def _cosine(a, b):
+    if len(a) != len(b):
+        return 0.0
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    return sum(x * y for x, y in zip(a, b)) / (na * nb) if na and nb else 0.0
+
+
+def hybrid_search(query):
+    """Keyword (FTS5 + recency) fused with semantic similarity when an embedder is available.
+    Returns ranked ids, or None if FTS5 is missing (caller does the substring fallback)."""
+    fts = fts_search(query)
+    emb = load_embeddings()
+    qvec = None
+    if emb:
+        import llm
+        qvec = llm.embed(query)
+    if not emb or qvec is None:
+        return fts   # keyword-only (zero-dep default) or substring fallback (None)
+    sims = {i: _cosine(qvec, v) for i, v in emb.items()}
+    fts = fts or []
+    nkw = max(1, len(fts))
+    kw = {i: 1.0 - (n / nkw) for n, i in enumerate(fts)}    # 1..0 by keyword rank
+    cand = set(fts) | {i for i, _ in sorted(sims.items(), key=lambda x: -x[1])[:25]}
+    return sorted(cand, key=lambda i: 0.5 * sims.get(i, 0.0) + 0.5 * kw.get(i, 0.0), reverse=True)
+
+
+def cmd_embed(a):
+    r = embed_index(force=a.force)
+    if r is None:
+        print("embedder unavailable — start Ollama and `ollama pull all-minilm` (or set MEM_EMBED_MODEL).")
+        sys.exit(1)
+    print(f"embeddings up to date: {r[0]} (re)embedded of {r[1]} active -> {os.path.relpath(embed_path(), DATA)}")
+
+
 def cmd_reindex(a):
     if build_index():
         print(f"FTS5 index rebuilt: {len(all_records())} records -> {os.path.relpath(index_path(), DATA)}")
     else:
         print("FTS5 unavailable in this sqlite — search falls back to substring scan.")
+    r = embed_index()
+    if r is not None:
+        print(f"embeddings refreshed: {r[0]} (re)embedded of {r[1]} active.")
 
 
 def cmd_supersede(a):
@@ -731,8 +836,12 @@ def main():
     prd.add_argument("--scope")
     prd.set_defaults(func=cmd_ready)
 
-    px = sub.add_parser("reindex", help="rebuild the derived FTS5 index from markdown")
+    px = sub.add_parser("reindex", help="rebuild the derived FTS5 index (+ embeddings if Ollama is up)")
     px.set_defaults(func=cmd_reindex)
+
+    pe = sub.add_parser("embed", help="build/refresh the optional semantic index (needs Ollama + embed model)")
+    pe.add_argument("--force", action="store_true", help="re-embed everything, not just changed records")
+    pe.set_defaults(func=cmd_embed)
 
     a = p.parse_args()
     a.func(a)

@@ -796,6 +796,51 @@ function fts_rebuild(): bool {
     }
 }
 
+/* ---------- optional semantic layer (mirrors mem.py): embeddings in .embed.db ---------- */
+
+// Embed the query via Ollama (retrieval only). null if Ollama/model unavailable -> keyword-only.
+function embed_query(string $q): ?array {
+    $q = trim($q);
+    if ($q === '') return null;
+    $url = (getenv('OLLAMA_URL') ?: 'http://localhost:11434') . '/api/embeddings';
+    $model = getenv('MEM_EMBED_MODEL') ?: 'all-minilm';
+    $ctx = stream_context_create(['http' => [
+        'method' => 'POST', 'header' => "Content-Type: application/json\r\n",
+        'content' => json_encode(['model' => $model, 'prompt' => $q]),
+        'timeout' => 5, 'ignore_errors' => true,
+    ]]);
+    $resp = @file_get_contents($url, false, $ctx);
+    if ($resp === false) return null;
+    $d = json_decode($resp, true);
+    $v = $d['embedding'] ?? null;
+    return (is_array($v) && $v) ? array_values($v) : null;
+}
+
+// id -> vector, from the .embed.db the CLI builds (little-endian float32; {} if none).
+function load_embeddings(): array {
+    $p = store_dir() . '/.embed.db';
+    if (!is_file($p)) return [];
+    try {
+        $pdo = new PDO('sqlite:' . $p);
+        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $out = [];
+        foreach ($pdo->query('SELECT id, vec FROM emb') as $row) {
+            $out[$row['id']] = array_values(unpack('g*', $row['vec']));
+        }
+        return $out;
+    } catch (Throwable $e) {
+        return [];
+    }
+}
+
+function cosine_sim(array $a, array $b): float {
+    $n = min(count($a), count($b));
+    if (!$n) return 0.0;
+    $dot = 0.0; $na = 0.0; $nb = 0.0;
+    for ($i = 0; $i < $n; $i++) { $dot += $a[$i] * $b[$i]; $na += $a[$i] * $a[$i]; $nb += $b[$i] * $b[$i]; }
+    return ($na && $nb) ? $dot / (sqrt($na) * sqrt($nb)) : 0.0;
+}
+
 // Ids ordered by relevance (bm25). null = FTS unavailable (substring fallback).
 function fts_query(string $q): ?array {
     if (!fts_index_fresh() && !fts_rebuild()) return null;
@@ -824,7 +869,21 @@ function fts_query(string $q): ?array {
             $rb = $ord[$b['id']] ? ($ord[$b['id']] - $lo) / $span : 0.0;
             return ($a['s'] - $w * $ra) <=> ($b['s'] - $w * $rb);
         });
-        return array_map(fn($x) => $x['id'], $rows);
+        $ids = array_map(fn($x) => $x['id'], $rows);
+        // semantic fusion when an embedder is available (mirrors mem.py hybrid_search); else keyword-only
+        $emb = load_embeddings();
+        $qv = $emb ? embed_query($q) : null;
+        if (!$emb || $qv === null) return $ids;
+        $sims = [];
+        foreach ($emb as $id => $v) $sims[$id] = cosine_sim($qv, $v);
+        $nkw = max(1, count($ids));
+        $kw = [];
+        foreach ($ids as $n => $id) $kw[$id] = 1.0 - $n / $nkw;
+        arsort($sims);
+        $cand = array_values(array_unique(array_merge($ids, array_slice(array_keys($sims), 0, 25))));
+        usort($cand, fn($a, $b) =>
+            (0.5 * ($sims[$b] ?? 0) + 0.5 * ($kw[$b] ?? 0)) <=> (0.5 * ($sims[$a] ?? 0) + 0.5 * ($kw[$a] ?? 0)));
+        return $cand;
     } catch (Throwable $e) {
         return null;
     }

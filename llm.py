@@ -12,6 +12,8 @@ import urllib.request
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 MODEL = os.environ.get("MEM_LLM_MODEL", "qwen2.5:7b-instruct")
+# tiny embedding model (NOT a chat LLM) — used ONLY for semantic retrieval, never to decide/write.
+EMBED_MODEL = os.environ.get("MEM_EMBED_MODEL", "all-minilm")
 
 
 def ollama_up():
@@ -20,6 +22,36 @@ def ollama_up():
             return r.status == 200
     except Exception:
         return False
+
+
+def embed(text, timeout=30):
+    """Return the embedding vector (list of floats) for `text`, or None if unavailable.
+
+    Pure retrieval helper: turns text into a vector so search/suggestions can compare by
+    meaning. It does NOT decide what is a memory and never writes — so it does not touch the
+    trust gate. Any failure (Ollama down, model not pulled) -> None, and callers fall back to
+    keyword-only behaviour.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    body = json.dumps({"model": EMBED_MODEL, "prompt": text}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{OLLAMA_URL}/api/embeddings", data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        vec = data.get("embedding")
+        return vec if isinstance(vec, list) and vec else None
+    except Exception:
+        return None
+
+
+def embedder_up():
+    """True only if Ollama is up AND the embedding model answers — gates semantic features."""
+    return embed("ping") is not None
 
 
 def generate_json(system, prompt, schema, timeout=240):
