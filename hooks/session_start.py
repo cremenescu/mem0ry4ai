@@ -92,6 +92,19 @@ def main():
     for r in normal:
         by_scope.setdefault(r["scope"], []).append(r)
 
+    # blocked-todo annotation: a todo is "blocked" while a blocker is still an active todo
+    active_by_id = {r["id"]: r for r in recs}
+
+    def todo_note(r):
+        if r.get("type") != "todo":
+            return ""
+        n = 0
+        for b in (r.get("blocked_by") or "").split(","):
+            x = active_by_id.get(b.strip())
+            if x and x.get("status", "active") == "active" and x.get("type") == "todo":
+                n += 1
+        return f"  (blocked by {n})" if n else ""
+
     # Progressive disclosure: above the threshold inject summaries only, below it bodies too.
     BODY_THRESHOLD = 12
     include_bodies = len(recs) <= BODY_THRESHOLD
@@ -140,7 +153,7 @@ def main():
         lines.append(f"## {title}")
         shown = 0
         for r in rs:
-            item = [f"- **[{r['type']}]** {r['summary']}"]
+            item = [f"- **[{r['type']}]** {r['summary']}{todo_note(r)}"]
             if include_bodies:
                 item += [f"  {bl}" for bl in (r.get("body") or "").strip().splitlines()]
             lines.extend(item)
@@ -178,7 +191,7 @@ def main():
             rs = ordered(rs)
             shown, rest = rs[:ROOT_MAX_PER_PROJECT], rs[ROOT_MAX_PER_PROJECT:]
             block = [f"## Project: {name}"]
-            block += [f"- **[{r['type']}]** {r['summary']}" for r in shown]
+            block += [f"- **[{r['type']}]** {r['summary']}{todo_note(r)}" for r in shown]
             if rest:
                 block.append(f"- (+{len(rest)} more — `{hint_cmd}`)")
             block.append("")

@@ -262,3 +262,11 @@ pre.inject { background: var(--panel); border: 1px solid var(--line); border-rad
 .dl-meta { color: var(--accent); font-weight: 600; }
 .dirty-list { margin: 0; padding-left: 18px; }
 .dirty-list li { font-size: 13px; padding: 1px 0; }
+
+/* relations: related-to chips + blocked todos */
+.idchip{display:inline-block;font:11px/1.4 ui-monospace,Menlo,monospace;background:#eef2f7;color:#33506b;
+  border:1px solid #d6deea;border-radius:4px;padding:0 5px;text-decoration:none;margin:0 1px}
+.idchip:hover{background:#dde7f3;color:#0a4}
+.rel{margin-top:3px;font-size:12px;color:#7a8aa0}
+li.blocked{opacity:.72}
+.blockedby{font-size:12px;color:#b4690e;background:#fff4e5;border:1px solid #f3dcb5;border-radius:4px;padding:0 6px;margin-left:4px}

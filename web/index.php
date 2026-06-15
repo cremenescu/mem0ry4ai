@@ -7,6 +7,8 @@ require __DIR__ . '/lib.php';
 
 // Row renderer (main + body row) — used for page render AND in AJAX JSON responses (single source).
 function render_row(array $r): string {
+    static $byId = null, $relIn = null;
+    if ($byId === null) { $byId = records_by_id(); $relIn = related_in_index(); }
     $m = $r['meta'];
     $st = $m['status'] ?? 'active';
     $sum = rec_summary($r);
@@ -40,7 +42,7 @@ function render_row(array $r): string {
     </div>
   </td>
 </tr>
-<tr class="bodyrow" data-bodyfor="<?= h($r['id']) ?>" style="display:none"><td colspan="6"><?= render_body($r['body']) ?></td></tr>
+<tr class="bodyrow" data-bodyfor="<?= h($r['id']) ?>" style="display:none"><td colspan="6"><?= render_body($r['body']) ?><?= relations_block($r, $relIn, $byId) ?></td></tr>
 <?php
     return ob_get_clean();
 }

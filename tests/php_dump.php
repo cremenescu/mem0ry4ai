@@ -21,6 +21,8 @@ foreach (all_records() as $r) {
         'updated'       => $m['updated'] ?? null,
         'superseded_by' => $m['superseded-by'] ?? null,
         'priority'      => $m['priority'] ?? null,
+        'related_to'    => $m['related-to'] ?? null,
+        'blocked_by'    => $m['blocked-by'] ?? null,
         'body'          => $r['body'],
     ];
 }

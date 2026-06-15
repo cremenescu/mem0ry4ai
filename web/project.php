@@ -16,6 +16,15 @@ usort($active, fn($a, $b) => strcmp($b['meta']['created'] ?? '', $a['meta']['cre
 $status = array_values(array_filter($active, fn($r) => ($r['meta']['type'] ?? '') === 'status'));
 $todos  = array_values(array_filter($active, fn($r) => ($r['meta']['type'] ?? '') === 'todo'));
 $rest   = array_values(array_filter($active, fn($r) => !in_array($r['meta']['type'] ?? '', ['status', 'todo'], true)));
+
+// relations: id map + reverse related index, ready vs blocked todos
+$byId  = records_by_id();
+$relIn = related_in_index();
+$ready = $blocked = [];
+foreach ($todos as $r) {
+    $ob = open_blockers($r, $byId);
+    if ($ob) $blocked[] = [$r, $ob]; else $ready[] = $r;
+}
 $byType = [];
 foreach ($rest as $r) $byType[$r['meta']['type'] ?? '?'][] = $r;
 $typeOrder = ['gotcha', 'decision', 'fact', 'command', 'preference'];
@@ -51,16 +60,22 @@ uksort($byType, fn($a, $b) => (array_search($a, $typeOrder) ?? 9) <=> (array_sea
     <h3><span class="badge t-status">status</span> <?= h(rec_summary($r)) ?>
       <span class="count" style="font-weight:400">· <?= h(mb_substr($r['meta']['created'] ?? '', 0, 16)) ?></span></h3>
     <div class="body"><?= render_body($r['body']) ?></div>
+    <?= related_html($r, $relIn, $byId) ?>
   </div>
   <?php endforeach; ?>
 
   <?php if ($todos): ?>
   <div class="pin todo">
-    <h3><span class="badge t-todo">todo</span> <?= t('To do') ?> (<?= count($todos) ?>)</h3>
+    <h3><span class="badge t-todo">todo</span> <?= t('To do') ?> (<?= count($ready) ?> <?= t('ready') ?><?= $blocked ? ' · ' . count($blocked) . ' ' . t('blocked') : '' ?>)</h3>
     <ul>
-      <?php foreach ($todos as $r): ?>
+      <?php foreach ($ready as $r): ?>
       <li><b><?= h(rec_summary($r)) ?></b><?php $b = trim($r['body']); if ($b !== ''): ?> — <?= h(mb_substr(str_replace("\n", ' ', $b), 0, 160)) ?><?php endif; ?>
-          <a class="meta" href="index.php?id=<?= h($r['id']) ?>"><?= h($r['id']) ?></a></li>
+          <a class="meta" href="index.php?id=<?= h($r['id']) ?>"><?= h($r['id']) ?></a><?= related_html($r, $relIn, $byId) ?></li>
+      <?php endforeach; ?>
+      <?php foreach ($blocked as [$r, $ob]): ?>
+      <li class="blocked"><b><?= h(rec_summary($r)) ?></b>
+          <span class="blockedby"><?= t('blocked by') ?> <?= implode(' ', array_map(fn($i) => id_chip($i, $byId), $ob)) ?></span>
+          <a class="meta" href="index.php?id=<?= h($r['id']) ?>"><?= h($r['id']) ?></a><?= related_html($r, $relIn, $byId) ?></li>
       <?php endforeach; ?>
     </ul>
   </div>
@@ -76,6 +91,7 @@ uksort($byType, fn($a, $b) => (array_search($a, $typeOrder) ?? 9) <=> (array_sea
           <td class="summary" onclick="toggleBody(this)">
             <b><?= h(rec_summary($r)) ?></b>
             <div class="meta"><a href="index.php?id=<?= h($r['id']) ?>"><?= h($r['id']) ?></a> · conf <?= h($r['meta']['confidence'] ?? '?') ?> · <?= h($r['meta']['source'] ?? '') ?> · <?= h(mb_substr($r['meta']['created'] ?? '', 0, 16)) ?></div>
+            <?= related_html($r, $relIn, $byId) ?>
           </td>
         </tr>
         <tr class="bodyrow" style="display:none"><td><?= render_body($r['body']) ?></td></tr>

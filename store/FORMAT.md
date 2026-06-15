@@ -34,6 +34,10 @@ REDIRECT_HTTP_AUTHORIZATION, then getallheaders(). Without this every authentica
 - `status` ∈ `active` | `superseded`
 - `priority: critical` — optional; a critical action rule: ALWAYS injected, first, with its body,
   regardless of the injection budget (`mem.py pin <id>` / `unpin`, or `add --critical`)
+- `related-to: <id>, <id>` — optional; links to related memories (a gotcha ↔ the decision that
+  caused it, a status ↔ its todos). Shown both ways in the web UI. (`mem.py link <id> <other>...`)
+- `blocked-by: <id>, <id>` — optional, on `todo`s; work that must be done first. `mem.py ready`
+  lists todos with no OPEN blocker (a blocker is open while it is still an active todo).
 - `superseded-by: <id>` — present only when `status: superseded` (records are never deleted —
   history is preserved, plus git)
 - `confidence` — `0.0`..`1.0` (manual = `1.0`; LLM-extracted candidates carry the model's score)

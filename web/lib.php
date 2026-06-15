@@ -142,6 +142,10 @@ function ro_strings(): array {
         'project' => 'proiect',
         'No active memories for' => 'Nicio memorie activa pentru',
         'To do' => 'De facut',
+        'ready' => 'ready',
+        'blocked' => 'blocate',
+        'blocked by' => 'blocat de',
+        'related' => 'inrudite',
         'Project page' => 'Pagina proiectului',
         'help.project' => 'Echivalentul vizual al injectarii la SessionStart: status (unde am ramas) si todo (ce urmeaza) sus, apoi cunostintele grupate pe tip.',
         'help.project2' => 'Deschide-o cand reiei proiectul dupa o pauza.',
@@ -353,6 +357,8 @@ function render_record(array $r): string {
         "- status: {$r['status']}",
     ];
     if (!empty($r['priority'])) $lines[] = "- priority: {$r['priority']}";
+    if (!empty($r['related-to'])) $lines[] = "- related-to: {$r['related-to']}";
+    if (!empty($r['blocked-by'])) $lines[] = "- blocked-by: {$r['blocked-by']}";
     if (!empty($r['superseded-by'])) $lines[] = "- superseded-by: {$r['superseded-by']}";
     $lines[] = "- confidence: {$r['confidence']}";
     $lines[] = "- source: {$r['source']}";
@@ -360,6 +366,66 @@ function render_record(array $r): string {
     $lines[] = trim($r['body']);
     $lines[] = "<!-- mem:end -->";
     return implode("\n", $lines) . "\n";
+}
+
+/* ---------- relations: related-to (any record) + blocked-by (todos) ---------- */
+
+// The comma-separated id list stored in a meta field (related-to / blocked-by).
+function rec_ids(array $r, string $key): array {
+    $v = $r['meta'][$key] ?? '';
+    return array_values(array_filter(array_map('trim', explode(',', $v)), fn($x) => $x !== ''));
+}
+
+// Blockers of a todo that are still OPEN (= an active todo). Resolved = superseded/missing.
+function open_blockers(array $r, array $byId): array {
+    $out = [];
+    foreach (rec_ids($r, 'blocked-by') as $bid) {
+        $b = $byId[$bid] ?? null;
+        if ($b && ($b['meta']['status'] ?? 'active') === 'active' && ($b['meta']['type'] ?? '') === 'todo') $out[] = $bid;
+    }
+    return $out;
+}
+
+// Map id => record, for relation lookups.
+function records_by_id(): array {
+    $by = [];
+    foreach (all_records() as $r) $by[$r['id']] = $r;
+    return $by;
+}
+
+// Reverse index id => [ids that declare related-to it], so links show on both ends.
+function related_in_index(): array {
+    $in = [];
+    foreach (all_records() as $r) foreach (rec_ids($r, 'related-to') as $t) $in[$t][] = $r['id'];
+    return $in;
+}
+
+// A clickable id chip linking to the record, titled with its summary.
+function id_chip(string $id, array $byId): string {
+    $sum = isset($byId[$id]) ? rec_summary($byId[$id]) : '';
+    return '<a class="idchip" href="index.php?id=' . h($id) . '" title="' . h($sum) . '">' . h(substr($id, -6)) . '</a>';
+}
+
+// "↔ a, b" line of related links (outgoing + incoming), or '' if none.
+function related_html(array $r, array $relIn, array $byId): string {
+    $ids = array_values(array_unique(array_merge(rec_ids($r, 'related-to'), $relIn[$r['id']] ?? [])));
+    if (!$ids) return '';
+    return '<div class="rel">↔ ' . implode(' ', array_map(fn($i) => id_chip($i, $byId), $ids)) . '</div>';
+}
+
+// Combined relations line for a record body: related-to + (for todos) blocked-by.
+function relations_block(array $r, array $relIn, array $byId): string {
+    $out = related_html($r, $relIn, $byId);
+    if (($r['meta']['type'] ?? '') === 'todo') {
+        $bb = rec_ids($r, 'blocked-by');
+        if ($bb) {
+            $open = open_blockers($r, $byId);
+            $cls = $open ? 'blockedby' : 'rel';
+            $out .= '<div class="' . $cls . '" style="margin-top:4px;display:inline-block">'
+                  . t('blocked by') . ' ' . implode(' ', array_map(fn($i) => id_chip($i, $byId), $bb)) . '</div>';
+        }
+    }
+    return $out;
 }
 
 function add_record(string $type, string $scope, string $summary, string $body,
@@ -421,6 +487,8 @@ function update_record(string $id, array $fields): bool {
             'body' => $fields['body'] ?? $r['body'],
         ];
         if (!empty($m['priority'])) $data['priority'] = $m['priority'];
+        if (!empty($m['related-to'])) $data['related-to'] = $m['related-to'];
+        if (!empty($m['blocked-by'])) $data['blocked-by'] = $m['blocked-by'];
         if (!empty($m['superseded-by'])) $data['superseded-by'] = $m['superseded-by'];
         return render_record($data);
     });
@@ -437,6 +505,8 @@ function supersede_record(string $id, string $by = ''): bool {
             'source' => $m['source'] ?? 'web', 'body' => $r['body'],
         ];
         if (!empty($m['priority'])) $data['priority'] = $m['priority'];
+        if (!empty($m['related-to'])) $data['related-to'] = $m['related-to'];
+        if (!empty($m['blocked-by'])) $data['blocked-by'] = $m['blocked-by'];
         if ($by !== '') $data['superseded-by'] = $by;
         return render_record($data);
     });

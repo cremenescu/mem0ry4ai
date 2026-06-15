@@ -242,7 +242,10 @@ def cmd_list(a):
             "confidence": r["meta"].get("confidence"), "source": r["meta"].get("source"),
             "created": r["meta"].get("created"), "updated": r["meta"].get("updated"),
             "superseded_by": r["meta"].get("superseded-by"),
-            "priority": r["meta"].get("priority"), "body": r["body"],
+            "priority": r["meta"].get("priority"),
+            "related_to": r["meta"].get("related-to"),
+            "blocked_by": r["meta"].get("blocked-by"),
+            "body": r["body"],
         } for r in recs]
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return
@@ -438,6 +441,113 @@ def cmd_unpin(a):
     print(f"unpinned {a.id} (normal priority)  in {rel}")
 
 
+# ----- relations: related-to (any record) + blocked-by (todos) -----
+
+def _list_meta(rec, key):
+    """The comma-separated id list stored in meta[key] (e.g. related-to, blocked-by)."""
+    return [x.strip() for x in (rec["meta"].get(key, "") or "").split(",") if x.strip()]
+
+
+def _edit_list_meta(rec_id, key, add=(), remove=()):
+    """In-place add/remove of ids in a comma-separated meta list field. Drops the line
+    when the list becomes empty. Returns (relpath, new_list)."""
+    for path in store_files():
+        for r in parse_file(path):
+            if r["id"] != rec_id:
+                continue
+            cur = _list_meta(r, key)
+            for i in add:
+                if i and i != rec_id and i not in cur:
+                    cur.append(i)
+            cur = [i for i in cur if i not in set(remove)]
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            new_block = []
+            for k in range(r["start"], r["end"] + 1):
+                line = lines[k]
+                mm = META_RE.match(line.rstrip("\n"))
+                if mm and mm.group("k") == key:
+                    continue  # drop existing; re-added after status if non-empty
+                if mm and mm.group("k") == "updated":
+                    line = f"- updated: {now_ts()}\n"
+                new_block.append(line)
+                if cur and mm and mm.group("k") == "status":
+                    new_block.append(f"- {key}: {', '.join(cur)}\n")
+            lines[r["start"]:r["end"] + 1] = new_block
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            return os.path.relpath(path, DATA), cur
+    sys.exit(f"id not found: {rec_id}")
+
+
+def _warn_unknown(ids):
+    have = {r["id"] for r in all_records()}
+    missing = [i for i in ids if i not in have]
+    if missing:
+        print(f"warning: unknown id(s): {', '.join(missing)}")
+
+
+def cmd_link(a):
+    _warn_unknown(a.others)
+    rel, cur = _edit_list_meta(a.id, "related-to", add=a.others)
+    print(f"linked {a.id} related-to: {', '.join(cur) or '(none)'}  in {rel}")
+
+
+def cmd_unlink(a):
+    rel, cur = _edit_list_meta(a.id, "related-to", remove=a.others)
+    print(f"unlinked {a.id} related-to: {', '.join(cur) or '(none)'}  in {rel}")
+
+
+def cmd_block(a):
+    _warn_unknown(a.blockers)
+    rel, cur = _edit_list_meta(a.todo, "blocked-by", add=a.blockers)
+    print(f"{a.todo} blocked-by: {', '.join(cur) or '(none)'}  in {rel}")
+
+
+def cmd_unblock(a):
+    remove = a.blockers
+    if not remove:  # no ids given -> clear all blockers
+        cur0 = next((_list_meta(r, "blocked-by") for r in all_records() if r["id"] == a.todo), [])
+        remove = cur0
+    rel, cur = _edit_list_meta(a.todo, "blocked-by", remove=remove)
+    print(f"{a.todo} blocked-by: {', '.join(cur) or '(none)'}  in {rel}")
+
+
+def _open_blockers(rec, by_id):
+    """Blockers of a todo that are still OPEN (active todos). Resolved = superseded/missing."""
+    out = []
+    for bid in _list_meta(rec, "blocked-by"):
+        b = by_id.get(bid)
+        if b and b["meta"].get("status", "active") == "active" and b["meta"].get("type") == "todo":
+            out.append(bid)
+    return out
+
+
+def cmd_ready(a):
+    """Active todos with no OPEN blocker = what you can tackle right now."""
+    recs = all_records()
+    by_id = {r["id"]: r for r in recs}
+    todos = [r for r in recs
+             if r["meta"].get("type") == "todo"
+             and r["meta"].get("status", "active") == "active"
+             and (not a.scope or r["meta"].get("scope") == a.scope)]
+    ready, blocked = [], []
+    for r in todos:
+        ob = _open_blockers(r, by_id)
+        (blocked if ob else ready).append((r, ob))
+    ready.sort(key=lambda t: t[0]["meta"].get("created", ""), reverse=True)
+    if not todos:
+        print("(no active todos)")
+        return
+    print(f"READY ({len(ready)}):")
+    for r, _ in ready:
+        print(f"  {r['id']}  [{r['meta'].get('scope','?')}]  {record_summary(r)}")
+    if blocked:
+        print(f"\nBLOCKED ({len(blocked)}):")
+        for r, ob in blocked:
+            print(f"  {r['id']}  [{r['meta'].get('scope','?')}]  {record_summary(r)}  <- {', '.join(ob)}")
+
+
 def cmd_audit(a):
     """Report records containing secret-like patterns. Never modifies anything."""
     recs = [r for r in all_records() if _match_filters(r, a.scope, None, "all")]
@@ -561,6 +671,30 @@ def main():
     pf = sub.add_parser("unpin", help="remove the critical-rule mark")
     pf.add_argument("id")
     pf.set_defaults(func=cmd_unpin)
+
+    pk = sub.add_parser("link", help="link a memory to related ones (related-to)")
+    pk.add_argument("id")
+    pk.add_argument("others", nargs="+", help="id(s) of related memories")
+    pk.set_defaults(func=cmd_link)
+
+    puk = sub.add_parser("unlink", help="remove related-to link(s)")
+    puk.add_argument("id")
+    puk.add_argument("others", nargs="+", help="id(s) to unlink")
+    puk.set_defaults(func=cmd_unlink)
+
+    pb = sub.add_parser("block", help="mark a todo as blocked by other work (blocked-by)")
+    pb.add_argument("todo", help="the blocked todo id")
+    pb.add_argument("blockers", nargs="+", help="id(s) that must be done first")
+    pb.set_defaults(func=cmd_block)
+
+    pub = sub.add_parser("unblock", help="remove blocker(s) from a todo (no id = clear all)")
+    pub.add_argument("todo")
+    pub.add_argument("blockers", nargs="*", help="id(s) to remove; empty = clear all")
+    pub.set_defaults(func=cmd_unblock)
+
+    prd = sub.add_parser("ready", help="active todos with no open blocker (what to tackle now)")
+    prd.add_argument("--scope")
+    prd.set_defaults(func=cmd_ready)
 
     px = sub.add_parser("reindex", help="rebuild the derived FTS5 index from markdown")
     px.set_defaults(func=cmd_reindex)
