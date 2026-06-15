@@ -170,34 +170,37 @@ var GRAPH = { nodes: <?= json_encode($gnodes, JSON_UNESCAPED_UNICODE | JSON_UNES
 
   // force simulation
   var REP = 5200, LEN = 118, SPRING = 0.035, GRAV = 0.018, DAMP = 0.9, alpha = 1, drag = null;
-  function tick(){
-    alpha = drag ? 0.5 : Math.max(0, alpha * 0.985);
-    var i, j, n, dx, dy, d2, d, f;
+  function physics(a){
+    var i, j, n, dx, dy, d2, d, f, ux, uy;
     for (i = 0; i < nodes.length; i++) { nodes[i].fx = 0; nodes[i].fy = 0; }
     for (i = 0; i < nodes.length; i++) {
       for (j = i + 1; j < nodes.length; j++) {
         dx = nodes[i].x - nodes[j].x; dy = nodes[i].y - nodes[j].y;
         d2 = dx*dx + dy*dy || 0.01; d = Math.sqrt(d2); f = REP / d2;
-        var ux = dx/d, uy = dy/d;
+        ux = dx/d; uy = dy/d;
         nodes[i].fx += ux*f; nodes[i].fy += uy*f;
         nodes[j].fx -= ux*f; nodes[j].fy -= uy*f;
       }
     }
     edges.forEach(function(e){
-      var a = byId[e.s], b = byId[e.t]; if (!a || !b) return;
-      dx = b.x - a.x; dy = b.y - a.y; d = Math.sqrt(dx*dx + dy*dy) || 0.01;
-      f = (d - LEN) * SPRING; var ux = dx/d, uy = dy/d;
-      a.fx += ux*f; a.fy += uy*f; b.fx -= ux*f; b.fy -= uy*f;
+      var na = byId[e.s], nb = byId[e.t]; if (!na || !nb) return;
+      var ex = nb.x - na.x, ey = nb.y - na.y, ed = Math.sqrt(ex*ex + ey*ey) || 0.01;
+      var ef = (ed - LEN) * SPRING, eux = ex/ed, euy = ey/ed;
+      na.fx += eux*ef; na.fy += euy*ef; nb.fx -= eux*ef; nb.fy -= euy*ef;
     });
     for (i = 0; i < nodes.length; i++) {
       n = nodes[i];
       n.fx += (CX - n.x) * GRAV; n.fy += (CY - n.y) * GRAV;
       if (n === drag) continue;
-      n.vx = (n.vx + n.fx * alpha) * DAMP; n.vy = (n.vy + n.fy * alpha) * DAMP;
+      n.vx = (n.vx + n.fx * a) * DAMP; n.vy = (n.vy + n.fy * a) * DAMP;
       n.x += n.vx; n.y += n.vy;
       n.x = Math.max(n.r+4, Math.min(W-n.r-4, n.x));
       n.y = Math.max(n.r+4, Math.min(H-n.r-30, n.y));
     }
+  }
+  function tick(){
+    alpha = drag ? 0.5 : Math.max(0, alpha * 0.985);
+    physics(alpha);
     render();
     requestAnimationFrame(tick);
   }
@@ -244,6 +247,10 @@ var GRAPH = { nodes: <?= json_encode($gnodes, JSON_UNESCAPED_UNICODE | JSON_UNES
     edges.forEach(function(e){ e._el.classList.remove('hot'); e._el.classList.remove('dim'); });
   });
 
+  // warmup: pre-settle the layout synchronously so the first paint (and screenshots) show a
+  // laid-out graph instead of a blob — even before any animation frame runs.
+  (function(){ var a = 1; for (var k = 0; k < 280; k++) { physics(a); a *= 0.985; } })();
+  alpha = 0.06;
   render(); requestAnimationFrame(tick);
 })();
 </script>
