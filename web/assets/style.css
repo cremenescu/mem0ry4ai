@@ -299,3 +299,20 @@ ul.links{list-style:none;margin:0;padding:0;border:1px solid #e6ebf2;border-radi
 .lk-sum{color:#1f2d3d;text-decoration:none;font-weight:500}
 .lk-sum:hover{color:#006fff;text-decoration:underline}
 .lk-scope{font-size:11px;color:#8a98ac;background:#eef2f7;border-radius:4px;padding:0 5px}
+
+/* relations graph (links.php) */
+.graphwrap{margin-top:14px;border:1px solid #e6ebf2;border-radius:10px;background:linear-gradient(#fcfdff,#f6f9fe);overflow:hidden}
+#graph{display:block;width:100%;height:auto;touch-action:none}
+.gedge{stroke:#c3cedd;stroke-width:1.6}
+.gedge-blocked{stroke:#e0a96b;stroke-dasharray:5 4}
+.gedge.hot{stroke:#006fff;stroke-width:2.4}
+.gedge-blocked.hot{stroke:#c98a3a}
+.gedge.dim{opacity:.18}
+.gnode .glabel{font:11px ui-sans-serif,system-ui,sans-serif;fill:#56657a;pointer-events:none}
+.gnode circle{transition:opacity .12s}
+.gnode.dim{opacity:.22}
+.graph-legend{display:flex;flex-wrap:wrap;gap:12px;padding:8px 14px;border-top:1px solid #eef2f7;font-size:12px;color:#56657a}
+.graph-legend .lgitem{display:inline-flex;align-items:center;gap:5px}
+.graph-legend i{width:10px;height:10px;border-radius:3px;display:inline-block}
+.lk-listwrap{margin-top:14px}
+.lk-listwrap>summary{cursor:pointer;font-weight:600;color:#33506b;font-size:14px}
