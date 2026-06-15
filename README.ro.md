@@ -72,6 +72,10 @@ python3 hooks/install.py --target user
   pagina Memorii **auto-detecteaza** embedder-ul si arata un beculet — **verde** = LLM-ul local e pornit
   (keyword + semantic), **gri** = revine la cautare clasica. `mem.py search` afiseaza modul folosit;
   `--no-semantic` forteaza keyword.
+- **Anti-duplicare.** `mem.py add` **avertizeaza (nu blocheaza)** cand exista deja o memorie de acelasi
+  tip foarte similara — arata cele mai apropiate + comanda `supersede` gata de rulat — ca sa contopesti
+  in loc sa dublezi. Memoriile noi se **embededeaza automat la SessionEnd**, deci cautarea si sugestiile
+  raman la zi fara `mem.py embed` manual. (`MEM_DUP_CHECK=0` dezactiveaza; `MEM_DUP_THRESHOLD` regleaza pragul.)
 - **Web UI** = dashboard (status sistem) + Memorii (lista filtrabila) + Proiecte (sumar per proiect)
   + Legaturi (graf), navigare consistenta + breadcrumb pe toate paginile.
 

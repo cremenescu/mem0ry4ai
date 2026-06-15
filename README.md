@@ -52,8 +52,9 @@ Claude Code session
   ├─ SessionStart hook ─► injects relevant memories (global + current project;
   │                       from a monorepo root: a capped index of ALL projects)
   ├─ [work] the agent proactively writes durable findings ─► mem.py add
-  └─ SessionEnd/PreCompact hook ─► transcript pointer to staging/ + auto-commit of the
-                                    store (end-of-session git checkpoint — no manual chore)
+  └─ SessionEnd/PreCompact hook ─► transcript pointer to staging/ + auto-commit of the store
+                                    (end-of-session git checkpoint) + auto-embed of new memories
+                                    (so search/suggestions stay fresh) — no manual chore
 
 store/*.md   ◄── SOURCE OF TRUTH (markdown + git: audit, diff, rollback, supersede)
    ├─► store/.index.db   (FTS5, ranked search — derived, regenerable)
@@ -115,6 +116,11 @@ hooks handle recall, the agent handles capture):
 > of project status), proactively save it without asking:
 > `echo "body" | <path>/mem.py add --type <T> --scope <global|project:slug> --summary "..." --source claude:live`
 > Check `mem.py search` first to avoid duplicates. Never save ephemeral tasks.
+
+`mem.py add` also **warns (never blocks)** when a near-duplicate memory of the same type already
+exists — printing the closest matches and a ready-to-run `supersede` command — so overlapping
+memories get merged instead of piling up. New memories are **auto-embedded at session end**, so
+search and the Links suggestions stay current without running `mem.py embed` by hand.
 
 ## Memory types
 
@@ -325,6 +331,8 @@ Everything is overridable via environment variables — no config file needed:
 | `MEM_LLM_MODEL` | `qwen2.5:7b-instruct` | model used by `consolidate.py` |
 | `MEM_EMBED_MODEL` | `all-minilm` | embedding model for hybrid search + link suggestions (retrieval only) |
 | `MEM_SUGGEST_THRESHOLD` | `0.62` | min cosine similarity for a suggested link to appear |
+| `MEM_DUP_CHECK` | `1` | `mem.py add` warns (never blocks) when a near-duplicate of the same type already exists; `0` to disable |
+| `MEM_DUP_THRESHOLD` | `0.62` | cosine similarity above which the add-time duplicate warning fires |
 
 ## Design notes
 

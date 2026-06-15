@@ -69,7 +69,26 @@ def main():
         pass
     if data.get("hook_event_name") == "SessionEnd":
         auto_commit_store()
+        auto_embed()
     return 0
+
+
+def auto_embed():
+    """Best-effort: refresh the semantic vectors at session end so search/link-suggestions
+    reflect memories written this session, without the user running `mem.py embed` by hand.
+    Launched DETACHED so it never blocks the session; incremental (only changed records) and a
+    no-op in milliseconds when no embedder is up. Silent on any error."""
+    import subprocess
+    try:
+        mem = os.path.join(PROJ, "mem.py")
+        if not os.path.exists(mem):
+            return
+        env = dict(os.environ, MEM_DATA_DIR=DATA)
+        subprocess.Popen([sys.executable, mem, "embed"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         env=env, start_new_session=True)
+    except Exception:
+        pass
 
 
 def auto_commit_store():

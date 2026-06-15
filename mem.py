@@ -193,6 +193,12 @@ def cmd_add(a):
     path = scope_file(a.scope)
     ensure_header(path, a.scope)
     files = ", ".join(x.strip() for x in (a.files or "").split(",") if x.strip()) or None
+    # duplicate guard: warn (never block) if a very similar memory of the same type already exists,
+    # so we supersede instead of silently piling up near-duplicates. Computed before the write so it
+    # never matches the new record against itself.
+    dup_warn = []
+    if not a.no_dup_check and os.environ.get("MEM_DUP_CHECK", "1") != "0":
+        dup_warn = find_duplicates(a.type, summary, body, files)
     rid = gen_id()
     rec = render_record(rid, a.type, a.scope, summary, body,
                         a.confidence, a.source, now_ts(), now_ts(), "active",
@@ -201,6 +207,14 @@ def cmd_add(a):
         f.write("\n" + rec)
     crit = "  [CRITICAL]" if a.critical else ""
     print(f"added {rid}  [{a.type} · {a.scope}]{crit}  -> {os.path.relpath(path, DATA)}")
+    sys.stdout.flush()   # so the stdout 'added' line lands before the stderr warning below
+    if dup_warn:
+        print("note: a very similar memory of this type already exists — supersede instead of duplicating?",
+              file=sys.stderr)
+        for s, did, dscope, dsum in dup_warn:
+            print(f"   {round(s * 100):>3}%  {did}  [{a.type}·{dscope}]  {dsum[:78]}", file=sys.stderr)
+        print(f"   -> mem.py supersede <old-id> --by {rid}   (mute: --no-dup-check / MEM_DUP_CHECK=0)",
+              file=sys.stderr)
 
 
 def _match_filters(rec, scope, rtype, status, since=None, until=None):
@@ -479,6 +493,47 @@ def _cosine(a, b):
     na = math.sqrt(sum(x * x for x in a))
     nb = math.sqrt(sum(y * y for y in b))
     return sum(x * y for x, y in zip(a, b)) / (na * nb) if na and nb else 0.0
+
+
+def find_duplicates(rec_type, summary, body, files=None, k=3):
+    """Existing ACTIVE memories of the SAME type most similar to a candidate, as
+    (score, id, scope, summary) sorted high-first. Semantic (cosine over .embed.db) when an
+    embedder is up; otherwise a lexical Jaccard fallback on the summary. Empty if nothing crosses
+    the bar. A guard against silently duplicating a memory — it warns at write time, never blocks.
+    Tunable: MEM_DUP_THRESHOLD (cosine, default 0.62), MEM_DUP_JACCARD (lexical, default 0.5)."""
+    cands = [r for r in all_records()
+             if r["meta"].get("status", "active") == "active"
+             and r["meta"].get("type") == rec_type]
+    if not cands:
+        return []
+    text = f"{summary}\n{body}" + (f"\nfiles: {files}" if files else "")
+    hits = []
+    emb = load_embeddings()
+    qv = None
+    if emb:
+        import llm
+        qv = llm.embed(text)
+    if qv is not None:
+        thresh = float(os.environ.get("MEM_DUP_THRESHOLD", "0.62"))
+        for r in cands:
+            v = emb.get(r["id"])
+            if not v:
+                continue
+            s = _cosine(qv, v)
+            if s >= thresh:
+                hits.append((s, r))
+    else:
+        # no embedder: token-overlap (Jaccard) on the summary catches near-identical wording
+        toks = lambda s: set(re.findall(r"\w+", (s or "").lower()))
+        qs = toks(summary)
+        jac = float(os.environ.get("MEM_DUP_JACCARD", "0.5"))
+        if qs:
+            for r in cands:
+                rs = toks(record_summary(r))
+                if rs and len(qs & rs) / len(qs | rs) >= jac:
+                    hits.append((len(qs & rs) / len(qs | rs), r))
+    hits.sort(key=lambda x: -x[0])
+    return [(s, r["id"], r["meta"].get("scope", ""), record_summary(r)) for s, r in hits[:k]]
 
 
 def hybrid_search(query, allow_semantic=True):
@@ -783,6 +838,8 @@ def main():
     pa.add_argument("--source", default="manual")
     pa.add_argument("--files", help="comma-separated file paths this memory relates to")
     pa.add_argument("--no-redact", action="store_true", help="keep secret values verbatim (redacted by default)")
+    pa.add_argument("--no-dup-check", action="store_true",
+                    help="skip the semantic warning about a similar existing memory")
     pa.add_argument("--critical", action="store_true",
                     help="critical action rule: ALWAYS injected, first, regardless of the budget")
     pa.set_defaults(func=cmd_add)
