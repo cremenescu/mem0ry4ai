@@ -8,6 +8,7 @@ to manual capture.
 """
 import json
 import os
+import urllib.error
 import urllib.request
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
@@ -35,18 +36,27 @@ def embed(text, timeout=30):
     text = (text or "").strip()
     if not text:
         return None
-    body = json.dumps({"model": EMBED_MODEL, "prompt": text}).encode("utf-8")
-    req = urllib.request.Request(
-        f"{OLLAMA_URL}/api/embeddings", data=body,
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            data = json.loads(r.read().decode("utf-8"))
-        vec = data.get("embedding")
-        return vec if isinstance(vec, list) and vec else None
-    except Exception:
-        return None
+    # small embedding models have a short context (e.g. all-minilm ~256 tokens) and return
+    # HTTP 500 on longer/denser inputs. Cap the text, and on an HTTP error retry with a shorter
+    # slice — so long memories still get a (slightly truncated) vector instead of being skipped.
+    maxchars = int(os.environ.get("MEM_EMBED_MAXCHARS", "1200"))
+    for cut in (maxchars, maxchars // 2, maxchars // 4):
+        body = json.dumps({"model": EMBED_MODEL, "prompt": text[:cut]}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{OLLAMA_URL}/api/embeddings", data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = json.loads(r.read().decode("utf-8"))
+            vec = data.get("embedding")
+            if isinstance(vec, list) and vec:
+                return vec
+        except urllib.error.HTTPError:
+            continue   # too long for the model -> try a shorter slice
+        except Exception:
+            return None  # connection refused / model missing -> give up cleanly
+    return None
 
 
 def embedder_up():

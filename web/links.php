@@ -77,14 +77,24 @@ function endpoint_html(array $r): string {
     <h3><?= t('Suggested links') ?> <span class="count"><?= count($suggestions) ?></span>
       <small><?= ui_lang() === 'ro' ? 'semantic — tu confirmi' : 'semantic — you confirm' ?></small></h3>
     <ul id="suggest-list">
-      <?php foreach ($suggestions as $s): $A = $sb[$s['a']] ?? null; $B = $sb[$s['b']] ?? null; if (!$A || !$B) continue; ?>
+      <?php
+      $sg_end = function (array $r) {
+          $sc = $r['meta']['scope'] ?? '';
+          $scl = $sc !== 'global' ? '<span class="sg-scope">' . h(scope_label($sc)) . '</span> ' : '';
+          $bd = trim(preg_replace('/\s+/', ' ', $r['body']));
+          ob_start(); ?>
+        <div class="sg-end">
+          <div class="sg-top"><?= type_badge($r['meta']['type'] ?? '?') ?>
+            <a class="sg-sum" href="memories.php?id=<?= h($r['id']) ?>"><?= $scl . h(rec_summary($r)) ?></a></div>
+          <?php if ($bd !== ''): ?><div class="sg-body"><?= h(mb_substr($bd, 0, 150)) ?><?= mb_strlen($bd) > 150 ? '…' : '' ?></div><?php endif; ?>
+        </div>
+      <?php return ob_get_clean(); };
+      foreach ($suggestions as $s): $A = $sb[$s['a']] ?? null; $B = $sb[$s['b']] ?? null; if (!$A || !$B) continue; ?>
       <li data-a="<?= h($s['a']) ?>" data-b="<?= h($s['b']) ?>">
-        <span class="sg-pct"><?= round($s['sim'] * 100) ?>%</span>
-        <?= type_badge($A['meta']['type'] ?? '?') ?> <span class="sg-sum"><?= h(mb_substr(rec_summary($A), 0, 56)) ?></span>
-        <span class="sg-rel">&harr;</span>
-        <?= type_badge($B['meta']['type'] ?? '?') ?> <span class="sg-sum"><?= h(mb_substr(rec_summary($B), 0, 56)) ?></span>
-        <span class="sg-act"><button type="button" class="btn btn-primary sg-link"><?= t('Link') ?></button>
-          <button type="button" class="btn btn-ghost sg-dismiss"><?= t('Dismiss') ?></button></span>
+        <div class="sg-head"><span class="sg-pct" title="semantic similarity"><?= round($s['sim'] * 100) ?>%</span>
+          <span class="sg-act"><button type="button" class="btn btn-primary sg-link"><?= t('Link') ?></button>
+            <button type="button" class="btn btn-ghost sg-dismiss"><?= t('Dismiss') ?></button></span></div>
+        <div class="sg-pair"><?= $sg_end($A) ?><div class="sg-mid">&harr;</div><?= $sg_end($B) ?></div>
       </li>
       <?php endforeach; ?>
     </ul>
