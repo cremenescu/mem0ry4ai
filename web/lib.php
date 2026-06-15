@@ -5,7 +5,7 @@
 
 declare(strict_types=1);
 
-const TYPES = ['gotcha', 'fact', 'decision', 'command', 'preference', 'todo', 'status'];
+const TYPES = ['gotcha', 'fact', 'decision', 'command', 'procedural', 'preference', 'todo', 'status'];
 
 function proj_root(): string { return dirname(__DIR__); }
 
@@ -157,6 +157,7 @@ function ro_strings(): array {
         'help.fact' => 'Fapt stabil: IP, port, cale, target de deploy.',
         'help.decision' => 'Decizie de arhitectura + motivul ei.',
         'help.command' => 'O comanda utila.',
+        'help.procedural' => 'O secventa multi-pas / runbook (release, deploy, ritual).',
         'help.preference' => 'O preferinta a ta.',
         'help.todo' => 'Ce ramane de facut. Terminat = superseded.',
         'help.status' => 'Unde e proiectul / unde am ramas.',
@@ -173,6 +174,8 @@ function ro_strings(): array {
         'blocked' => 'blocate',
         'blocked by' => 'blocat de',
         'related' => 'inrudite',
+        'files' => 'fisiere',
+        'invalidated' => 'invalidat',
         'Project page' => 'Pagina proiectului',
         'help.project' => 'Echivalentul vizual al injectarii la SessionStart: status (unde am ramas) si todo (ce urmeaza) sus, apoi cunostintele grupate pe tip.',
         'help.project2' => 'Deschide-o cand reiei proiectul dupa o pauza.',
@@ -384,9 +387,12 @@ function render_record(array $r): string {
         "- status: {$r['status']}",
     ];
     if (!empty($r['priority'])) $lines[] = "- priority: {$r['priority']}";
+    if (!empty($r['files'])) $lines[] = "- files: {$r['files']}";
     if (!empty($r['related-to'])) $lines[] = "- related-to: {$r['related-to']}";
     if (!empty($r['blocked-by'])) $lines[] = "- blocked-by: {$r['blocked-by']}";
     if (!empty($r['superseded-by'])) $lines[] = "- superseded-by: {$r['superseded-by']}";
+    if (!empty($r['invalidated'])) $lines[] = "- invalidated: {$r['invalidated']}";
+    if (!empty($r['invalid-reason'])) $lines[] = "- invalid-reason: {$r['invalid-reason']}";
     $lines[] = "- confidence: {$r['confidence']}";
     $lines[] = "- source: {$r['source']}";
     $lines[] = "";
@@ -459,6 +465,23 @@ function all_links(): array {
         }
     }
     return $edges;
+}
+
+// Files chips + (when superseded) the invalidated date/reason, for a record body.
+function rec_extras_html(array $r): string {
+    $out = '';
+    $files = rec_ids($r, 'files');
+    if ($files) {
+        $out .= '<div class="rec-files">' . h(t('files')) . ': '
+              . implode(' ', array_map(fn($f) => '<code>' . h($f) . '</code>', $files)) . '</div>';
+    }
+    $inv = $r['meta']['invalidated'] ?? '';
+    if ($inv !== '') {
+        $reason = $r['meta']['invalid-reason'] ?? '';
+        $out .= '<div class="inval-note">' . h(t('invalidated')) . ' ' . h(mb_substr($inv, 0, 16))
+              . ($reason !== '' ? ' — ' . h($reason) : '') . '</div>';
+    }
+    return $out;
 }
 
 // Combined relations line for a record body: related-to + (for todos) blocked-by.
@@ -535,15 +558,18 @@ function update_record(string $id, array $fields): bool {
             'body' => $fields['body'] ?? $r['body'],
         ];
         if (!empty($m['priority'])) $data['priority'] = $m['priority'];
+        if (!empty($m['files'])) $data['files'] = $m['files'];
         if (!empty($m['related-to'])) $data['related-to'] = $m['related-to'];
         if (!empty($m['blocked-by'])) $data['blocked-by'] = $m['blocked-by'];
         if (!empty($m['superseded-by'])) $data['superseded-by'] = $m['superseded-by'];
+        if (!empty($m['invalidated'])) $data['invalidated'] = $m['invalidated'];
+        if (!empty($m['invalid-reason'])) $data['invalid-reason'] = $m['invalid-reason'];
         return render_record($data);
     });
 }
 
-function supersede_record(string $id, string $by = ''): bool {
-    return rewrite_record($id, function (array $r) use ($by) {
+function supersede_record(string $id, string $by = '', string $reason = ''): bool {
+    return rewrite_record($id, function (array $r) use ($by, $reason) {
         $m = $r['meta'];
         $data = [
             'id' => $r['id'], 'type' => $m['type'] ?? 'fact', 'scope' => $m['scope'] ?? 'global',
@@ -553,9 +579,13 @@ function supersede_record(string $id, string $by = ''): bool {
             'source' => $m['source'] ?? 'web', 'body' => $r['body'],
         ];
         if (!empty($m['priority'])) $data['priority'] = $m['priority'];
+        if (!empty($m['files'])) $data['files'] = $m['files'];
         if (!empty($m['related-to'])) $data['related-to'] = $m['related-to'];
         if (!empty($m['blocked-by'])) $data['blocked-by'] = $m['blocked-by'];
         if ($by !== '') $data['superseded-by'] = $by;
+        // bi-temporal: record WHEN it stopped being valid (= when we learned) + WHY
+        $data['invalidated'] = date('Y-m-d H:i:s');
+        if ($reason !== '') $data['invalid-reason'] = $reason;
         return render_record($data);
     });
 }
@@ -751,7 +781,11 @@ function fts_rebuild(): bool {
         $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         $pdo->exec('CREATE VIRTUAL TABLE mem USING fts5(id UNINDEXED, summary, body)');
         $st = $pdo->prepare('INSERT INTO mem (id, summary, body) VALUES (?, ?, ?)');
-        foreach (all_records() as $r) $st->execute([$r['id'], rec_summary($r), $r['body']]);
+        foreach (all_records() as $r) {
+            $files = $r['meta']['files'] ?? '';
+            $body = $r['body'] . ($files !== '' ? "\nfiles: " . $files : '');  // file paths searchable (same as mem.py)
+            $st->execute([$r['id'], rec_summary($r), $body]);
+        }
         $pdo = null;
         rename($tmp, store_dir() . '/.index.db');
         @chmod(store_dir() . '/.index.db', 0666);
@@ -772,9 +806,25 @@ function fts_query(string $q): ?array {
     try {
         $pdo = new PDO('sqlite:' . store_dir() . '/.index.db');
         $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        $st = $pdo->prepare('SELECT id FROM mem WHERE mem MATCH ? ORDER BY bm25(mem)');
+        $st = $pdo->prepare('SELECT id, bm25(mem) AS s FROM mem WHERE mem MATCH ?');
         $st->execute([$match]);
-        return $st->fetchAll(PDO::FETCH_COLUMN);
+        $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+        if (!$rows) return [];
+        // recency nudge (mirrors mem.py): newer wins near-ties, never overrides a stronger match
+        $w = (float)(getenv('MEM_RECENCY_WEIGHT') ?: 1.5);
+        $ord = [];
+        foreach (all_records() as $r) {
+            $c = substr($r['meta']['created'] ?? '', 0, 10);
+            $ord[$r['id']] = $c !== '' ? strtotime($c) : null;
+        }
+        $vals = array_filter(array_map(fn($x) => $ord[$x['id']] ?? null, $rows));
+        $lo = $vals ? min($vals) : 0; $hi = $vals ? max($vals) : 0; $span = ($hi - $lo) ?: 1;
+        usort($rows, function ($a, $b) use ($ord, $lo, $span, $w) {
+            $ra = $ord[$a['id']] ? ($ord[$a['id']] - $lo) / $span : 0.0;
+            $rb = $ord[$b['id']] ? ($ord[$b['id']] - $lo) / $span : 0.0;
+            return ($a['s'] - $w * $ra) <=> ($b['s'] - $w * $rb);
+        });
+        return array_map(fn($x) => $x['id'], $rows);
     } catch (Throwable $e) {
         return null;
     }

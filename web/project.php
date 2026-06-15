@@ -27,7 +27,7 @@ foreach ($todos as $r) {
 }
 $byType = [];
 foreach ($rest as $r) $byType[$r['meta']['type'] ?? '?'][] = $r;
-$typeOrder = ['gotcha', 'decision', 'fact', 'command', 'preference'];
+$typeOrder = ['gotcha', 'decision', 'fact', 'command', 'procedural', 'preference'];
 uksort($byType, fn($a, $b) => (array_search($a, $typeOrder) ?? 9) <=> (array_search($b, $typeOrder) ?? 9));
 ?>
 <!doctype html>
@@ -92,7 +92,7 @@ uksort($byType, fn($a, $b) => (array_search($a, $typeOrder) ?? 9) <=> (array_sea
             <?= related_html($r, $relIn, $byId) ?>
           </td>
         </tr>
-        <tr class="bodyrow" style="display:none"><td><?= render_body($r['body']) ?></td></tr>
+        <tr class="bodyrow" style="display:none"><td><?= render_body($r['body']) ?><?= rec_extras_html($r) ?></td></tr>
       <?php endforeach; ?>
       </tbody>
     </table>

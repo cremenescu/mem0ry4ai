@@ -42,7 +42,7 @@ function render_row(array $r): string {
     </div>
   </td>
 </tr>
-<tr class="bodyrow" data-bodyfor="<?= h($r['id']) ?>" style="display:none"><td colspan="6"><?= render_body($r['body']) ?><?= relations_block($r, $relIn, $byId) ?></td></tr>
+<tr class="bodyrow" data-bodyfor="<?= h($r['id']) ?>" style="display:none"><td colspan="6"><?= render_body($r['body']) ?><?= rec_extras_html($r) ?><?= relations_block($r, $relIn, $byId) ?></td></tr>
 <?php
     return ob_get_clean();
 }
@@ -275,6 +275,7 @@ $nq = count(queue_pending());
     <dt><span class="badge t-fact">fact</span></dt><dd><?= ui_lang() === 'ro' ? t('help.fact') : 'Stable fact: IP, port, path, deploy target.' ?></dd>
     <dt><span class="badge t-decision">decision</span></dt><dd><?= ui_lang() === 'ro' ? t('help.decision') : 'Architecture decision + the why.' ?></dd>
     <dt><span class="badge t-command">command</span></dt><dd><?= ui_lang() === 'ro' ? t('help.command') : 'A useful command.' ?></dd>
+    <dt><span class="badge t-procedural">procedural</span></dt><dd><?= ui_lang() === 'ro' ? t('help.procedural') : 'A reusable multi-step workflow / runbook.' ?></dd>
     <dt><span class="badge t-preference">preference</span></dt><dd><?= ui_lang() === 'ro' ? t('help.preference') : 'One of your preferences.' ?></dd>
     <dt><span class="badge t-todo">todo</span></dt><dd><?= ui_lang() === 'ro' ? t('help.todo') : 'What remains to be done. Done = superseded.' ?></dd>
     <dt><span class="badge t-status">status</span></dt><dd><?= ui_lang() === 'ro' ? t('help.status') : 'Where the project stands / where you left off.' ?></dd>

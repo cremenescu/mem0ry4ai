@@ -48,7 +48,7 @@ STORE = os.path.join(DATA, "store")
 GLOBAL_FILE = os.path.join(STORE, "global.md")
 PROJ_DIR = os.path.join(STORE, "projects")
 
-TYPES = ["gotcha", "fact", "decision", "command", "preference", "todo", "status"]
+TYPES = ["gotcha", "fact", "decision", "command", "procedural", "preference", "todo", "status"]
 
 START_RE = re.compile(r"^<!-- mem:start id=(?P<id>[0-9a-z-]+) -->\s*$")
 END_MARK = "<!-- mem:end -->"
@@ -144,7 +144,7 @@ def all_records():
 
 
 def render_record(rid, rtype, scope, summary, body, confidence, source, created, updated, status,
-                  priority=None):
+                  priority=None, files=None):
     lines = [
         f"<!-- mem:start id={rid} -->",
         f"### {rtype} · {scope_label(scope)} · {summary}",
@@ -156,6 +156,8 @@ def render_record(rid, rtype, scope, summary, body, confidence, source, created,
     ]
     if priority:
         lines.append(f"- priority: {priority}")
+    if files:
+        lines.append(f"- files: {files}")
     lines += [
         f"- confidence: {confidence}",
         f"- source: {source}",
@@ -188,10 +190,11 @@ def cmd_add(a):
             print(f"redacted secrets: {redact.describe(f1 + f2)} (use --no-redact to keep them)")
     path = scope_file(a.scope)
     ensure_header(path, a.scope)
+    files = ", ".join(x.strip() for x in (a.files or "").split(",") if x.strip()) or None
     rid = gen_id()
     rec = render_record(rid, a.type, a.scope, summary, body,
                         a.confidence, a.source, now_ts(), now_ts(), "active",
-                        priority="critical" if a.critical else None)
+                        priority="critical" if a.critical else None, files=files)
     with open(path, "a", encoding="utf-8") as f:
         f.write("\n" + rec)
     crit = "  [CRITICAL]" if a.critical else ""
@@ -245,6 +248,9 @@ def cmd_list(a):
             "priority": r["meta"].get("priority"),
             "related_to": r["meta"].get("related-to"),
             "blocked_by": r["meta"].get("blocked-by"),
+            "files": r["meta"].get("files"),
+            "invalidated": r["meta"].get("invalidated"),
+            "invalid_reason": r["meta"].get("invalid-reason"),
             "body": r["body"],
         } for r in recs]
         print(json.dumps(out, ensure_ascii=False, indent=2))
@@ -288,8 +294,10 @@ def build_index():
         os.remove(tmp)
         return False
     for r in all_records():
+        files = r["meta"].get("files", "")
+        body = r["body"] + (("\nfiles: " + files) if files else "")  # make file paths searchable
         con.execute("INSERT INTO mem (id, summary, body) VALUES (?, ?, ?)",
-                    (r["id"], record_summary(r), r["body"]))
+                    (r["id"], record_summary(r), body))
     con.commit()
     con.close()
     os.replace(tmp, idx)
@@ -311,13 +319,34 @@ def fts_search(query):
     con = sqlite3.connect(index_path())
     try:
         rows = con.execute(
-            "SELECT id FROM mem WHERE mem MATCH ? ORDER BY bm25(mem)", (match,)
+            "SELECT id, bm25(mem) FROM mem WHERE mem MATCH ?", (match,)
         ).fetchall()
     except sqlite3.OperationalError:
         return None
     finally:
         con.close()
-    return [r[0] for r in rows]
+    if not rows:
+        return []
+    # recency nudge: among matches, newer ranks slightly higher. bm25() is negative-better;
+    # subtract a small recency bonus so recents win near-ties WITHOUT overriding a clearly
+    # stronger keyword match (those differ by many bm25 units). Weight tunable via env.
+    w = float(os.environ.get("MEM_RECENCY_WEIGHT", "1.5"))
+
+    def _ord(rid_created):
+        try:
+            return datetime.datetime.strptime((rid_created or "")[:10], "%Y-%m-%d").toordinal()
+        except ValueError:
+            return None
+    created = {r["id"]: _ord(r["meta"].get("created")) for r in all_records()}
+    ords = [created[i] for i, _ in rows if created.get(i)]
+    lo, hi = (min(ords), max(ords)) if ords else (0, 0)
+    span = (hi - lo) or 1
+
+    def score(rid, bm):
+        o = created.get(rid)
+        rec01 = ((o - lo) / span) if o else 0.0   # 0 = oldest, 1 = newest
+        return bm - w * rec01
+    return [rid for rid, _ in sorted(rows, key=lambda r: score(r[0], r[1]))]
 
 
 def _print_hits(hits):
@@ -378,28 +407,32 @@ def cmd_supersede(a):
                 continue
             with open(path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
+            # bi-temporal: record WHEN it stopped being valid (= when we learned) + WHY,
+            # and keep it (supersede never deletes). Drop any prior copies so re-supersede is clean.
+            inserts = []
+            if a.by:
+                inserts.append(f"- superseded-by: {a.by}\n")
+            inserts.append(f"- invalidated: {now_ts()}\n")
+            if getattr(a, "reason", None):
+                inserts.append(f"- invalid-reason: {a.reason}\n")
             new_block = []
             for k in range(r["start"], r["end"] + 1):
                 line = lines[k]
-                if META_RE.match(line.rstrip("\n")):
-                    mm = META_RE.match(line.rstrip("\n"))
-                    if mm.group("k") == "status":
-                        line = "- status: superseded\n"
-                    elif mm.group("k") == "updated":
-                        line = f"- updated: {now_ts()}\n"
+                mm = META_RE.match(line.rstrip("\n"))
+                if mm and mm.group("k") in ("superseded-by", "invalidated", "invalid-reason"):
+                    continue  # drop old copies; re-added after status
+                if mm and mm.group("k") == "status":
+                    line = "- status: superseded\n"
+                elif mm and mm.group("k") == "updated":
+                    line = f"- updated: {now_ts()}\n"
                 new_block.append(line)
-            # insert superseded-by right after the status line when --by is given
-            if a.by:
-                rebuilt = []
-                for line in new_block:
-                    rebuilt.append(line)
-                    if line.strip() == "- status: superseded":
-                        rebuilt.append(f"- superseded-by: {a.by}\n")
-                new_block = rebuilt
+                if mm and mm.group("k") == "status":
+                    new_block.extend(inserts)
             lines[r["start"]:r["end"] + 1] = new_block
             with open(path, "w", encoding="utf-8") as f:
                 f.writelines(lines)
             extra = f" (replaced by {a.by})" if a.by else ""
+            extra += f" — {a.reason}" if getattr(a, "reason", None) else ""
             print(f"superseded {a.id}{extra}  in {os.path.relpath(path, DATA)}")
             return
     sys.exit(f"id not found: {a.id}")
@@ -623,6 +656,7 @@ def main():
     pa.add_argument("--body", help="body (or pipe it on stdin)")
     pa.add_argument("--confidence", default="1.0")
     pa.add_argument("--source", default="manual")
+    pa.add_argument("--files", help="comma-separated file paths this memory relates to")
     pa.add_argument("--no-redact", action="store_true", help="keep secret values verbatim (redacted by default)")
     pa.add_argument("--critical", action="store_true",
                     help="critical action rule: ALWAYS injected, first, regardless of the budget")
@@ -645,9 +679,10 @@ def main():
     ps.add_argument("--until", help="created on/before (YYYY-MM-DD or 'YYYY-MM-DD HH:MM')")
     ps.set_defaults(func=cmd_search)
 
-    pp = sub.add_parser("supersede", help="mark a memory as superseded")
+    pp = sub.add_parser("supersede", help="mark a memory as superseded (records when + why; never deletes)")
     pp.add_argument("id")
     pp.add_argument("--by", help="id of the record that replaces it")
+    pp.add_argument("--reason", help="why it is no longer valid (kept for the audit trail)")
     pp.set_defaults(func=cmd_supersede)
 
     pr = sub.add_parser("propose", help="queue a candidate for human review (NOT written to the store)")

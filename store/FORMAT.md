@@ -28,7 +28,8 @@ REDIRECT_HTTP_AUTHORIZATION, then getallheaders(). Without this every authentica
 ### Fields
 - `id` (in the start comment) — `YYYYMMDD-<hex6>`, generated at creation, immutable.
 - title `### {type} · {scope-label} · {summary}` — for humans; machines read the meta lines below it.
-- `type` ∈ `gotcha` | `fact` | `decision` | `command` | `preference` | `todo` | `status`
+- `type` ∈ `gotcha` | `fact` | `decision` | `command` | `procedural` | `preference` | `todo` | `status`
+  (`procedural` = a reusable multi-step workflow/runbook, distinct from a single `command`)
 - `scope` = `global` or `project:<slug>`
 - `created` / `updated` — `YYYY-MM-DD HH:MM:SS`
 - `status` ∈ `active` | `superseded`
@@ -38,8 +39,12 @@ REDIRECT_HTTP_AUTHORIZATION, then getallheaders(). Without this every authentica
   caused it, a status ↔ its todos). Shown both ways in the web UI. (`mem.py link <id> <other>...`)
 - `blocked-by: <id>, <id>` — optional, on `todo`s; work that must be done first. `mem.py ready`
   lists todos with no OPEN blocker (a blocker is open while it is still an active todo).
+- `files: a.py, b.php` — optional; file paths this memory relates to (`add --files`), made
+  searchable and shown as chips in the web UI
 - `superseded-by: <id>` — present only when `status: superseded` (records are never deleted —
   history is preserved, plus git)
+- `invalidated: <ts>` + `invalid-reason: <text>` — written on supersede (bi-temporal): WHEN it
+  stopped being valid / when you learned, and WHY. `created` is the valid-from. (`supersede --reason`)
 - `confidence` — `0.0`..`1.0` (manual = `1.0`; LLM-extracted candidates carry the model's score)
 - `source` — `manual` | `claude:live` | `llm:session:<id>` | `web` | ...
 - body = free markdown after the first blank line, up to `<!-- mem:end -->`

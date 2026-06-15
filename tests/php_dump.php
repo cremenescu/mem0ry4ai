@@ -23,6 +23,9 @@ foreach (all_records() as $r) {
         'priority'      => $m['priority'] ?? null,
         'related_to'    => $m['related-to'] ?? null,
         'blocked_by'    => $m['blocked-by'] ?? null,
+        'files'         => $m['files'] ?? null,
+        'invalidated'   => $m['invalidated'] ?? null,
+        'invalid_reason'=> $m['invalid-reason'] ?? null,
         'body'          => $r['body'],
     ];
 }
