@@ -65,10 +65,13 @@ python3 hooks/install.py --target user
   Pagina **Legaturi** arata **sugestii semantice** (cele mai apropiate perechi nelegate, confirmate
   sau respinse de tine) deasupra unui graf force-directed (SVG, fara dependinte) + lista.
 - **Cautare hibrida (optionala).** Implicit keyword-first (FTS5 + nudge pe recenta), zero dependinte.
-  Cu Ollama + un embedder mic (`all-minilm`), `mem.py search` fuzioneaza scorul keyword cu similaritate
-  cosinus pe vectori locali — „auth token expiry" gaseste o memorie care zice „JWT TTL". Embedder-ul e
-  DOAR pentru regasire (nu decide, nu scrie -> nu atinge gate-ul de incredere); fara Ollama, fallback
-  tacut la keyword.
+  Cu Ollama + un embedder mic (`all-minilm`), cautarea fuzioneaza scorul keyword cu similaritate
+  cosinus pe vectori locali — „auth token expiry" gaseste „JWT TTL", si scoate la suprafata potriviri
+  semantice chiar cand nimic nu prinde keyword. Embedder-ul e DOAR pentru regasire (nu decide, nu scrie
+  -> nu atinge gate-ul de incredere); fara Ollama, fallback tacut la keyword. Fara bifa de tinut minte:
+  pagina Memorii **auto-detecteaza** embedder-ul si arata un beculet — **verde** = LLM-ul local e pornit
+  (keyword + semantic), **gri** = revine la cautare clasica. `mem.py search` afiseaza modul folosit;
+  `--no-semantic` forteaza keyword.
 - **Web UI** = dashboard (status sistem) + Memorii (lista filtrabila) + Proiecte (sumar per proiect)
   + Legaturi (graf), navigare consistenta + breadcrumb pe toate paginile.
 

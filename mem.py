@@ -365,13 +365,26 @@ def _print_hits(hits):
     print(f"\n{len(hits)} results")
 
 
+def _print_mode(mode, n):
+    """One dim banner (to stderr, so piped stdout stays clean) naming the path that ran."""
+    label = {
+        "hybrid": "hybrid (FTS + semantic)",
+        "off": "keyword (FTS) — semantic disabled (--no-semantic)",
+        "no-vectors": "keyword (FTS) — no vectors; run `mem.py embed`",
+        "embedder-offline": "keyword (FTS) — embedder offline; start Ollama",
+        "substring": "substring (FTS5 unavailable)",
+    }.get(mode, "keyword (FTS)")
+    print(f"# search mode: {label}  ·  {n} hit{'' if n == 1 else 's'}", file=sys.stderr)
+
+
 def cmd_search(a):
     since, until = _norm_date(a.since), _norm_date(a.until, end=True)
-    ids = hybrid_search(a.query)
+    ids, mode = hybrid_search(a.query, allow_semantic=not getattr(a, "no_semantic", False))
     if ids is not None:
         by_id = {r["id"]: r for r in all_records()}
         hits = [by_id[i] for i in ids
                 if i in by_id and _match_filters(by_id[i], a.scope, a.type, "all", since, until)]
+        _print_mode(mode, len(hits))
         _print_hits(hits)
         return
     # fallback: substring scan (ripgrep when available) if FTS5 is missing
@@ -391,6 +404,7 @@ def cmd_search(a):
             blob = f"{r['title']}\n{r['body']}\n{r['meta'].get('scope','')}".lower()
             if ql in blob and _match_filters(r, a.scope, a.type, "all", since, until):
                 hits.append(r)
+    _print_mode("substring", len(hits))
     _print_hits(hits)
 
 
@@ -467,23 +481,29 @@ def _cosine(a, b):
     return sum(x * y for x, y in zip(a, b)) / (na * nb) if na and nb else 0.0
 
 
-def hybrid_search(query):
+def hybrid_search(query, allow_semantic=True):
     """Keyword (FTS5 + recency) fused with semantic similarity when an embedder is available.
-    Returns ranked ids, or None if FTS5 is missing (caller does the substring fallback)."""
+    Returns (ranked_ids, mode); ids is None if FTS5 is missing (caller does the substring fallback).
+    mode is one of: 'hybrid', 'keyword', 'off', 'no-vectors', 'embedder-offline', 'substring'
+    — so the caller can tell the user which path actually ran."""
     fts = fts_search(query)
+    if fts is None:
+        return None, "substring"
+    if not allow_semantic:
+        return fts, "off"
     emb = load_embeddings()
-    qvec = None
-    if emb:
-        import llm
-        qvec = llm.embed(query)
-    if not emb or qvec is None:
-        return fts   # keyword-only (zero-dep default) or substring fallback (None)
+    if not emb:
+        return fts, "no-vectors"
+    import llm
+    qvec = llm.embed(query)
+    if qvec is None:
+        return fts, "embedder-offline"
     sims = {i: _cosine(qvec, v) for i, v in emb.items()}
-    fts = fts or []
     nkw = max(1, len(fts))
     kw = {i: 1.0 - (n / nkw) for n, i in enumerate(fts)}    # 1..0 by keyword rank
     cand = set(fts) | {i for i, _ in sorted(sims.items(), key=lambda x: -x[1])[:25]}
-    return sorted(cand, key=lambda i: 0.5 * sims.get(i, 0.0) + 0.5 * kw.get(i, 0.0), reverse=True)
+    ranked = sorted(cand, key=lambda i: 0.5 * sims.get(i, 0.0) + 0.5 * kw.get(i, 0.0), reverse=True)
+    return ranked, "hybrid"
 
 
 def cmd_embed(a):
@@ -782,6 +802,8 @@ def main():
     ps.add_argument("--type")
     ps.add_argument("--since", help="created on/after (YYYY-MM-DD or 'YYYY-MM-DD HH:MM')")
     ps.add_argument("--until", help="created on/before (YYYY-MM-DD or 'YYYY-MM-DD HH:MM')")
+    ps.add_argument("--no-semantic", action="store_true",
+                    help="keyword-only (skip the semantic embedder even if it is available)")
     ps.set_defaults(func=cmd_search)
 
     pp = sub.add_parser("supersede", help="mark a memory as superseded (records when + why; never deletes)")

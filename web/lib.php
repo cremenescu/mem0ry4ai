@@ -104,6 +104,21 @@ function ro_strings(): array {
         'Memories' => 'Memorii',
         'of' => 'din',
         'ranked search (FTS)' => 'cautare ranked (FTS)',
+        // search status light + embedder health
+        'Semantic on' => 'Semantic pornit',
+        'Classic' => 'Clasic',
+        'vectors' => 'vectori',
+        'Embedder (semantic)' => 'Embedder (semantic)',
+        'no vectors — optional, run mem.py embed' => 'fara vectori — optional, ruleaza mem.py embed',
+        'Ollama offline (keyword search)' => 'Ollama oprit (cautare keyword)',
+        'Local LLM is running — this search is keyword + semantic' => 'LLM-ul local ruleaza — aceasta cautare e keyword + semantic',
+        'Local LLM is running — searches use keyword + semantic.' => 'LLM-ul local ruleaza — cautarile folosesc keyword + semantic.',
+        'Local LLM (Ollama) is off — searches use keyword only.' => 'LLM-ul local (Ollama) e oprit — cautarile folosesc doar keyword.',
+        'Classic keyword search (FTS5).' => 'Cautare clasica keyword (FTS5).',
+        'FTS5 unavailable — substring match.' => 'FTS5 indisponibil — potrivire substring.',
+        'Embeddings exist but could not be read — rebuild with mem.py embed.' => 'Exista embeddings dar nu pot fi citite — reconstruieste cu mem.py embed.',
+        'Vectors exist but Ollama is not answering — start it for semantic search.' => 'Exista vectori dar Ollama nu raspunde — porneste-l pentru cautare semantica.',
+        'No embeddings yet — run mem.py embed to enable semantic search.' => 'Inca nu exista embeddings — ruleaza mem.py embed pentru cautare semantica.',
         'Supersede chain:' => 'Lant de supersedare:',
         'close' => 'inchide',
         'back' => 'inapoi',
@@ -169,7 +184,7 @@ function ro_strings(): array {
         'help.nav' => 'Click pe scope → pagina proiectului (status + todos sus). Click pe id → lantul de supersedare. Click pe rand → body. Header de grup → pliaza.',
         'Bulk' => 'Bulk',
         'help.bulk' => 'Bifeaza randuri → bara de jos: Supersede / Re-scope / Sterge pe toate odata.',
-        'help.search' => 'Camp + Enter = FTS ranked (acelasi index ca mem.py search). Tastarea filtreaza si live ce e pe ecran.',
+        'help.search' => 'Camp + Enter = FTS ranked (acelasi index ca mem.py search). Beculetul de langa buton arata modul: <b>verde</b> = LLM-ul local e pornit, deci cautarea e keyword + semantic; <b>gri</b> = revine automat la cautare clasica keyword. Fara bifa. Tastarea filtreaza si live ce e pe ecran.',
         // project page
         'project' => 'proiect',
         'No active memories for' => 'Nicio memorie activa pentru',
@@ -790,6 +805,16 @@ function health_checks(): array {
     } else {
         $out[] = [t('FTS index'), false, t('FTS5 unavailable — search falls back to substring')];
     }
+    // embedder (optional semantic layer) — informative, never an error: zero-model is the default
+    $vec = embed_count();
+    $emodel = getenv('MEM_EMBED_MODEL') ?: 'all-minilm';
+    if ($vec === 0) {
+        $out[] = [t('Embedder (semantic)'), null, t('no vectors — optional, run mem.py embed')];
+    } elseif (ollama_up()) {
+        $out[] = [t('Embedder (semantic)'), true, $emodel . ' · ' . $vec . ' ' . t('vectors')];
+    } else {
+        $out[] = [t('Embedder (semantic)'), null, $vec . ' ' . t('vectors') . ' · ' . t('Ollama offline (keyword search)')];
+    }
     $nq = count(queue_pending());
     $out[] = [t('Review queue (health)'), $nq === 0, $nq === 0 ? t('empty') : "$nq " . t('candidates to review')];
     // hooks installed: settings.json first (authoritative), then empirical evidence = staged captures
@@ -926,38 +951,60 @@ function cosine_sim(array $a, array $b): float {
 }
 
 // Ids ordered by relevance (bm25). null = FTS unavailable (substring fallback).
-function fts_query(string $q): ?array {
-    if (!fts_index_fresh() && !fts_rebuild()) return null;
+// $info (out) reports the mode ACTUALLY used so the UI can label it honestly:
+//   ['mode' => 'hybrid'|'fts'|'substring', 'reason' => string|null, 'vectors' => int, 'model' => ?string].
+// $semantic: 'auto' = fuse semantic similarity when an embedder is available; 'off' = keyword only.
+function fts_query(string $q, ?array &$info = null, string $semantic = 'auto'): ?array {
+    $info = ['mode' => 'fts', 'reason' => null, 'vectors' => 0, 'model' => null];
+    if (!fts_index_fresh() && !fts_rebuild()) { $info['mode'] = 'substring'; return null; }
     preg_match_all('/\w+/u', $q, $m);
     $terms = $m[0];
     if (!$terms) return [];
     $match = implode(' OR ', array_map(fn($t) => '"' . str_replace('"', '', $t) . '"*', $terms));
+    // keyword layer (FTS5 bm25 + recency). A failure HERE means FTS5 is unusable -> substring fallback.
     try {
         $pdo = new PDO('sqlite:' . store_dir() . '/.index.db');
         $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         $st = $pdo->prepare('SELECT id, bm25(mem) AS s FROM mem WHERE mem MATCH ?');
         $st->execute([$match]);
         $rows = $st->fetchAll(PDO::FETCH_ASSOC);
-        if (!$rows) return [];
-        // recency nudge (mirrors mem.py): newer wins near-ties, never overrides a stronger match
-        $w = (float)(getenv('MEM_RECENCY_WEIGHT') ?: 1.5);
-        $ord = [];
-        foreach (all_records() as $r) {
-            $c = substr($r['meta']['created'] ?? '', 0, 10);
-            $ord[$r['id']] = $c !== '' ? strtotime($c) : null;
+        // do NOT early-return when keyword finds nothing — semantic search must still surface records
+        // that don't keyword-match (that's its whole point, e.g. "4090" -> GPU notes). mem.py does the
+        // same: the keyword set may be empty and the semantic layer fills in.
+        if ($rows) {
+            // recency nudge (mirrors mem.py): newer wins near-ties, never overrides a stronger match
+            $w = (float)(getenv('MEM_RECENCY_WEIGHT') ?: 1.5);
+            $ord = [];
+            foreach (all_records() as $r) {
+                $c = substr($r['meta']['created'] ?? '', 0, 10);
+                $ord[$r['id']] = $c !== '' ? strtotime($c) : null;
+            }
+            $vals = array_filter(array_map(fn($x) => $ord[$x['id']] ?? null, $rows));
+            $lo = $vals ? min($vals) : 0; $hi = $vals ? max($vals) : 0; $span = ($hi - $lo) ?: 1;
+            usort($rows, function ($a, $b) use ($ord, $lo, $span, $w) {
+                $ra = $ord[$a['id']] ? ($ord[$a['id']] - $lo) / $span : 0.0;
+                $rb = $ord[$b['id']] ? ($ord[$b['id']] - $lo) / $span : 0.0;
+                return ($a['s'] - $w * $ra) <=> ($b['s'] - $w * $rb);
+            });
         }
-        $vals = array_filter(array_map(fn($x) => $ord[$x['id']] ?? null, $rows));
-        $lo = $vals ? min($vals) : 0; $hi = $vals ? max($vals) : 0; $span = ($hi - $lo) ?: 1;
-        usort($rows, function ($a, $b) use ($ord, $lo, $span, $w) {
-            $ra = $ord[$a['id']] ? ($ord[$a['id']] - $lo) / $span : 0.0;
-            $rb = $ord[$b['id']] ? ($ord[$b['id']] - $lo) / $span : 0.0;
-            return ($a['s'] - $w * $ra) <=> ($b['s'] - $w * $rb);
-        });
         $ids = array_map(fn($x) => $x['id'], $rows);
-        // semantic fusion when an embedder is available (mirrors mem.py hybrid_search); else keyword-only
+    } catch (Throwable $e) {
+        $info['mode'] = 'substring';
+        return null;
+    }
+    // optional semantic layer — its failure must NEVER discard a good keyword ranking (mirrors mem.py,
+    // which computes the keyword set before touching embeddings). Worst case here: keyword-only, never substring.
+    if ($semantic === 'off') { $info['reason'] = 'off'; return $ids; }
+    try {
         $emb = load_embeddings();
-        $qv = $emb ? embed_query($q) : null;
-        if (!$emb || $qv === null) return $ids;
+        if (!$emb) {
+            // [] means the file is absent (truly no vectors) OR present but unreadable (locked/corrupt) — distinguish.
+            $info['reason'] = is_file(store_dir() . '/.embed.db') ? 'vectors-unreadable' : 'no-vectors';
+            return $ids;
+        }
+        $info['vectors'] = count($emb);
+        $qv = embed_query($q);
+        if ($qv === null) { $info['reason'] = 'embedder-offline'; return $ids; }
         $sims = [];
         foreach ($emb as $id => $v) $sims[$id] = cosine_sim($qv, $v);
         $nkw = max(1, count($ids));
@@ -967,10 +1014,65 @@ function fts_query(string $q): ?array {
         $cand = array_values(array_unique(array_merge($ids, array_slice(array_keys($sims), 0, 25))));
         usort($cand, fn($a, $b) =>
             (0.5 * ($sims[$b] ?? 0) + 0.5 * ($kw[$b] ?? 0)) <=> (0.5 * ($sims[$a] ?? 0) + 0.5 * ($kw[$a] ?? 0)));
+        $info['mode'] = 'hybrid';
+        $info['model'] = getenv('MEM_EMBED_MODEL') ?: 'all-minilm';
         return $cand;
     } catch (Throwable $e) {
-        return null;
+        $info['reason'] = 'embedder-offline';   // semantic layer threw -> keyword-only, never substring
+        return $ids;
     }
+}
+
+// Cheap vector count (no heavy unpack of every vector).
+function embed_count(): int {
+    $p = store_dir() . '/.embed.db';
+    if (!is_file($p)) return 0;
+    try { $pdo = new PDO('sqlite:' . $p); return (int)$pdo->query('SELECT count(*) FROM emb')->fetchColumn(); }
+    catch (Throwable $e) { return 0; }
+}
+
+// Is Ollama reachable? (short timeout.)
+function ollama_up(): bool {
+    $url = (getenv('OLLAMA_URL') ?: 'http://localhost:11434') . '/api/tags';
+    $ctx = stream_context_create(['http' => ['method' => 'GET', 'timeout' => 1.5, 'ignore_errors' => true]]);
+    return @file_get_contents($url, false, $ctx) !== false;
+}
+
+// Semantic search is "live" only when vectors exist AND Ollama answers.
+function embedder_live(): bool {
+    return embed_count() > 0 && ollama_up();
+}
+
+// Status light for the search box. No toggle: the UI auto-detects the embedder and degrades to
+// keyword search when it is off. Returns [state 'on'|'off', label, tooltip].
+//   With an active query, it reflects what THIS search actually did (from fts_query's $info);
+//   with no query, it reflects whether semantic search is ready right now.
+function search_light(?array $info, bool $isArray, string $q): array {
+    $model = getenv('MEM_EMBED_MODEL') ?: 'all-minilm';
+    if ($q !== '') {
+        if ($isArray && ($info['mode'] ?? '') === 'hybrid') {
+            return ['on', t('Semantic on') . ' · ' . ($info['model'] ?? $model),
+                    t('Local LLM is running — this search is keyword + semantic') . ' (' . (int)($info['vectors'] ?? 0) . ' ' . t('vectors') . ').'];
+        }
+        // fell back to classic for this search — say why
+        if (($info['mode'] ?? '') === 'substring')              $tip = t('FTS5 unavailable — substring match.');
+        elseif (($info['reason'] ?? '') === 'embedder-offline') $tip = t('Vectors exist but Ollama is not answering — start it for semantic search.');
+        elseif (($info['reason'] ?? '') === 'vectors-unreadable') $tip = t('Embeddings exist but could not be read — rebuild with mem.py embed.');
+        elseif (($info['reason'] ?? '') === 'no-vectors')       $tip = t('No embeddings yet — run mem.py embed to enable semantic search.');
+        else                                                    $tip = t('Classic keyword search (FTS5).');
+        return ['off', t('Classic'), $tip];
+    }
+    // no active query — is semantic ready?
+    if (embedder_live()) {
+        return ['on', t('Semantic on') . ' · ' . $model, t('Local LLM is running — searches use keyword + semantic.')];
+    }
+    if (embed_count() === 0) {
+        $tip = is_file(store_dir() . '/.embed.db')
+            ? t('Embeddings exist but could not be read — rebuild with mem.py embed.')
+            : t('No embeddings yet — run mem.py embed to enable semantic search.');
+        return ['off', t('Classic'), $tip];
+    }
+    return ['off', t('Classic'), t('Local LLM (Ollama) is off — searches use keyword only.')];
 }
 
 /* ---------- re-scope (move a record between scope files/projects) ---------- */

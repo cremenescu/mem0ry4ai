@@ -118,10 +118,11 @@ if ($fId !== '') {
     $fStat = 'all';
 }
 
-// FTS ranked when there is a query; substring fallback
+// FTS ranked when there is a query; substring fallback. $searchInfo reports the mode actually used.
 $ftsIds = null;
+$searchInfo = null;
 if ($q !== '' && $fId === '') {
-    $ftsIds = fts_query($q);
+    $ftsIds = fts_query($q, $searchInfo);
 }
 
 $rows = array_filter($records, function ($r) use ($q, $fScope, $fType, $fStat, $fId, $chainIds, $ftsIds) {
@@ -192,9 +193,7 @@ $nq = count(queue_pending());
 
   <?php if ($flash): ?><div class="flash flash-<?= h($flash[1]) ?>"><?= h($flash[0]) ?></div><?php endif; ?>
 
-  <h2><?= t('Memories') ?> <span class="count"><?= count($rows) ?> <?= t('of') ?> <?= $stats['total'] ?></span>
-    <?php if ($q !== '' && is_array($ftsIds)): ?><span class="count">· <?= t('ranked search (FTS)') ?></span><?php endif; ?>
-  </h2>
+  <h2><?= t('Memories') ?> <span class="count"><?= count($rows) ?> <?= t('of') ?> <?= $stats['total'] ?></span></h2>
 
   <?php if ($fId !== '' && count($chainIds) > 1): ?>
   <div class="chain"><b><?= t('Supersede chain:') ?></b>
@@ -223,6 +222,8 @@ $nq = count(queue_pending());
       </select>
       <input type="hidden" name="status" value="<?= h($fStat) ?>">
       <button class="btn" type="submit"><?= t('Search') ?></button>
+      <?php [$lCls, $lLbl, $lTip] = search_light($searchInfo, is_array($ftsIds), $q); ?>
+      <span class="search-light <?= $lCls ?>" title="<?= h($lTip) ?>"><?= h($lLbl) ?></span>
     </form>
     <div class="pills">
       <a class="<?= $fStat === 'active' ? 'active' : '' ?>" href="<?= h($qs(['status' => 'active'])) ?>"><?= t('active') ?></a>
@@ -288,7 +289,7 @@ $nq = count(queue_pending());
   <p><?= ui_lang() === 'ro' ? t('help.bulk') : 'Tick rows → bottom bar: Supersede / Re-scope / Delete all at once.' ?></p>
 
   <h4><?= t('Search') ?></h4>
-  <p><?= ui_lang() === 'ro' ? t('help.search') : 'Field + Enter = FTS ranked (same index as <code>mem.py search</code>). Typing also live-filters what is on screen.' ?></p>
+  <p><?= ui_lang() === 'ro' ? t('help.search') : 'Field + Enter = FTS ranked (same index as <code>mem.py search</code>). The light by the button shows the search mode: <b>green</b> = the local LLM is up, so search is keyword + semantic; <b>gray</b> = it falls back to classic keyword search automatically. No toggle. Typing also live-filters what is on screen.' ?></p>
 </aside>
 </div><!-- /layout -->
 </main>

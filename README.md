@@ -178,16 +178,19 @@ available — it never *requires* a model:
   nudge (`MEM_RECENCY_WEIGHT`) so that among near-ties the fresher memory wins, without ever
   overriding a clearly stronger keyword match.
 - **Optional hybrid semantic search** — if [Ollama](https://ollama.com) is running with a small
-  embedding model (`all-minilm`, ~40 MB), `mem.py search` fuses keyword scores with cosine
-  similarity over locally-stored vectors, so "auth token expiry" can find a memory that says
-  "JWT TTL". The embedder is **retrieval-only**: it turns text into vectors to *compare*, it never
-  decides what is a memory and never writes — so it stays clear of the trust gate. No Ollama →
-  automatic, silent fallback to keyword-only.
+  embedding model (`all-minilm`, ~40 MB), search fuses keyword scores with cosine similarity over
+  locally-stored vectors, so "auth token expiry" can find a memory that says "JWT TTL" — and it
+  surfaces semantic matches even when *nothing* keyword-matches. The embedder is **retrieval-only**:
+  it turns text into vectors to *compare*, it never decides what is a memory and never writes — so it
+  stays clear of the trust gate. No Ollama → automatic, silent fallback to keyword-only.
   ```bash
   ollama pull all-minilm
   ./mem.py embed          # build/refresh vectors (incremental, by content hash) -> store/.embed.db
-  ./mem.py search "auth token expiry"
+  ./mem.py search "auth token expiry"   # prints "# search mode: hybrid (FTS + semantic)"; --no-semantic forces keyword
   ```
+  No toggle to remember: the Memories page **auto-detects** the embedder and shows a status light —
+  **green** = the local LLM is up, so search is keyword + semantic; **gray** = it fell back to classic
+  keyword search (with the reason on hover). The dashboard health panel reports the embedder too.
 - **Link suggestions** — on the **Links** page, the closest *unlinked* memory pairs (by cosine over
   the same vectors) are offered as suggested `related-to` edges. You **confirm or dismiss** each one
   — nothing is linked automatically. It is computed from the stored vectors (no live model at page

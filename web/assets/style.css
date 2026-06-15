@@ -234,6 +234,14 @@ pre.inject { background: var(--panel); border: 1px solid var(--line); border-rad
   background: rgba(0,111,255,.12); color: var(--accent); }
 .review-tag:hover { text-decoration: none; background: rgba(0,111,255,.2); }
 
+/* search status light (memories page) — auto-detects the local LLM; no toggle */
+.search-light { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600;
+  white-space: nowrap; cursor: help; padding: 0 4px; color: var(--muted); }
+.search-light::before { content: ""; width: 9px; height: 9px; border-radius: 50%;
+  background: #b0b6bd; flex: none; }
+.search-light.on { color: #1a7f37; }
+.search-light.on::before { background: #2da44e; box-shadow: 0 0 0 3px rgba(45,164,78,.18); }
+
 /* live-update banner under the health card */
 .newbanner { margin-top: 14px; padding: 10px 12px; background: rgba(0,111,255,.07);
   border: 1px solid var(--accent); border-radius: 8px; font-size: 13px; line-height: 1.6; }
