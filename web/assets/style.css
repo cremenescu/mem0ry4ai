@@ -286,3 +286,16 @@ li.blocked{opacity:.72}
 
 /* active top-nav link */
 .topbar .right a.nav-on{color:#006fff;font-weight:600}
+
+/* links overview page (links.php) */
+.lk-group{margin-top:16px}
+.lk-group>h3{font-size:14px;color:#33506b;margin:0 0 6px}
+ul.links{list-style:none;margin:0;padding:0;border:1px solid #e6ebf2;border-radius:8px;overflow:hidden}
+.lk{display:flex;align-items:center;flex-wrap:wrap;gap:7px;padding:8px 12px;border-top:1px solid #eef2f7;font-size:13px}
+.lk:first-child{border-top:none}
+.lk:hover{background:#f7faff}
+.lk-rel{color:#7a8aa0;font-weight:600;white-space:nowrap;font-size:12px}
+.lk-blocked .lk-rel{color:#b4690e}
+.lk-sum{color:#1f2d3d;text-decoration:none;font-weight:500}
+.lk-sum:hover{color:#006fff;text-decoration:underline}
+.lk-scope{font-size:11px;color:#8a98ac;background:#eef2f7;border-radius:4px;padding:0 5px}

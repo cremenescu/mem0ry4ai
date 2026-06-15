@@ -72,6 +72,7 @@ function render_topbar(string $active = ''): string {
         'dashboard' => ['index.php',    t('Dashboard')],
         'memories'  => ['memories.php', t('Memories')],
         'projects'  => ['projects.php', t('Projects')],
+        'links'     => ['links.php',    t('Links')],
         'git'       => ['git.php',      t('Git history')],
         'inject'    => ['inject.php',   t('What Claude sees')],
     ];
@@ -119,6 +120,7 @@ function ro_strings(): array {
         'Project:' => 'Proiect:',
         'Dashboard' => 'Panou',
         'Projects' => 'Proiecte',
+        'Links' => 'Legaturi',
         'No projects yet.' => 'Niciun proiect inca.',
         'memories' => 'memorii',
         'project page →' => 'pagina proiectului →',
@@ -438,6 +440,27 @@ function related_html(array $r, array $relIn, array $byId): string {
     return '<div class="rel">↔ ' . implode(' ', array_map(fn($i) => id_chip($i, $byId), $ids)) . '</div>';
 }
 
+// All relation edges across the store: related-to (undirected) + blocked-by (directed).
+// Each edge: ['kind'=>'related'|'blocked', 'a'=>record, 'b'=>record]. For 'blocked', a is the todo, b the blocker.
+function all_links(): array {
+    $by = records_by_id();
+    $seen = []; $edges = [];
+    foreach (all_records() as $r) {
+        foreach (rec_ids($r, 'related-to') as $to) {
+            if (!isset($by[$to])) continue;
+            $key = ($r['id'] < $to) ? "$r[id]|$to" : "$to|$r[id]";
+            if (isset($seen[$key])) continue;
+            $seen[$key] = true;
+            $edges[] = ['kind' => 'related', 'a' => $r, 'b' => $by[$to]];
+        }
+        foreach (rec_ids($r, 'blocked-by') as $to) {
+            if (!isset($by[$to])) continue;
+            $edges[] = ['kind' => 'blocked', 'a' => $r, 'b' => $by[$to]];
+        }
+    }
+    return $edges;
+}
+
 // Combined relations line for a record body: related-to + (for todos) blocked-by.
 function relations_block(array $r, array $relIn, array $byId): string {
     $out = related_html($r, $relIn, $byId);
@@ -571,6 +594,7 @@ function render_dash_cards(array $stats): string {
       <a class="card-stat" href="memories.php?status=superseded"><div class="num"><?= $stats['superseded'] ?></div><div class="lbl"><?= t('superseded') ?></div></a>
       <a class="card-stat <?= $stats['todos'] > 0 ? 'warn' : '' ?>" href="memories.php?type=todo&status=active"><div class="num"><?= $stats['todos'] ?></div><div class="lbl"><?= t('open todos') ?></div></a>
       <a class="card-stat" href="projects.php"><div class="num"><?= $nproj ?></div><div class="lbl"><?= t('Projects') ?></div></a>
+      <a class="card-stat" href="links.php"><div class="num"><?= $stats['links'] ?? 0 ?></div><div class="lbl"><?= t('Links') ?></div></a>
       <?php $shown = 0; foreach ($stats['by_type'] as $ty => $n): if ($ty === 'todo') continue; if (++$shown > 3) break; ?>
       <a class="card-stat" href="memories.php?type=<?= h($ty) ?>&status=active"><div class="num"><?= $n ?></div><div class="lbl"><?= h($ty) ?></div></a>
       <?php endforeach;
@@ -612,10 +636,11 @@ function render_recent_list(array $stats): string {
 
 function store_stats(): array {
     $recs = all_records();
-    $s = ['total' => count($recs), 'active' => 0, 'superseded' => 0,
+    $s = ['total' => count($recs), 'active' => 0, 'superseded' => 0, 'links' => 0,
           'by_type' => [], 'by_scope' => [], 'by_scope_todos' => [], 'todos' => 0, 'recent' => []];
     $active = [];
     foreach ($recs as $r) {
+        $s['links'] += count(rec_ids($r, 'related-to')) + count(rec_ids($r, 'blocked-by'));
         $st = $r['meta']['status'] ?? 'active';
         if ($st === 'active') {
             $s['active']++;
