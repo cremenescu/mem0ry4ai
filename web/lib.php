@@ -546,30 +546,33 @@ function render_dash_cards(array $stats): string {
       <a class="card-stat" href="index.php?status=superseded"><div class="num"><?= $stats['superseded'] ?></div><div class="lbl"><?= t('superseded') ?></div></a>
       <a class="card-stat <?= $stats['todos'] > 0 ? 'warn' : '' ?>" href="index.php?type=todo&status=active"><div class="num"><?= $stats['todos'] ?></div><div class="lbl"><?= t('open todos') ?></div></a>
       <a class="card-stat" href="index.php?status=active"><div class="num"><?= count($stats['by_scope']) ?></div><div class="lbl"><?= t('scopes') ?></div></a>
+      <?php $nproj = count(array_filter(array_keys($stats['by_scope']), fn($s) => strncmp($s, 'project:', 8) === 0)); ?>
+      <a class="card-stat" href="projects.php"><div class="num"><?= $nproj ?></div><div class="lbl"><?= t('Projects') ?></div></a>
       <?php $shown = 0; foreach ($stats['by_type'] as $ty => $n): if ($ty === 'todo') continue; if (++$shown > 3) break; ?>
       <a class="card-stat" href="index.php?type=<?= h($ty) ?>&status=active"><div class="num"><?= $n ?></div><div class="lbl"><?= h($ty) ?></div></a>
       <?php endforeach;
     return ob_get_clean();
 }
 
-// A directory of all projects: name + active count + open-todos badge, linking to each page.
-function render_projects_panel(array $stats): string {
-    $projects = [];
-    foreach ($stats['by_scope'] as $sc => $n) {
-        if (strncmp($sc, 'project:', 8) === 0) $projects[substr($sc, 8)] = [$n, $stats['by_scope_todos'][$sc] ?? 0];
+// Per-project overview for projects.php: active count, open todos, newest status summary.
+function projects_overview(): array {
+    $p = [];
+    foreach (all_records() as $r) {
+        if (($r['meta']['status'] ?? 'active') !== 'active') continue;
+        $sc = $r['meta']['scope'] ?? '';
+        if (strncmp($sc, 'project:', 8) !== 0) continue;
+        $slug = substr($sc, 8);
+        if (!isset($p[$slug])) $p[$slug] = ['n' => 0, 'todo' => 0, 'status' => '', 'sdate' => ''];
+        $p[$slug]['n']++;
+        $t = $r['meta']['type'] ?? '';
+        if ($t === 'todo') $p[$slug]['todo']++;
+        if ($t === 'status') {
+            $d = $r['meta']['created'] ?? '';
+            if ($d > $p[$slug]['sdate']) { $p[$slug]['sdate'] = $d; $p[$slug]['status'] = rec_summary($r); }
+        }
     }
-    ksort($projects);
-    ob_start(); ?>
-    <div class="projgrid">
-      <?php if (!$projects): ?><span class="hd"><?= t('No projects yet.') ?></span><?php endif; ?>
-      <?php foreach ($projects as $slug => [$n, $td]): ?>
-      <a class="projchip" href="project.php?slug=<?= h($slug) ?>">
-        <span class="pname"><?= h($slug) ?></span>
-        <span class="pmeta"><?= (int)$n ?><?php if ($td): ?> · <span class="ptodo"><?= (int)$td ?> todo</span><?php endif; ?></span>
-      </a>
-      <?php endforeach; ?>
-    </div>
-    <?php return ob_get_clean();
+    ksort($p);
+    return $p;
 }
 
 function render_recent_list(array $stats): string {

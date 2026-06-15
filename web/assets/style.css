@@ -271,13 +271,13 @@ pre.inject { background: var(--panel); border: 1px solid var(--line); border-rad
 li.blocked{opacity:.72}
 .blockedby{font-size:12px;color:#b4690e;background:#fff4e5;border:1px solid #f3dcb5;border-radius:4px;padding:0 6px;margin-left:4px}
 
-/* projects directory in System status */
-.projwrap{margin-top:14px;border-top:1px solid #e6ebf2;padding-top:8px}
-.projwrap>summary{cursor:pointer;font-weight:600;color:#33506b;font-size:14px}
-.projgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:7px;margin-top:10px}
-.projchip{display:flex;justify-content:space-between;align-items:center;gap:8px;background:#f6f8fb;
-  border:1px solid #e1e8f1;border-radius:7px;padding:7px 10px;text-decoration:none;color:#1f2d3d}
-.projchip:hover{background:#eaf1fb;border-color:#bcd2ee}
-.projchip .pname{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.projchip .pmeta{font-size:12px;color:#7a8aa0;white-space:nowrap}
-.projchip .ptodo{color:#b4690e}
+/* projects summary page (projects.php) */
+.projcards{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-top:14px}
+.projcard{display:block;background:#fff;border:1px solid #e1e8f1;border-radius:9px;padding:12px 14px;
+  text-decoration:none;color:#1f2d3d;transition:border-color .12s,box-shadow .12s}
+.projcard:hover{border-color:#bcd2ee;box-shadow:0 2px 10px rgba(20,60,120,.08)}
+.pchead{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+.pcname{font-weight:700;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pcmeta{font-size:12px;color:#7a8aa0;white-space:nowrap}
+.ptodo{color:#b4690e}
+.pcstatus{margin-top:7px;font-size:12.5px;color:#4a5a6e;line-height:1.4}
