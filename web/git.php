@@ -110,12 +110,13 @@ $flash = take_flash();
 <body>
 <div class="topbar">
   <a class="brand" href="index.php">mem0ry4ai <small><?= t('local memory') ?></small></a>
-  <div class="right"><a href="index.php">← <?= t('Memories') ?></a> <?= lang_switch_html() ?></div>
+  <div class="right"><a href="index.php">← <?= t('Dashboard') ?></a> <?= lang_switch_html() ?></div>
 </div>
 
 <main>
 <div class="layout">
 <div class="content">
+  <div class="crumb"><a href="index.php"><?= t('Dashboard') ?></a> / <?= t('Git history') ?></div>
   <h2><?= t('Git history') ?> <span class="count"><?= t('the store timeline · last') ?> <span id="gcount"><?= count($log) ?></span> <?= t('commits') ?></span></h2>
 
   <?php if ($flash): ?><div class="flash flash-<?= h($flash[1]) ?>"><?= h($flash[0]) ?></div><?php endif; ?>

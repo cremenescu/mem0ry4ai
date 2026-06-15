@@ -48,7 +48,7 @@ uksort($byType, fn($a, $b) => (array_search($a, $typeOrder) ?? 9) <=> (array_sea
 <main>
 <div class="layout">
 <div class="content">
-  <div class="crumb"><a href="index.php"><?= t('Memories') ?></a> / <?= t('project') ?></div>
+  <div class="crumb"><a href="index.php"><?= t('Dashboard') ?></a> / <a href="projects.php"><?= t('Projects') ?></a> / <?= h($slug) ?></div>
   <h2><?= h($slug) ?> <span class="count"><?= count($active) ?> <?= t('active') ?><?= count($all) - count($active) ? ' · ' . (count($all) - count($active)) . ' superseded' : '' ?></span></h2>
 
   <?php if (!$active): ?>
@@ -70,12 +70,12 @@ uksort($byType, fn($a, $b) => (array_search($a, $typeOrder) ?? 9) <=> (array_sea
     <ul>
       <?php foreach ($ready as $r): ?>
       <li><b><?= h(rec_summary($r)) ?></b><?php $b = trim($r['body']); if ($b !== ''): ?> — <?= h(mb_substr(str_replace("\n", ' ', $b), 0, 160)) ?><?php endif; ?>
-          <a class="meta" href="index.php?id=<?= h($r['id']) ?>"><?= h($r['id']) ?></a><?= related_html($r, $relIn, $byId) ?></li>
+          <a class="meta" href="memories.php?id=<?= h($r['id']) ?>"><?= h($r['id']) ?></a><?= related_html($r, $relIn, $byId) ?></li>
       <?php endforeach; ?>
       <?php foreach ($blocked as [$r, $ob]): ?>
       <li class="blocked"><b><?= h(rec_summary($r)) ?></b>
           <span class="blockedby"><?= t('blocked by') ?> <?= implode(' ', array_map(fn($i) => id_chip($i, $byId), $ob)) ?></span>
-          <a class="meta" href="index.php?id=<?= h($r['id']) ?>"><?= h($r['id']) ?></a><?= related_html($r, $relIn, $byId) ?></li>
+          <a class="meta" href="memories.php?id=<?= h($r['id']) ?>"><?= h($r['id']) ?></a><?= related_html($r, $relIn, $byId) ?></li>
       <?php endforeach; ?>
     </ul>
   </div>
@@ -90,7 +90,7 @@ uksort($byType, fn($a, $b) => (array_search($a, $typeOrder) ?? 9) <=> (array_sea
         <tr data-id="<?= h($r['id']) ?>">
           <td class="summary" onclick="toggleBody(this)">
             <b><?= h(rec_summary($r)) ?></b>
-            <div class="meta"><a href="index.php?id=<?= h($r['id']) ?>"><?= h($r['id']) ?></a> · conf <?= h($r['meta']['confidence'] ?? '?') ?> · <?= h($r['meta']['source'] ?? '') ?> · <?= h(mb_substr($r['meta']['created'] ?? '', 0, 16)) ?></div>
+            <div class="meta"><a href="memories.php?id=<?= h($r['id']) ?>"><?= h($r['id']) ?></a> · conf <?= h($r['meta']['confidence'] ?? '?') ?> · <?= h($r['meta']['source'] ?? '') ?> · <?= h(mb_substr($r['meta']['created'] ?? '', 0, 16)) ?></div>
             <?= related_html($r, $relIn, $byId) ?>
           </td>
         </tr>
@@ -101,7 +101,7 @@ uksort($byType, fn($a, $b) => (array_search($a, $typeOrder) ?? 9) <=> (array_sea
   </div>
   <?php endforeach; ?>
 
-  <p class="foot"><?= t('Edit / bulk:') ?> <a href="index.php?scope=<?= h(urlencode($scope)) ?>"><?= t('see the main list') ?></a> · CLI: <code>./mem.py list --scope <?= h($scope) ?></code></p>
+  <p class="foot"><?= t('Edit / bulk:') ?> <a href="memories.php?scope=<?= h(urlencode($scope)) ?>"><?= t('see the main list') ?></a> · CLI: <code>./mem.py list --scope <?= h($scope) ?></code></p>
 </div><!-- /content -->
 
 <aside class="help">

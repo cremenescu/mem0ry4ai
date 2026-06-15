@@ -48,12 +48,13 @@ $scopes = known_scopes();
 <body>
 <div class="topbar">
   <a class="brand" href="index.php">mem0ry4ai <small><?= t('local memory') ?></small></a>
-  <div class="right"><a href="index.php">← <?= t('Memories') ?></a> <?= lang_switch_html() ?></div>
+  <div class="right"><a href="index.php">← <?= t('Dashboard') ?></a> <?= lang_switch_html() ?></div>
 </div>
 
 <main>
 <div class="layout">
 <div class="content">
+  <div class="crumb"><a href="index.php"><?= t('Dashboard') ?></a> / <?= t('Review queue') ?></div>
   <h2><?= t('Review queue') ?> <span class="count"><?= count($pending) ?> <?= t('candidates') ?></span></h2>
   <p class="meta" style="margin-top:0"><?= ui_lang() === 'ro' ? t('queue.intro') : 'Candidates extracted automatically by the local LLM from session transcripts. <b>Nothing enters memory until you approve it.</b> The model is a draft generator — fix type/scope/summary before approving.' ?></p>
 

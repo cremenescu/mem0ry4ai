@@ -26,7 +26,7 @@ $projects = projects_overview();
 <main>
 <div class="layout">
 <div class="content">
-  <div class="crumb"><a href="index.php"><?= t('Memories') ?></a> / <?= t('Projects') ?></div>
+  <div class="crumb"><a href="index.php"><?= t('Dashboard') ?></a> / <?= t('Projects') ?></div>
   <h2><?= t('Projects') ?> <span class="count"><?= count($projects) ?></span></h2>
 
   <?php if (!$projects): ?>

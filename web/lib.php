@@ -95,6 +95,7 @@ function ro_strings(): array {
         'Type' => 'Type', 'Scope' => 'Scope', 'Memory' => 'Memorie', 'Added' => 'Adaugat',
         'Global' => 'Global',
         'Project:' => 'Proiect:',
+        'Dashboard' => 'Panou',
         'Projects' => 'Proiecte',
         'No projects yet.' => 'Niciun proiect inca.',
         'memories' => 'memorii',
@@ -541,15 +542,15 @@ function store_version(): string {
 /* ---------- dashboard fragments (shared between index.php and poll.php) ---------- */
 
 function render_dash_cards(array $stats): string {
+    $nproj = count(array_filter(array_keys($stats['by_scope']), fn($s) => strncmp($s, 'project:', 8) === 0));
     ob_start(); ?>
-      <a class="card-stat" href="index.php?status=active"><div class="num"><?= $stats['active'] ?></div><div class="lbl"><?= t('active') ?></div></a>
-      <a class="card-stat" href="index.php?status=superseded"><div class="num"><?= $stats['superseded'] ?></div><div class="lbl"><?= t('superseded') ?></div></a>
-      <a class="card-stat <?= $stats['todos'] > 0 ? 'warn' : '' ?>" href="index.php?type=todo&status=active"><div class="num"><?= $stats['todos'] ?></div><div class="lbl"><?= t('open todos') ?></div></a>
-      <a class="card-stat" href="index.php?status=active"><div class="num"><?= count($stats['by_scope']) ?></div><div class="lbl"><?= t('scopes') ?></div></a>
-      <?php $nproj = count(array_filter(array_keys($stats['by_scope']), fn($s) => strncmp($s, 'project:', 8) === 0)); ?>
+      <a class="card-stat" href="memories.php?status=all"><div class="num"><?= $stats['total'] ?></div><div class="lbl"><?= t('Memories') ?></div></a>
+      <a class="card-stat" href="memories.php?status=active"><div class="num"><?= $stats['active'] ?></div><div class="lbl"><?= t('active') ?></div></a>
+      <a class="card-stat" href="memories.php?status=superseded"><div class="num"><?= $stats['superseded'] ?></div><div class="lbl"><?= t('superseded') ?></div></a>
+      <a class="card-stat <?= $stats['todos'] > 0 ? 'warn' : '' ?>" href="memories.php?type=todo&status=active"><div class="num"><?= $stats['todos'] ?></div><div class="lbl"><?= t('open todos') ?></div></a>
       <a class="card-stat" href="projects.php"><div class="num"><?= $nproj ?></div><div class="lbl"><?= t('Projects') ?></div></a>
       <?php $shown = 0; foreach ($stats['by_type'] as $ty => $n): if ($ty === 'todo') continue; if (++$shown > 3) break; ?>
-      <a class="card-stat" href="index.php?type=<?= h($ty) ?>&status=active"><div class="num"><?= $n ?></div><div class="lbl"><?= h($ty) ?></div></a>
+      <a class="card-stat" href="memories.php?type=<?= h($ty) ?>&status=active"><div class="num"><?= $n ?></div><div class="lbl"><?= h($ty) ?></div></a>
       <?php endforeach;
     return ob_get_clean();
 }
