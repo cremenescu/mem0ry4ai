@@ -95,6 +95,8 @@ function ro_strings(): array {
         'Type' => 'Type', 'Scope' => 'Scope', 'Memory' => 'Memorie', 'Added' => 'Adaugat',
         'Global' => 'Global',
         'Project:' => 'Proiect:',
+        'Projects' => 'Proiecte',
+        'No projects yet.' => 'Niciun proiect inca.',
         'memories' => 'memorii',
         'project page →' => 'pagina proiectului →',
         'select all' => 'selecteaza tot',
@@ -550,6 +552,26 @@ function render_dash_cards(array $stats): string {
     return ob_get_clean();
 }
 
+// A directory of all projects: name + active count + open-todos badge, linking to each page.
+function render_projects_panel(array $stats): string {
+    $projects = [];
+    foreach ($stats['by_scope'] as $sc => $n) {
+        if (strncmp($sc, 'project:', 8) === 0) $projects[substr($sc, 8)] = [$n, $stats['by_scope_todos'][$sc] ?? 0];
+    }
+    ksort($projects);
+    ob_start(); ?>
+    <div class="projgrid">
+      <?php if (!$projects): ?><span class="hd"><?= t('No projects yet.') ?></span><?php endif; ?>
+      <?php foreach ($projects as $slug => [$n, $td]): ?>
+      <a class="projchip" href="project.php?slug=<?= h($slug) ?>">
+        <span class="pname"><?= h($slug) ?></span>
+        <span class="pmeta"><?= (int)$n ?><?php if ($td): ?> · <span class="ptodo"><?= (int)$td ?> todo</span><?php endif; ?></span>
+      </a>
+      <?php endforeach; ?>
+    </div>
+    <?php return ob_get_clean();
+}
+
 function render_recent_list(array $stats): string {
     ob_start();
     foreach ($stats['recent'] as $r) { $m = $r['meta']; ?>
@@ -565,7 +587,7 @@ function render_recent_list(array $stats): string {
 function store_stats(): array {
     $recs = all_records();
     $s = ['total' => count($recs), 'active' => 0, 'superseded' => 0,
-          'by_type' => [], 'by_scope' => [], 'todos' => 0, 'recent' => []];
+          'by_type' => [], 'by_scope' => [], 'by_scope_todos' => [], 'todos' => 0, 'recent' => []];
     $active = [];
     foreach ($recs as $r) {
         $st = $r['meta']['status'] ?? 'active';
@@ -575,7 +597,7 @@ function store_stats(): array {
             $sc = $r['meta']['scope'] ?? '?';
             $s['by_type'][$t] = ($s['by_type'][$t] ?? 0) + 1;
             $s['by_scope'][$sc] = ($s['by_scope'][$sc] ?? 0) + 1;
-            if ($t === 'todo') $s['todos']++;
+            if ($t === 'todo') { $s['todos']++; $s['by_scope_todos'][$sc] = ($s['by_scope_todos'][$sc] ?? 0) + 1; }
             $active[] = $r;
         } else {
             $s['superseded']++;

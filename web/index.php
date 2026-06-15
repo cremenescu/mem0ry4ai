@@ -223,6 +223,11 @@ $nq = count(queue_pending());
         <ul class="recent" id="recent-list"><?= render_recent_list($stats) ?></ul>
       </div>
     </div>
+    <?php $nproj = count(array_filter(array_keys($stats['by_scope']), fn($s) => strncmp($s, 'project:', 8) === 0)); ?>
+    <details class="projwrap">
+      <summary><?= t('Projects') ?> <span class="count"><?= $nproj ?></span></summary>
+      <?= render_projects_panel($stats) ?>
+    </details>
   </details>
 
   <h2><?= t('Memories') ?> <span class="count"><?= count($rows) ?> <?= t('of') ?> <?= $stats['total'] ?></span>
