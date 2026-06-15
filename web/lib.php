@@ -503,6 +503,7 @@ function link_records(string $a, string $b): bool {
 
 // Closest UNLINKED pairs (semantic), excluding existing edges + dismissed. [] if no embeddings.
 function suggested_links(int $limit = 12, float $threshold = 0.62): array {
+    if (getenv('MEM_SUGGEST_THRESHOLD') !== false) $threshold = (float)getenv('MEM_SUGGEST_THRESHOLD');
     $emb = load_embeddings();
     if (count($emb) < 2) return [];
     $byId = records_by_id();

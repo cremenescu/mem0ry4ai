@@ -58,7 +58,7 @@ Claude Code session
 store/*.md   ◄── SOURCE OF TRUTH (markdown + git: audit, diff, rollback, supersede)
    ├─► store/.index.db   (FTS5, ranked search — derived, regenerable)
    ├─► web UI            (dashboard, per-project "where was I" page, review queue, live updates)
-   └─► mem.py            (CLI: add/list/search/supersede/propose/reindex — stdlib only)
+   └─► mem.py            (CLI: add/list/search/supersede/propose/reindex/embed — stdlib only)
 ```
 
 ## Quick start
@@ -124,12 +124,28 @@ hooks handle recall, the agent handles capture):
 | `decision` | architecture choice + the *why* |
 | `fact` | stable infrastructure facts (hosts, paths, ports) |
 | `command` | a command you would otherwise look up again |
+| `procedural` | a reusable multi-step workflow / runbook (release steps, a recovery drill) |
 | `preference` | user style/conventions/corrections |
 | `todo` | what remains to be done (supersede when finished) |
 | `status` | where the project stands / where you left off |
 
 `todo` + `status` are pinned first in injection and in the per-project web page — they answer
 "where was I?" when you return to a project after weeks.
+
+### Record fields beyond the basics
+
+Two optional fields make records sharper and history honest:
+
+- **`files`** — the paths a memory is about (`--files "src/auth/jwt.ts, src/auth/middleware.ts"`).
+  They are indexed for search and shown as chips, so a gotcha surfaces when you grep — or work in —
+  the file it concerns.
+- **Bi-temporal supersede** — superseding keeps the old record *and* stamps **when** it stopped
+  being true (`invalidated`) and **why** (`invalid-reason`), separately from `created`
+  (valid-from). You get the full "what did we believe, and when" history instead of a bare
+  tombstone:
+  ```bash
+  ./mem.py supersede <old-id> --by <new-id> --reason "single Pi-hole was a SPOF; moved to an HA pair"
+  ```
 
 ## Relations & ready work
 
@@ -152,6 +168,33 @@ Memories can be linked — deliberately, never auto-guessed by keyword (that onl
 The **Links** page in the web UI shows every edge at a glance — a force-directed graph (nodes
 colored by type, sized by degree) over the same `related-to` / `blocked-by` data, with a grouped
 text list below. No external libraries — a small vanilla-JS + SVG simulation, offline-first.
+
+## Search, ranking & suggestions
+
+Search is keyword-first and works with zero dependencies, but degrades *up* when an embedder is
+available — it never *requires* a model:
+
+- **Ranked FTS5 + recency** — `mem.py search` ranks with SQLite bm25, then applies a small recency
+  nudge (`MEM_RECENCY_WEIGHT`) so that among near-ties the fresher memory wins, without ever
+  overriding a clearly stronger keyword match.
+- **Optional hybrid semantic search** — if [Ollama](https://ollama.com) is running with a small
+  embedding model (`all-minilm`, ~40 MB), `mem.py search` fuses keyword scores with cosine
+  similarity over locally-stored vectors, so "auth token expiry" can find a memory that says
+  "JWT TTL". The embedder is **retrieval-only**: it turns text into vectors to *compare*, it never
+  decides what is a memory and never writes — so it stays clear of the trust gate. No Ollama →
+  automatic, silent fallback to keyword-only.
+  ```bash
+  ollama pull all-minilm
+  ./mem.py embed          # build/refresh vectors (incremental, by content hash) -> store/.embed.db
+  ./mem.py search "auth token expiry"
+  ```
+- **Link suggestions** — on the **Links** page, the closest *unlinked* memory pairs (by cosine over
+  the same vectors) are offered as suggested `related-to` edges. You **confirm or dismiss** each one
+  — nothing is linked automatically. It is computed from the stored vectors (no live model at page
+  load); dismissed pairs stay dismissed.
+
+Vectors live in their own derived file (`store/.embed.db`), separate from the text index and never
+the source of truth — delete it any time and `mem.py embed` rebuilds it.
 
 ## Critical rules and the injection budget
 
@@ -205,9 +248,17 @@ the agent where it lives and a `command` that fetches it at use time.
 
 Bilingual (English default, Romanian via the EN/RO switch in the top bar).
 
-![Dashboard — system status, health checks, recent activity, grouped memories](docs/screenshots/dashboard.png)
+![Dashboard — system status, stat cards, health checks, recent activity](docs/screenshots/dashboard.png)
 
-*Per-project "where was I?" page — status and todos pinned first:*
+*The **Links** page — semantic **suggested links** (closest unlinked pairs, each confirmed or dismissed by hand) above a force-directed graph of every `related-to` / `blocked-by` edge (nodes colored by type, sized by degree; related solid, blocked dashed with an arrow):*
+
+![Suggested links and the relations graph](docs/screenshots/links.png)
+
+*Projects — every project at a glance: memory count, open todos, current status:*
+
+![Projects](docs/screenshots/projects.png)
+
+*Per-project "where was I?" page — status and todos (ready vs blocked) pinned first:*
 
 ![Project page](docs/screenshots/project.png)
 
@@ -233,8 +284,9 @@ Bilingual (English default, Romanian via the EN/RO switch in the top bar).
   supersede-chain navigation; related/blocked links shown on each record.
 - **Projects** (`projects.php`): every project at a glance — active count, open todos, current
   status — each card opening its per-project page (status + ready/blocked todos pinned first).
-- **Links** (`links.php`): a force-directed graph of all `related-to` / `blocked-by` edges
-  (dependency-free SVG) + a grouped text list — see how memories connect at a glance.
+- **Links** (`links.php`): semantic suggested links (confirm/dismiss) above a force-directed graph
+  of all `related-to` / `blocked-by` edges (dependency-free SVG) + a grouped text list — see how
+  memories connect at a glance.
 - **"What Claude sees"**: renders the exact SessionStart injection, with its size in bytes/tokens.
 - **Review queue**: candidates extracted by the optional local LLM wait here for human approval.
 - **Git history**: the store's timeline — commits touching `store/` with colored per-commit
@@ -265,8 +317,11 @@ Everything is overridable via environment variables — no config file needed:
 | `MEM_WEB_PORT` | `8841` | web UI port (`server_web.sh`) |
 | `MEM_PHP` | `php` from `PATH` | PHP binary (server + conformance test) |
 | `MEM_PYTHON` | `python3` from `PATH` | Python binary used by the "What Claude sees" page |
-| `OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint for offline extraction |
+| `MEM_RECENCY_WEIGHT` | `1.5` | how much fresher memories are nudged up in ranking (0 = pure bm25) |
+| `OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint for offline extraction + embeddings |
 | `MEM_LLM_MODEL` | `qwen2.5:7b-instruct` | model used by `consolidate.py` |
+| `MEM_EMBED_MODEL` | `all-minilm` | embedding model for hybrid search + link suggestions (retrieval only) |
+| `MEM_SUGGEST_THRESHOLD` | `0.62` | min cosine similarity for a suggested link to appear |
 
 ## Design notes
 

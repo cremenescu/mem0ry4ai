@@ -28,9 +28,10 @@ cd mem0ry4ai
 # 1. CLI
 ./mem.py add --type gotcha --scope global --summary "..." --body "..."
 ./mem.py list
-./mem.py search "..."             # FTS5 ranked
+./mem.py search "..."             # FTS5 ranked + nudge pe recenta
 ./mem.py search "..." --since 2026-05-01
 ./mem.py audit                    # raport secrete in store (read-only, nu modifica)
+./mem.py embed                    # optional: vectori pt cautare semantica (necesita Ollama + all-minilm)
 
 # 2. Web UI (server propriu, fara Apache)
 ./server_web.sh                    # -> http://127.0.0.1:8841/
@@ -43,7 +44,9 @@ python3 hooks/install.py --target user
 ## Principii
 
 - **Markdown + git = sursa de adevar.** Indexul SQLite FTS5 e derivat si regenerabil.
-- **Supersedare, nu stergere.** Faptele vechi raman in istoric; git pastreaza tot.
+- **Supersedare bi-temporala, nu stergere.** Faptele vechi raman in istoric; supersedarea retine
+  separat **cand** au incetat sa fie valabile (`invalidated`) si **de ce** (`invalid-reason`),
+  distinct de `created` (valabil-de-la). Istoric „ce-am crezut si cand", nu doar o piatra de mormant.
 - **Gate pe incredere.** Agentul cu context complet scrie direct; extractia batch cu LLM local
   (optionala, prin Ollama) trece printr-o coada de review umana — modelele mici sunt zgomotoase
   si supra-increzatoare (masurat).
@@ -54,10 +57,18 @@ python3 hooks/install.py --target user
   actiunile agentului — intra GARANTAT, primele, cu tot cu body; restul umple `MEM_INJECT_BUDGET`
   (default 8000 bytes), iar orice taietura e anuntata explicit. Injectarea se taie singura,
   determinist — niciodata harness-ul, orb.
-- Tipurile **`todo`** si **`status`** raspund la „unde am ramas?" cand revii la un proiect.
+- Tipurile **`todo`** si **`status`** raspund la „unde am ramas?" cand revii la un proiect; tipul
+  **`procedural`** tine runbook-uri reutilizabile (pasi de release, o procedura de recuperare).
+  Campul optional **`files`** leaga o memorie de fisierele pe care le priveste (indexat + chips in UI).
 - **Relatii intre memorii**: `mem.py link` (related-to, bidirectional in UI) si `mem.py block` +
   `mem.py ready` pentru todo-uri (ce poti ataca acum, fara blocaj deschis). Legate deliberat, nu automat.
-  Pagina **Legaturi** arata toate muchiile ca graf force-directed (SVG, fara dependinte) + lista.
+  Pagina **Legaturi** arata **sugestii semantice** (cele mai apropiate perechi nelegate, confirmate
+  sau respinse de tine) deasupra unui graf force-directed (SVG, fara dependinte) + lista.
+- **Cautare hibrida (optionala).** Implicit keyword-first (FTS5 + nudge pe recenta), zero dependinte.
+  Cu Ollama + un embedder mic (`all-minilm`), `mem.py search` fuzioneaza scorul keyword cu similaritate
+  cosinus pe vectori locali — „auth token expiry" gaseste o memorie care zice „JWT TTL". Embedder-ul e
+  DOAR pentru regasire (nu decide, nu scrie -> nu atinge gate-ul de incredere); fara Ollama, fallback
+  tacut la keyword.
 - **Web UI** = dashboard (status sistem) + Memorii (lista filtrabila) + Proiecte (sumar per proiect)
   + Legaturi (graf), navigare consistenta + breadcrumb pe toate paginile.
 
