@@ -81,12 +81,10 @@ function endpoint_html(array $r): string {
       $sg_end = function (array $r) {
           $sc = $r['meta']['scope'] ?? '';
           $scl = $sc !== 'global' ? '<span class="sg-scope">' . h(scope_label($sc)) . '</span> ' : '';
-          $bd = trim(preg_replace('/\s+/', ' ', $r['body']));
           ob_start(); ?>
         <div class="sg-end">
           <div class="sg-top"><?= type_badge($r['meta']['type'] ?? '?') ?>
             <a class="sg-sum" href="memories.php?id=<?= h($r['id']) ?>"><?= $scl . h(rec_summary($r)) ?></a></div>
-          <?php if ($bd !== ''): ?><div class="sg-body"><?= h(mb_substr($bd, 0, 150)) ?><?= mb_strlen($bd) > 150 ? '…' : '' ?></div><?php endif; ?>
           <div class="sg-full"><?= render_body($r['body']) ?><?= rec_extras_html($r) ?></div>
         </div>
       <?php return ob_get_clean(); };
