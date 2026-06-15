@@ -20,7 +20,18 @@ MEM = os.path.join(PROJ, "mem.py")
 REPO_ROOT = os.path.dirname(PROJ)  # monorepo root (parent of the mem0ry4ai folder)
 # plugin install: the agent cannot guess the plugin path — inject the full mem.py invocation
 PLUGIN_MODE = f"{os.sep}.claude{os.sep}plugins{os.sep}" in PROJ + os.sep
-MEM_CMD = f"python3 {MEM}" if PLUGIN_MODE else "mem.py"
+
+
+def mem_cmd(cwd):
+    """The mem.py invocation to show in hints — correct whether mem0ry4ai is the repo
+    itself (standalone) or a subfolder of a monorepo: a path relative to where you work."""
+    if PLUGIN_MODE:
+        return f"python3 {MEM}"
+    try:
+        rel = os.path.relpath(MEM, cwd)
+        return rel if not rel.startswith("../../") else MEM
+    except Exception:
+        return "mem.py"
 
 
 def ensure_web_server():
@@ -46,6 +57,7 @@ def main():
     cwd = data.get("cwd") or os.getcwd()
     is_root = os.path.normpath(cwd) == os.path.normpath(REPO_ROOT)
     slug = os.path.basename(os.path.normpath(cwd))
+    MEM_CMD = mem_cmd(cwd)
 
     try:
         out = subprocess.run(

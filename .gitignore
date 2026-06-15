@@ -12,3 +12,6 @@ staging/
 .DS_Store
 __pycache__/
 *.pyc
+
+# Per-machine local config (MEM_PHP, MEM_UI_LANG, ...)
+.mem-local.env

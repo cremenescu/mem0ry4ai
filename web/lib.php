@@ -39,7 +39,9 @@ function ui_lang(): string {
         return $lang;
     }
     $c = $_COOKIE['mem_lang'] ?? '';
-    $lang = ($c === 'ro') ? 'ro' : 'en';
+    // default language: cookie > MEM_UI_LANG env (a local instance can default to 'ro') > 'en'
+    $envdef = (getenv('MEM_UI_LANG') === 'ro') ? 'ro' : 'en';
+    $lang = ($c === 'ro' || $c === 'en') ? $c : $envdef;
     return $lang;
 }
 

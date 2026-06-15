@@ -28,6 +28,10 @@ fi
 mkdir -p "$DATA" 2>/dev/null
 export MEM_DATA_DIR="$DATA"   # the PHP UI reads the same env var
 
+# Optional per-machine config (gitignored): MEM_PHP, MEM_UI_LANG, MEM_INJECT_BUDGET, etc.
+# Keeps the code identical across clones while a local instance sets its own specifics.
+[ -f "$DATA/.mem-local.env" ] && . "$DATA/.mem-local.env"
+
 PIDFILE="$DATA/.web-server.pid"
 LOGFILE="$DATA/.web-server.log"
 
