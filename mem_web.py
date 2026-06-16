@@ -328,15 +328,23 @@ def health_checks():
         out.append([t("Embedder (semantic)"), None, f"{vec} {t('vectors')} · {t('Ollama offline (keyword search)')}"])
     nq = len(queue_pending())
     out.append([t("Review queue (health)"), nq == 0, t("empty") if nq == 0 else f"{nq} {t('candidates to review')}"])
-    # hooks installed: settings.json authoritative; else empirical staged captures
+    # hooks installed: settings.json authoritative; else empirical staged captures.
+    # Parse the JSON (not raw text) so Windows backslashes — which json escapes to
+    # "\\" in the file — un-escape to real separators before we compare; then
+    # normalize \ vs / so the match is OS-agnostic.
     hooks, hdet = None, ""
     settings = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+    needle = os.path.join(HERE, "hooks").replace("\\", "/")
     try:
         with open(settings, encoding="utf-8") as f:
-            raw = f.read()
-        hooks = (HERE + os.sep + "hooks") in raw or (HERE + "/hooks") in raw
+            cfg = json.load(f)
+        cmds = [hh.get("command", "")
+                for ev in (cfg.get("hooks") or {}).values()
+                for entry in (ev or [])
+                for hh in (entry.get("hooks", []) or [])]
+        hooks = any(needle in c.replace("\\", "/") for c in cmds)
         hdet = t("registered in settings.json") if hooks else t("NOT in settings.json")
-    except OSError:
+    except (OSError, ValueError):
         sess = os.path.join(mem.DATA, "staging", "sessions.jsonl")
         if os.path.isfile(sess) and os.path.getsize(sess) > 0:
             hooks = True
