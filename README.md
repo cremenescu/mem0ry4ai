@@ -52,14 +52,15 @@ Claude Code session
   ├─ SessionStart hook ─► injects relevant memories (global + current project;
   │                       from a monorepo root: a capped index of ALL projects)
   ├─ [work] the agent proactively writes durable findings ─► mem.py add
-  └─ SessionEnd/PreCompact hook ─► transcript pointer to staging/ + auto-commit of the store
-                                    (end-of-session git checkpoint) + auto-embed of new memories
-                                    (so search/suggestions stay fresh) — no manual chore
+  └─ SessionEnd + PreCompact hook ─► transcript pointer to staging/ + auto-commit of the store +
+                                    auto-embed of new memories, at EACH boundary (end-of-session and
+                                    mid-session before compaction) — nothing is lost when context
+                                    compresses without warning; no manual chore
 
 store/*.md   ◄── SOURCE OF TRUTH (markdown + git: audit, diff, rollback, supersede)
    ├─► store/.index.db   (FTS5, ranked search — derived, regenerable)
    ├─► web UI            (dashboard, per-project "where was I" page, review queue, live updates)
-   └─► mem.py            (CLI: add/list/search/supersede/propose/reindex/embed — stdlib only)
+   └─► mem.py            (CLI: add/list/search/supersede/ready/resume/link/embed/... — stdlib only)
 ```
 
 ## Quick start
@@ -136,7 +137,9 @@ search and the Links suggestions stay current without running `mem.py embed` by 
 | `status` | where the project stands / where you left off |
 
 `todo` + `status` are pinned first in injection and in the per-project web page — they answer
-"where was I?" when you return to a project after weeks.
+"where was I?" when you return to a project after weeks. The CLI mirrors this: `mem.py resume
+--scope project:<slug>` prints a one-screen briefing (latest status + ready/blocked todos + recent
+knowledge); with no scope, a one-line-per-project overview.
 
 ### Record fields beyond the basics
 

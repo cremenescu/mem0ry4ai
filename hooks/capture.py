@@ -67,8 +67,12 @@ def main():
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:
         pass
-    if data.get("hook_event_name") == "SessionEnd":
-        auto_commit_store()
+    ev = data.get("hook_event_name")
+    if ev in ("SessionEnd", "PreCompact"):
+        # Flush at BOTH boundaries (compaction protocol): a long session that compacts mid-way still
+        # gets the memories written so far committed + embedded, so nothing is lost at the boundary and
+        # search/suggestions stay fresh — without relying on advance notice before compaction.
+        auto_commit_store("pre-compaction checkpoint" if ev == "PreCompact" else "end of session")
         auto_embed()
     return 0
 
@@ -91,10 +95,11 @@ def auto_embed():
         pass
 
 
-def auto_commit_store():
-    """Automatic checkpoint: commit store/ at session end (no human action required).
+def auto_commit_store(reason="end of session"):
+    """Automatic checkpoint: commit store/ at a session boundary (no human action required).
 
     Memories written during the session land in git history without the user pressing anything.
+    `reason` distinguishes an end-of-session checkpoint from a mid-session pre-compaction one.
     Silent on any error (repo lock from another session, ownership, etc.).
     """
     import subprocess
@@ -109,7 +114,8 @@ def auto_commit_store():
             gi = os.path.join(DATA, ".gitignore")
             if not os.path.exists(gi):
                 with open(gi, "w", encoding="utf-8") as f:
-                    f.write("staging/\nstore/.index.db\n.web-server.pid\n.web-server.log\n")
+                    # derived dbs (FTS index + embeddings) are regenerable + churn on every checkpoint
+                    f.write("staging/\nstore/.index.db*\nstore/.embed.db*\n.web-server.pid\n.web-server.log\n")
         # -uall: list untracked files individually ('?? store/' alone would yield an empty label)
         r = subprocess.run(base + ["status", "--porcelain", "-uall", "store"],
                            capture_output=True, text=True, timeout=10)
@@ -129,7 +135,7 @@ def auto_commit_store():
                                    "-c", "user.name=mem0ry4ai hook",
                                    "-c", "user.email=hook@mem0ry4ai.local",
                                    "commit", "-m",
-                                   f"store: checkpoint {label} (end of session)",
+                                   f"store: checkpoint {label} ({reason})",
                                    "--", f],
                            capture_output=True, timeout=15)
     except Exception:

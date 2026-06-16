@@ -88,13 +88,39 @@ function endpoint_html(array $r): string {
           <div class="sg-full"><?= render_body($r['body']) ?><?= rec_extras_html($r) ?></div>
         </div>
       <?php return ob_get_clean(); };
-      foreach ($suggestions as $s): $A = $sb[$s['a']] ?? null; $B = $sb[$s['b']] ?? null; if (!$A || !$B) continue; ?>
-      <li data-a="<?= h($s['a']) ?>" data-b="<?= h($s['b']) ?>">
-        <div class="sg-head"><span class="sg-pct" title="semantic similarity"><?= round($s['sim'] * 100) ?>%</span>
-          <span class="sg-act"><button type="button" class="btn btn-primary sg-link"><?= t('Link') ?></button>
-            <button type="button" class="btn btn-ghost sg-dismiss"><?= t('Dismiss') ?></button></span></div>
-        <div class="sg-pair"><?= $sg_end($A) ?><div class="sg-mid">&harr;</div><?= $sg_end($B) ?></div>
-        <button type="button" class="sg-more"><span class="sg-arrow">&#9662;</span> <?= t('full content') ?></button>
+      // group suggested pairs by project: same scope -> that scope; one global -> the project's group;
+      // both global -> Global; two different projects -> Cross-project. Sim order is kept within a group.
+      $sg_groups = [];
+      foreach ($suggestions as $s) {
+          $A = $sb[$s['a']] ?? null; $B = $sb[$s['b']] ?? null;
+          if (!$A || !$B) continue;
+          $sa = $A['meta']['scope'] ?? 'global'; $sB = $B['meta']['scope'] ?? 'global';
+          if ($sa === $sB)          $gk = $sa;
+          elseif ($sa === 'global') $gk = $sB;
+          elseif ($sB === 'global') $gk = $sa;
+          else                      $gk = '__cross__';
+          $sg_groups[$gk][] = [$s, $A, $B];
+      }
+      uksort($sg_groups, function ($x, $y) {
+          if ($x === 'global') return -1;    if ($y === 'global') return 1;
+          if ($x === '__cross__') return 1;  if ($y === '__cross__') return -1;
+          return strcmp($x, $y);
+      });
+      foreach ($sg_groups as $gk => $items):
+          $glabel = $gk === 'global' ? t('Global') : ($gk === '__cross__' ? t('Cross-project') : scope_label($gk)); ?>
+      <li class="sg-group" data-group="<?= h($gk) ?>">
+        <div class="sg-group-head"><?= h($glabel) ?> <span class="sg-gcount"><?= count($items) ?></span></div>
+        <ul class="sg-items">
+        <?php foreach ($items as [$s, $A, $B]): ?>
+          <li data-a="<?= h($s['a']) ?>" data-b="<?= h($s['b']) ?>" data-group="<?= h($gk) ?>">
+            <div class="sg-head"><span class="sg-pct" title="semantic similarity"><?= round($s['sim'] * 100) ?>%</span>
+              <span class="sg-act"><button type="button" class="btn btn-primary sg-link"><?= t('Link') ?></button>
+                <button type="button" class="btn btn-ghost sg-dismiss"><?= t('Dismiss') ?></button></span></div>
+            <div class="sg-pair"><?= $sg_end($A) ?><div class="sg-mid">&harr;</div><?= $sg_end($B) ?></div>
+            <button type="button" class="sg-more"><span class="sg-arrow">&#9662;</span> <?= t('full content') ?></button>
+          </li>
+        <?php endforeach; ?>
+        </ul>
       </li>
       <?php endforeach; ?>
     </ul>
@@ -319,8 +345,10 @@ var GRAPH = { nodes: <?= json_encode($gnodes, JSON_UNESCAPED_UNICODE | JSON_UNES
       .then(function(j){
         if (!j.ok) { e.target.disabled = false; return; }
         if (link) { location.reload(); return; }   // new edge -> refresh graph
+        var band = li.closest('.sg-group');
         li.remove();
-        var c = document.querySelector('.suggest .count'); if (c) c.textContent = document.querySelectorAll('#suggest-list li').length;
+        if (band && !band.querySelector('li[data-a]')) band.remove();   // drop the project band when empty
+        var c = document.querySelector('.suggest .count'); if (c) c.textContent = document.querySelectorAll('#suggest-list li[data-a]').length;
       })
       .catch(function(){ e.target.disabled = false; });
   });

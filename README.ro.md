@@ -32,6 +32,7 @@ cd mem0ry4ai
 ./mem.py search "..." --since 2026-05-01
 ./mem.py audit                    # raport secrete in store (read-only, nu modifica)
 ./mem.py embed                    # optional: vectori pt cautare semantica (necesita Ollama + all-minilm)
+./mem.py resume --scope project:x # briefing "unde am ramas": status + todo-uri ready + recente
 
 # 2. Web UI (server propriu, fara Apache)
 ./server_web.sh                    # -> http://127.0.0.1:8841/
@@ -74,8 +75,9 @@ python3 hooks/install.py --target user
   `--no-semantic` forteaza keyword.
 - **Anti-duplicare.** `mem.py add` **avertizeaza (nu blocheaza)** cand exista deja o memorie de acelasi
   tip foarte similara — arata cele mai apropiate + comanda `supersede` gata de rulat — ca sa contopesti
-  in loc sa dublezi. Memoriile noi se **embededeaza automat la SessionEnd**, deci cautarea si sugestiile
-  raman la zi fara `mem.py embed` manual. (`MEM_DUP_CHECK=0` dezactiveaza; `MEM_DUP_THRESHOLD` regleaza pragul.)
+  in loc sa dublezi. Memoriile noi se **embededeaza + commit-uiesc automat la fiecare granita** (final de
+  sesiune SI inainte de compactare), deci nimic nu se pierde cand contextul se comprima fara preaviz, iar
+  cautarea/sugestiile raman la zi fara `mem.py embed` manual. (`MEM_DUP_CHECK=0` dezactiveaza dup-warning-ul.)
 - **Web UI** = dashboard (status sistem) + Memorii (lista filtrabila) + Proiecte (sumar per proiect)
   + Legaturi (graf), navigare consistenta + breadcrumb pe toate paginile.
 

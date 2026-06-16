@@ -104,6 +104,7 @@ function ro_strings(): array {
         'Memories' => 'Memorii',
         'of' => 'din',
         'ranked search (FTS)' => 'cautare ranked (FTS)',
+        'Cross-project' => 'Intre proiecte',
         // search status light + embedder health
         'Semantic on' => 'Semantic pornit',
         'Classic' => 'Clasic',

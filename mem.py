@@ -761,6 +761,61 @@ def cmd_ready(a):
             print(f"  {r['id']}  [{r['meta'].get('scope','?')}]  {record_summary(r)}  <- {', '.join(ob)}")
 
 
+def cmd_resume(a):
+    """"Where was I?" — a compact briefing for a scope: latest status + ready/blocked todos + recent
+    knowledge. With no --scope, a one-line-per-project overview. Mirrors what SessionStart injects."""
+    recs = all_records()
+    by_id = {r["id"]: r for r in recs}
+    active = [r for r in recs if r["meta"].get("status", "active") == "active"]
+
+    def latest_status(scope):
+        ss = [r for r in active if r["meta"].get("type") == "status" and r["meta"].get("scope") == scope]
+        ss.sort(key=lambda r: r["meta"].get("created", ""), reverse=True)
+        return ss[0] if ss else None
+
+    if not a.scope:
+        scopes = sorted({r["meta"].get("scope", "global") for r in active
+                         if r["meta"].get("scope", "global") != "global"})
+        print("RESUME — overview  (use --scope project:<slug> for detail)\n")
+        for sc in scopes:
+            st = latest_status(sc)
+            todos = [r for r in active if r["meta"].get("type") == "todo" and r["meta"].get("scope") == sc]
+            ready = sum(1 for r in todos if not _open_blockers(r, by_id))
+            line = f"  {sc}"
+            if st:
+                line += f"  —  {record_summary(st)[:68]}"
+            if todos:
+                line += f"   [{ready}/{len(todos)} todo ready]"
+            print(line)
+        return
+
+    sc = a.scope
+    print(f"RESUME — {sc}\n")
+    st = latest_status(sc)
+    if st:
+        print(f"STATUS ({st['meta'].get('created', '')[:10]}):  {record_summary(st)}")
+    else:
+        print("STATUS: (none recorded)")
+    todos = [r for r in active if r["meta"].get("type") == "todo" and r["meta"].get("scope") == sc]
+    ready = sorted([r for r in todos if not _open_blockers(r, by_id)],
+                   key=lambda r: r["meta"].get("created", ""), reverse=True)
+    blocked = [(r, _open_blockers(r, by_id)) for r in todos if _open_blockers(r, by_id)]
+    print(f"\nREADY TODOS ({len(ready)}):")
+    for r in ready:
+        print(f"  {r['id']}  {record_summary(r)}")
+    if blocked:
+        print(f"\nBLOCKED ({len(blocked)}):")
+        for r, ob in blocked:
+            print(f"  {r['id']}  {record_summary(r)}  <- {', '.join(ob)}")
+    recent = sorted([r for r in active if r["meta"].get("scope") == sc
+                     and r["meta"].get("type") not in ("status", "todo")],
+                    key=lambda r: r["meta"].get("created", ""), reverse=True)
+    if recent:
+        print(f"\nRECENT ({min(5, len(recent))} of {len(recent)}):")
+        for r in recent[:5]:
+            print(f"  [{r['meta'].get('type', '?')}]  {record_summary(r)[:80]}")
+
+
 def cmd_audit(a):
     """Report records containing secret-like patterns. Never modifies anything."""
     recs = [r for r in all_records() if _match_filters(r, a.scope, None, "all")]
@@ -914,6 +969,10 @@ def main():
     prd = sub.add_parser("ready", help="active todos with no open blocker (what to tackle now)")
     prd.add_argument("--scope")
     prd.set_defaults(func=cmd_ready)
+
+    prs = sub.add_parser("resume", help="\"where was I?\" briefing: status + ready todos + recent")
+    prs.add_argument("--scope", help="project:<slug> (omit for a cross-project overview)")
+    prs.set_defaults(func=cmd_resume)
 
     px = sub.add_parser("reindex", help="rebuild the derived FTS5 index (+ embeddings if Ollama is up)")
     px.set_defaults(func=cmd_reindex)
