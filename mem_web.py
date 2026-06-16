@@ -31,6 +31,11 @@ ASSETS_DIR = os.path.join(HERE, "web", "assets")
 # Local single-user tool: one process-wide CSRF token (double-submit on POST forms) is adequate.
 _CSRF = secrets.token_hex(16)
 
+# When the server runs detached (no console — e.g. launched by the SessionStart hook),
+# every child process (git, the hook subprocess) pops its own cmd window that flashes on
+# each request. CREATE_NO_WINDOW suppresses it. The flag only exists on Windows.
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
 # ---------- per-request context (thread-safe language) ----------
 _ctx = threading.local()
 
@@ -372,7 +377,8 @@ def injection_stats():
         return (None, bud, 0)
     try:
         payload = json.dumps({"cwd": os.path.dirname(HERE), "source": "health"})
-        r = subprocess.run([sys.executable, hook], input=payload, capture_output=True, text=True, timeout=30)
+        r = subprocess.run([sys.executable, hook], input=payload, capture_output=True, text=True,
+                           timeout=30, creationflags=_NO_WINDOW)
         if r.returncode != 0:
             return (None, bud, 0)
         size = len(r.stdout.encode("utf-8"))
@@ -681,7 +687,7 @@ def git_run(args):
         return None
     try:
         r = subprocess.run(["git", "-C", root, "-c", f"safe.directory={root}"] + list(args),
-                           capture_output=True, text=True, timeout=15)
+                           capture_output=True, text=True, timeout=15, creationflags=_NO_WINDOW)
         out = (r.stdout + r.stderr).rstrip("\n")
         return {"code": r.returncode, "lines": out.split("\n") if out else []}
     except Exception:
@@ -726,7 +732,7 @@ def git_commit_store(msg):
         rc = subprocess.run(["git", "-C", root, "-c", f"safe.directory={root}",
                              "-c", "commit.gpgsign=false", "-c", "user.name=mem0ry4ai web",
                              "-c", "user.email=web@mem0ry4ai.local", "commit", "-m", msg, "--", "store"],
-                            capture_output=True, text=True, timeout=15)
+                            capture_output=True, text=True, timeout=15, creationflags=_NO_WINDOW)
         lines = (rc.stdout + rc.stderr).rstrip("\n").split("\n")
         if rc.returncode != 0:
             return (False, " ".join(lines[:3]))
@@ -971,7 +977,8 @@ def page_inject(qs=None):
     try:
         stdin = json.dumps({"cwd": cwd, "hook_event_name": "SessionStart", "source": "preview"})
         # sys.executable (not "python3") -> works on Windows too
-        r = subprocess.run([sys.executable, hook], input=stdin, capture_output=True, text=True, timeout=30)
+        r = subprocess.run([sys.executable, hook], input=stdin, capture_output=True, text=True,
+                           timeout=30, creationflags=_NO_WINDOW)
         output = r.stdout
         if r.returncode != 0:
             err = f"hook exit {r.returncode}: {r.stderr.strip()}"

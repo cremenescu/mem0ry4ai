@@ -29,6 +29,10 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 import redact  # noqa: E402
 
+# Suppress the console window a child process (rg) would pop on Windows when this module
+# runs under a detached, console-less server. The flag only exists on Windows.
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
 
 def _data_dir():
     """Where store/ and staging/ live. Default = next to the code (git-clone install).
@@ -546,7 +550,8 @@ def cmd_search(a):
     q = a.query
     if shutil.which("rg"):
         try:
-            out = subprocess.run(["rg", "-l", "-i", q, STORE], capture_output=True, text=True).stdout
+            out = subprocess.run(["rg", "-l", "-i", q, STORE], capture_output=True, text=True,
+                                 creationflags=_NO_WINDOW).stdout
             cand_files = set(out.split())
         except Exception:
             cand_files = set(store_files())
