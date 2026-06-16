@@ -9,7 +9,7 @@
       "name": "mem0ry4ai",
       "source": "./",
       "description": "Persistent, local-first memory for Claude Code — markdown+git store, scoped SessionStart injection, secret redaction, web UI.",
-      "version": "0.7.0"
+      "version": "0.7.1"
     }
   ]
 }
