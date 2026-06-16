@@ -21,6 +21,11 @@ REPO_ROOT = os.path.dirname(PROJ)  # monorepo root (parent of the mem0ry4ai fold
 # plugin install: the agent cannot guess the plugin path — inject the full mem.py invocation
 PLUGIN_MODE = f"{os.sep}.claude{os.sep}plugins{os.sep}" in PROJ + os.sep
 
+# This hook is invoked by the (console-less) detached web server for the health check on every
+# dashboard refresh; without this flag the `mem.py list` child below pops a cmd window each time.
+# Windows-only — the flag does not exist on POSIX, where creationflags=0 is a no-op.
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
 
 def mem_cmd(cwd):
     """The mem.py invocation to show in hints — correct whether mem0ry4ai is the repo
@@ -74,7 +79,7 @@ def main():
     try:
         out = subprocess.run(
             [sys.executable, MEM, "list", "--status", "active", "--json"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=30, creationflags=_NO_WINDOW,
         )
         recs = json.loads(out.stdout or "[]")
     except Exception:

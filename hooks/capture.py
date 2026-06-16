@@ -10,8 +10,13 @@ session_id + cwd. Any error => silent exit 0 (never breaks the session).
 import glob
 import json
 import os
+import subprocess
 import sys
 import time
+
+# Child git/python processes pop a cmd window on Windows when this hook runs from a
+# console-less context (GUI app spawn, or the detached server). Windows-only; 0 elsewhere.
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJ = os.path.dirname(HOOK_DIR)
@@ -82,15 +87,18 @@ def auto_embed():
     reflect memories written this session, without the user running `mem.py embed` by hand.
     Launched DETACHED so it never blocks the session; incremental (only changed records) and a
     no-op in milliseconds when no embedder is up. Silent on any error."""
-    import subprocess
     try:
         mem = os.path.join(PROJ, "mem.py")
         if not os.path.exists(mem):
             return
         env = dict(os.environ, MEM_DATA_DIR=DATA)
+        # detach + no console window, the right way per OS: start_new_session is POSIX-only, so on
+        # Windows it neither detaches nor hides the window — use DETACHED_PROCESS there instead.
+        kwargs = ({"creationflags": 0x00000008 | 0x00000200} if os.name == "nt"
+                  else {"start_new_session": True})
         subprocess.Popen([sys.executable, mem, "embed"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         env=env, start_new_session=True)
+                         env=env, **kwargs)
     except Exception:
         pass
 
@@ -102,7 +110,6 @@ def auto_commit_store(reason="end of session"):
     `reason` distinguishes an end-of-session checkpoint from a mid-session pre-compaction one.
     Silent on any error (repo lock from another session, ownership, etc.).
     """
-    import subprocess
     try:
         base = ["git", "-C", DATA, "-c", f"safe.directory={DATA}"]
         if not os.path.isdir(os.path.join(DATA, ".git")):
@@ -110,7 +117,7 @@ def auto_commit_store(reason="end of session"):
             # so the memory timeline works there too
             if not os.path.isdir(os.path.join(DATA, "store")):
                 return
-            subprocess.run(["git", "init", "-q", DATA], capture_output=True, timeout=10)
+            subprocess.run(["git", "init", "-q", DATA], capture_output=True, timeout=10, creationflags=_NO_WINDOW)
             gi = os.path.join(DATA, ".gitignore")
             if not os.path.exists(gi):
                 with open(gi, "w", encoding="utf-8") as f:
@@ -118,7 +125,7 @@ def auto_commit_store(reason="end of session"):
                     f.write("staging/\nstore/.index.db*\nstore/.embed.db*\n.web-server.pid\n.web-server.log\n")
         # -uall: list untracked files individually ('?? store/' alone would yield an empty label)
         r = subprocess.run(base + ["status", "--porcelain", "-uall", "store"],
-                           capture_output=True, text=True, timeout=10)
+                           capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW)
         if r.returncode != 0 or not r.stdout.strip():
             return
         # one commit PER FILE (= per scope): global never mixes with individual projects
@@ -130,14 +137,14 @@ def auto_commit_store(reason="end of session"):
                 label = "global"
             else:
                 label = f.rsplit("/", 1)[-1]
-            subprocess.run(base + ["add", f], capture_output=True, timeout=10)
+            subprocess.run(base + ["add", f], capture_output=True, timeout=10, creationflags=_NO_WINDOW)
             subprocess.run(base + ["-c", "commit.gpgsign=false",
                                    "-c", "user.name=mem0ry4ai hook",
                                    "-c", "user.email=hook@mem0ry4ai.local",
                                    "commit", "-m",
                                    f"store: checkpoint {label} ({reason})",
                                    "--", f],
-                           capture_output=True, timeout=15)
+                           capture_output=True, timeout=15, creationflags=_NO_WINDOW)
     except Exception:
         pass
 
