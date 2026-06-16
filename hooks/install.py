@@ -72,9 +72,11 @@ def main():
                     del hooks[ev]
         action = "uninstalled"
     else:
-        set_event(hooks, "SessionStart", f"{PY} {SESSION_START}")  # all sources
-        set_event(hooks, "PreCompact", f"{PY} {CAPTURE}")
-        set_event(hooks, "SessionEnd", f"{PY} {CAPTURE}")
+        # quote both paths so spaces (Windows: "C:\Program Files\...\python.exe" or a username with a
+        # space) don't break the command; the HOOK_DIR signature is still a substring for uninstall.
+        set_event(hooks, "SessionStart", f'"{PY}" "{SESSION_START}"')  # all sources
+        set_event(hooks, "PreCompact", f'"{PY}" "{CAPTURE}"')
+        set_event(hooks, "SessionEnd", f'"{PY}" "{CAPTURE}"')
         action = "installed"
 
     blob = json.dumps(cfg, indent=2, ensure_ascii=False)
