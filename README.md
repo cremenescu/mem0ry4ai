@@ -65,8 +65,9 @@ store/*.md   ◄── SOURCE OF TRUTH (markdown + git: audit, diff, rollback, s
 
 ## Quick start
 
-Requirements: Python 3.9+, PHP 8+ (for the web UI), git. No other dependencies — no Docker,
-no vector database, no API keys.
+Requirements: **Python 3.9+ and git — that's it.** No PHP, no Docker, no vector database, no API
+keys, no `pip install`. The CLI, the hooks, and the web UI are all pure-Python stdlib, so it runs
+the same on **macOS, Linux, and Windows**.
 
 ### Option A — Claude Code plugin (one command)
 
@@ -96,8 +97,8 @@ cd mem0ry4ai
 ./mem.py search "rsync" --since 2026-05-01 # ...only memories created since May
 ./mem.py audit                             # report secret-like patterns (read-only)
 
-# 2. Web UI (standalone server, no Apache needed)
-./server_web.sh                   # -> http://127.0.0.1:8841/
+# 2. Web UI (pure-Python stdlib server — no PHP, no Apache)
+./mem.py serve                    # -> http://127.0.0.1:8841/  (Windows: py mem.py serve)
 
 # 3. Claude Code integration (hooks: inject at start + capture at end)
 python3 hooks/install.py --dry-run        # preview what would be written
@@ -106,6 +107,25 @@ python3 hooks/install.py --target user    # ~/.claude/settings.json (all project
 ```
 
 The SessionStart hook also auto-starts the web server, so the UI is always up while you work.
+
+### Windows (native — no WSL, no PHP)
+
+Everything is pure-Python stdlib, so mem0ry4ai runs natively on Windows. Use the git-clone path
+with `py` (or `python`):
+
+```powershell
+git clone https://github.com/cremenescu/mem0ry4ai.git
+cd mem0ry4ai
+py mem.py add --type gotcha --scope global --summary "..." --body "..."
+py hooks\install.py --target user      # registers the hooks with YOUR interpreter
+py mem.py serve                        # web UI at http://127.0.0.1:8841/
+```
+
+`hooks\install.py` records the hook commands using your Python interpreter (`sys.executable`), so
+the SessionStart/SessionEnd hooks run on Windows without a `python3` on `PATH`, and the web server
+launches the same way. Data lives in `%USERPROFILE%\.mem0ry4ai`. (The plugin-marketplace install
+invokes `python3`; on native Windows the clone + `install.py` path above is the most reliable. WSL
+also works like plain Linux.)
 
 ### Teach your agent to write memories
 
@@ -288,15 +308,15 @@ Bilingual (English default, Romanian via the EN/RO switch in the top bar).
 
 *(Screenshots use demo data.)*
 
-- **Dashboard** (`index.php`): stat cards (each deep-links into the list with a filter), health
+- **Dashboard** (`/`): stat cards (each deep-links into the list with a filter), health
   checks (store/staging/index/queue/hooks/git/injection size), recent activity, live updates via
   cheap polling (~4 ms when nothing changed). Consistent top nav + breadcrumbs on every page.
-- **Memories list** (`memories.php`): ranked search (same FTS5 index as the CLI),
+- **Memories list** (`/memories`): ranked search (same FTS5 index as the CLI),
   grouped/sortable/filterable table, bulk operations (supersede / re-scope / delete),
   supersede-chain navigation; related/blocked links shown on each record.
-- **Projects** (`projects.php`): every project at a glance — active count, open todos, current
+- **Projects** (`/projects`): every project at a glance — active count, open todos, current
   status — each card opening its per-project page (status + ready/blocked todos pinned first).
-- **Links** (`links.php`): semantic suggested links (confirm/dismiss) above a force-directed graph
+- **Links** (`/links`): semantic suggested links (confirm/dismiss) above a force-directed graph
   of all `related-to` / `blocked-by` edges (dependency-free SVG) + a grouped text list — see how
   memories connect at a glance.
 - **"What Claude sees"**: renders the exact SessionStart injection, with its size in bytes/tokens.
@@ -326,9 +346,8 @@ Everything is overridable via environment variables — no config file needed:
 | `MEM_DATA_DIR` | next to the code; `~/.mem0ry4ai` in plugin installs | where `store/` + `staging/` live (own git repo) |
 | `MEM_REDACT` | `1` | set `0` to disable secret redaction on write paths |
 | `MEM_INJECT_BUDGET` | `8000` | max bytes injected at SessionStart (critical rules always fit; cuts are announced) |
-| `MEM_WEB_PORT` | `8841` | web UI port (`server_web.sh`) |
-| `MEM_PHP` | `php` from `PATH` | PHP binary (server + conformance test) |
-| `MEM_PYTHON` | `python3` from `PATH` | Python binary used by the "What Claude sees" page |
+| `MEM_WEB_PORT` | `8841` | web UI port (`mem.py serve`) |
+| `MEM_UI_LANG` | `en` | default web UI language (`ro` for Romanian; per-user EN/RO switch overrides) |
 | `MEM_RECENCY_WEIGHT` | `1.5` | how much fresher memories are nudged up in ranking (0 = pure bm25) |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint for offline extraction + embeddings |
 | `MEM_LLM_MODEL` | `qwen2.5:7b-instruct` | model used by `consolidate.py` |
@@ -339,9 +358,9 @@ Everything is overridable via environment variables — no config file needed:
 
 ## Design notes
 
-- **Two parsers, one contract**: the Python engine (`mem.py`) and the PHP web UI read/write the
-  same files. `tests/conformance.py` asserts both produce identical output — run it before
-  committing parser changes.
+- **One codebase, one parser**: the CLI (`mem.py`) and the web UI (`mem_web.py`, a stdlib
+  `http.server`) share a single Python parser and write layer — `mem_web` imports `mem`. No second
+  language, no parser-sync contract to maintain (the earlier PHP UI + conformance test are gone).
 - **Concurrency**: atomic writes (tmp + rename), append-mostly files, WAL-free design — the
   store survives multiple sessions because markdown conflicts are rare and git catches the rest.
 - **No commit chore**: the SessionEnd hook auto-commits `store/` (authored `mem0ry4ai hook`),

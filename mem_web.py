@@ -1926,7 +1926,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if body is None:
                 return self._redirect("/")
             return self._send_html(body)
-        self._send_html(f"<h1>404</h1><p>{h(path)} not ported yet (still served by PHP during migration).</p>", 404)
+        self._send_html(f"<h1>404</h1><p>{h(path)} — not found. <a href=\"/\">Dashboard</a></p>", 404)
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -2104,7 +2104,28 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
 
 
+def _load_local_env():
+    """Per-machine overrides (gitignored .mem-local.env next to the code): KEY=value lines,
+    e.g. MEM_UI_LANG=ro. Does not override variables already set in the environment."""
+    p = os.path.join(HERE, ".mem-local.env")
+    if not os.path.isfile(p):
+        return
+    try:
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("export "):
+                    line = line[7:].strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+    except OSError:
+        pass
+
+
 def serve(host="127.0.0.1", port=None):
+    _load_local_env()
     port = int(port or os.environ.get("MEM_WEB_PORT", "8841"))
     httpd = Server((host, port), Handler)
     print(f"mem0ry4ai web UI on http://{host}:{port}/  (data: {mem.DATA})")

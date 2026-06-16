@@ -35,15 +35,27 @@ def mem_cmd(cwd):
 
 
 def ensure_web_server():
-    """Start the web UI (server_web.sh, idempotent) together with the Claude session.
-
-    Fire-and-forget: we do not wait and do not report errors — injection must not depend on it.
+    """Start the pure-Python web UI (`mem.py serve`) with the Claude session — cross-platform,
+    idempotent (skips if the port is already served), fire-and-forget. Injection never depends on it.
     """
     try:
-        script = os.path.join(PROJ, "server_web.sh")
-        if os.access(script, os.X_OK):
-            subprocess.Popen([script, "start"], stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, start_new_session=True)
+        if not os.path.exists(MEM):
+            return
+        import socket
+        port = int(os.environ.get("MEM_WEB_PORT", "8841"))
+        s = socket.socket()
+        s.settimeout(0.3)
+        busy = s.connect_ex(("127.0.0.1", port)) == 0   # already serving -> don't spawn a duplicate
+        s.close()
+        if busy:
+            return
+        kwargs = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen([sys.executable, MEM, "serve"], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, **kwargs)
     except Exception:
         pass
 

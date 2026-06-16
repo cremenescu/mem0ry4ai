@@ -13,8 +13,9 @@ Documentatia completa: [README.md](README.md) (engleza).
 
 ## Pornire rapida
 
-Cerinte: Python 3.9+, PHP 8+ (pentru web UI), git. Zero alte dependinte — fara Docker, fara
-baza de date vectoriala, fara chei API.
+Cerinte: **Python 3.9+ si git — atat.** Fara PHP, fara Docker, fara baza de date vectoriala, fara
+chei API, fara `pip install`. CLI-ul, hook-urile si web UI-ul sunt toate Python stdlib pur, deci
+ruleaza la fel pe **macOS, Linux si Windows** (nativ, fara WSL — pe Windows: `py mem.py serve`).
 
 ```bash
 # Varianta plugin (o comanda; datele traiesc in ~/.mem0ry4ai, repo git propriu)
@@ -34,8 +35,8 @@ cd mem0ry4ai
 ./mem.py embed                    # optional: vectori pt cautare semantica (necesita Ollama + all-minilm)
 ./mem.py resume --scope project:x # briefing "unde am ramas": status + todo-uri ready + recente
 
-# 2. Web UI (server propriu, fara Apache)
-./server_web.sh                    # -> http://127.0.0.1:8841/
+# 2. Web UI (server Python stdlib — fara PHP, fara Apache)
+./mem.py serve                     # -> http://127.0.0.1:8841/  (Windows: py mem.py serve)
 
 # 3. Integrarea cu Claude Code (hooks)
 python3 hooks/install.py --target user
