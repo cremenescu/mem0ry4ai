@@ -148,6 +148,15 @@ RO = {
     "Memory": "Memorie", "Added": "Adaugat", "select all": "selecteaza tot", "project page →": "pagina proiect →",
     "No memories match the current filter.": "Nicio memorie nu se potriveste filtrului curent.",
     "Types": "Tipuri", "Bulk": "Bulk", "View chain": "Vezi lantul", "Save": "Salveaza",
+    # claude.md editor page
+    "Saved": "Salvat", "Edit": "Editeaza", "monorepo root": "radacina monorepo",
+    "refusing to write an empty file": "refuz sa scriu un fisier gol",
+    "user-global (all projects)": "global per-utilizator (toate proiectele)",
+    "(not present — saving creates it)": "(nu exista — salvarea il creeaza)",
+    "The CLAUDE.md files Claude Code loads automatically for the selected project, alongside your "
+    "memories — your static rules. Saving writes a timestamped .bak next to the file first.":
+        "Fisierele CLAUDE.md pe care Claude Code le incarca automat pentru proiectul selectat, langa "
+        "memoriile tale — regulile tale statice. La salvare se scrie intai un .bak cu timestamp langa fisier.",
     "critical rule: always injected, first, at SessionStart": "regula critica: injectata mereu, prima, la SessionStart",
     "Operation failed": "Operatie esuata", "selected": "selectate", "Clear selection": "Goleste selectia",
     "Supersede chain:": "Lant de supersedare:", "close": "inchide", "(no chain)": "(fara lant)", "back": "inapoi",
@@ -839,7 +848,8 @@ def lang_switch():
 def topbar(active):
     nav = [("dashboard", "/", t("Dashboard")), ("memories", "/memories", t("Memories")),
            ("projects", "/projects", t("Projects")), ("links", "/links", t("Links")),
-           ("git", "/git", t("Git history")), ("inject", "/inject", t("What Claude sees"))]
+           ("git", "/git", t("Git history")), ("inject", "/inject", t("What Claude sees")),
+           ("claudemd", "/claude-md", "CLAUDE.md")]
     nq = len(queue_pending())
     links = ""
     for k, href, label in nav:
@@ -1055,6 +1065,131 @@ def page_inject(qs=None):
     return layout(t("What Claude sees") + " — mem0ry4ai", "inject", content, aside)
 
 
+def claudemd_path(key):
+    """Resolve a CLAUDE.md file from a SAFE key only — never an arbitrary path from the client, so
+    the editor cannot read/write outside the intended files. Keys:
+      'global'          -> ~/.claude/CLAUDE.md (user-global, applies to all projects)
+      'root'            -> <monorepo-root>/CLAUDE.md
+      'project:<slug>'  -> <monorepo-root>/<slug>/CLAUDE.md, but ONLY for a scope that exists in the
+                           store, and only if the resolved real path stays under the monorepo root.
+    Returns None for anything else."""
+    if key == "global":
+        return os.path.join(os.path.expanduser("~"), ".claude", "CLAUDE.md")
+    repo_root = os.path.realpath(os.path.dirname(HERE))
+    if key == "root":
+        return os.path.join(repo_root, "CLAUDE.md")
+    if key.startswith("project:") and key in known_scopes():
+        path = os.path.realpath(os.path.join(repo_root, scope_label(key), "CLAUDE.md"))
+        try:
+            if os.path.commonpath([repo_root, path]) == repo_root:
+                return path
+        except ValueError:  # different drive on Windows -> reject
+            pass
+    return None
+
+
+# CLAUDE.md editor JS — verbatim vanilla JS; CSRF + TXT are prepended by the page.
+_CLAUDEMD_JS_BODY = r'''
+(function(){
+  function setEditing(card, on){
+    var ta = card.querySelector('.cmd-edit');
+    ta.readOnly = !on;
+    card.querySelector('.cmd-editbtn').hidden = on;
+    card.querySelector('.cmd-savebtn').hidden = !on;
+    card.querySelector('.cmd-cancelbtn').hidden = !on;
+    if (on){ card.dataset.orig = ta.value; ta.focus(); }
+  }
+  document.addEventListener('click', function(e){
+    var card = e.target.closest('.cmd-file'); if (!card) return;
+    if (e.target.classList.contains('cmd-editbtn')){ setEditing(card, true); return; }
+    if (e.target.classList.contains('cmd-cancelbtn')){
+      card.querySelector('.cmd-edit').value = card.dataset.orig || '';
+      var s = card.querySelector('.cmd-status'); s.textContent = ''; s.className = 'cmd-status';
+      setEditing(card, false); return;
+    }
+    if (e.target.classList.contains('cmd-savebtn')){
+      var ta = card.querySelector('.cmd-edit'), st = card.querySelector('.cmd-status'), btn = e.target;
+      btn.disabled = true;
+      var fd = new URLSearchParams(); fd.set('csrf', CSRF); fd.set('key', card.dataset.key); fd.set('content', ta.value);
+      fetch('/claude-md', { method:'POST', headers:{'X-Requested-With':'XMLHttpRequest'}, body: fd })
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          btn.disabled = false;
+          if (!j.ok){
+            if (j.error === 'CSRF'){ alert(TXT.csrf); location.reload(); return; }
+            st.textContent = j.error || TXT.failed; st.className = 'cmd-status err'; return;
+          }
+          st.textContent = TXT.saved + (j.backup ? ' (' + j.backup + ')' : '');
+          st.className = 'cmd-status ok';
+          setEditing(card, false);
+        })
+        .catch(function(){ btn.disabled = false; st.textContent = TXT.network; st.className = 'cmd-status err'; });
+    }
+  });
+})();
+'''
+
+
+def page_claudemd(qs=None):
+    qs = qs or {}
+    sel = (qs.get("scope", ["root"])[0] or "root").strip()
+    proj_scopes = [s for s in known_scopes() if s.startswith("project:")]
+    opts = f'<option value="root"{" selected" if sel == "root" else ""}>{t("monorepo root")}</option>'
+    for s in proj_scopes:
+        opts += f'<option value="{h(s)}"{" selected" if sel == s else ""}>{h(scope_label(s))}</option>'
+    # Files Claude Code loads for the selected cwd: user-global + monorepo-root, plus the project's own.
+    panes = [("global", claudemd_path("global"), t("user-global (all projects)")),
+             ("root", claudemd_path("root"), t("monorepo root"))]
+    if sel.startswith("project:") and sel in known_scopes():
+        panes.append((sel, claudemd_path(sel), scope_label(sel)))
+    cards = []
+    for key, path, label in panes:
+        content, exists = "", False
+        if path and os.path.isfile(path):
+            try:
+                content = open(path, encoding="utf-8").read()
+                exists = True
+            except OSError:
+                pass
+        meta = (f'{len(content.encode("utf-8")):,} {t("bytes")}' if exists
+                else t("(not present — saving creates it)"))
+        cards.append(
+            f'<div class="cmd-file" data-key="{h(key)}">'
+            f'<div class="cmd-head"><b>{h(label)}</b> <code>{h(path or "—")}</code> '
+            f'<span class="cmd-meta">{meta}</span></div>'
+            f'<textarea class="cmd-edit" readonly spellcheck="false">{h(content)}</textarea>'
+            f'<div class="cmd-actions">'
+            f'<button type="button" class="btn cmd-editbtn">{t("Edit")}</button>'
+            f'<button type="button" class="btn btn-primary cmd-savebtn" hidden>{t("Save")}</button>'
+            f'<button type="button" class="btn cmd-cancelbtn" hidden>{t("Cancel")}</button>'
+            f'<span class="cmd-status"></span></div></div>')
+    style = ("<style>.cmd-file{border:1px solid var(--border,#e2e8f0);border-radius:8px;padding:14px;margin:14px 0;}"
+             ".cmd-head{margin-bottom:8px;} .cmd-head code{font-size:12px;color:var(--muted,#64748b);}"
+             ".cmd-meta{margin-left:8px;font-size:12px;color:var(--muted,#64748b);}"
+             ".cmd-edit{width:100%;min-height:240px;box-sizing:border-box;resize:vertical;"
+             "font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;line-height:1.5;padding:10px;"
+             "border:1px solid var(--border,#e2e8f0);border-radius:6px;background:var(--bg2,#f8fafc);}"
+             ".cmd-edit:not([readonly]){background:#fff;}"
+             ".cmd-actions{margin-top:8px;display:flex;gap:8px;align-items:center;}"
+             ".cmd-status{font-size:13px;} .cmd-status.ok{color:#1f9d4d;} .cmd-status.err{color:#dc2626;}</style>")
+    intro = t("The CLAUDE.md files Claude Code loads automatically for the selected project, alongside your "
+              "memories — your static rules. Saving writes a timestamped .bak next to the file first.")
+    content = (f'{style}'
+               f'  <div class="crumb"><a href="/">{t("Dashboard")}</a> / CLAUDE.md</div>\n'
+               f'  <h2>CLAUDE.md</h2>\n'
+               f'  <p class="foot">{intro}</p>\n'
+               f'  <div class="toolbar"><form class="filters" method="get">'
+               f'<select name="scope" onchange="this.form.submit()">{opts}</select>'
+               f'<noscript><button class="btn" type="submit">OK</button></noscript></form></div>\n'
+               + "\n".join(cards))
+    txt = {"failed": t("Operation failed"), "network": t("Network error"),
+           "csrf": t("Session expired (the server restarted) — reload the page and try again."),
+           "saved": t("Saved")}
+    js = ("<script>var CSRF = " + json.dumps(_CSRF) + "; var TXT = "
+          + json.dumps(txt, ensure_ascii=False) + ";" + _CLAUDEMD_JS_BODY + "</script>")
+    return layout("CLAUDE.md — mem0ry4ai", "claudemd", content, "", js)
+
+
 # Force-directed graph IIFE — verbatim vanilla JS (no PHP); reads the GRAPH global set just above it.
 _GRAPH_JS = r'''(function(){
   var W = 920, H = 540, CX = W/2, CY = H/2;
@@ -1173,7 +1308,7 @@ _SUGGEST_JS_BODY = r'''
     var dismiss = e.target.classList.contains('sg-dismiss');
     if (!link && !dismiss) return;
     e.target.disabled = true;
-    var fd = new FormData(); fd.set('csrf', CSRF);
+    var fd = new URLSearchParams(); fd.set('csrf', CSRF);
     fd.set('action', link ? 'link' : 'dismiss'); fd.set('a', li.dataset.a); fd.set('b', li.dataset.b);
     fetch('/links', { method:'POST', headers:{'X-Requested-With':'XMLHttpRequest'}, body: fd })
       .then(function(r){ return r.json(); })
@@ -1254,7 +1389,7 @@ modal.addEventListener('click', function(e){ if (e.target === modal) closeModal(
 document.addEventListener('keydown', function(e){ if (e.key === 'Escape' && modal.classList.contains('open')) closeModal(); });
 form.addEventListener('submit', function(e){
   e.preventDefault();
-  var fd = new FormData(form); fd.set('csrf', CSRF);
+  var fd = new URLSearchParams(new FormData(form)); fd.set('csrf', CSRF);
   var btn = document.getElementById('m-submit'); btn.disabled = true;
   fetch('/memories', { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' }, body: fd })
     .then(function(r){ return r.json(); })
@@ -1284,7 +1419,7 @@ document.addEventListener('click', function(e){
   }
 });
 function postAction(action, id, extra){
-  var fd = new FormData(); fd.set('csrf', CSRF); fd.set('action', action); fd.set('id', id);
+  var fd = new URLSearchParams(); fd.set('csrf', CSRF); fd.set('action', action); fd.set('id', id);
   if (extra) Object.keys(extra).forEach(function(k){ fd.set(k, extra[k]); });
   return fetch('/memories', { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' }, body: fd })
     .then(function(r){ return r.json(); })
@@ -1544,7 +1679,7 @@ document.querySelectorAll('[data-close]').forEach(function(b){{ b.addEventListen
 modal.addEventListener('click', function(e){{ if (e.target === modal) closeModal(); }});
 document.addEventListener('keydown', function(e){{ if (e.key === 'Escape') closeModal(); }});
 function post(data){{
-  var fd = new FormData(); fd.set('csrf', CSRF);
+  var fd = new URLSearchParams(); fd.set('csrf', CSRF);
   Object.keys(data).forEach(function(k){{ fd.set(k, data[k]); }});
   return fetch('/queue', {{ method:'POST', headers:{{'X-Requested-With':'XMLHttpRequest'}}, body: fd }}).then(function(r){{ return r.json(); }});
 }}
@@ -1929,7 +2064,7 @@ def endpoint_poll(qs):
 # ---------- HTTP server ----------
 ROUTES_HTML = {"/": page_index, "/projects": page_projects, "/project": page_project,
                "/inject": page_inject, "/git": page_git, "/queue": page_queue, "/links": page_links,
-               "/memories": page_memories}
+               "/memories": page_memories, "/claude-md": page_claudemd}
 ROUTES_JSON = {"/poll": endpoint_poll}
 
 
@@ -2018,6 +2153,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 ok = False
             return self._send_json({"ok": ok})
+        if parsed.path == "/claude-md":
+            if not csrf_ok(form.get("csrf", [""])[0]):
+                return self._send_json({"ok": False, "error": "CSRF"})
+            # path is resolved server-side from a SAFE key (claudemd_path) — never from the client
+            path = claudemd_path(form.get("key", [""])[0])
+            if not path:
+                return self._send_json({"ok": False, "error": "invalid target"})
+            content = form.get("content", [""])[0].replace("\r\n", "\n")
+            if not content.strip():  # never silently wipe the user's CLAUDE.md to zero bytes
+                return self._send_json({"ok": False, "error": t("refusing to write an empty file")})
+            if not content.endswith("\n"):
+                content += "\n"
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                bak = None
+                if os.path.exists(path):  # back up the user's existing file before overwriting it
+                    with open(path, encoding="utf-8") as f:
+                        old = f.read()
+                    stamp = time.strftime("%Y%m%d_%H%M%S")
+                    n = 0
+                    while True:  # exclusive create -> never clobber a backup (same-second/concurrent saves)
+                        bak = path + ".bak." + stamp + ("" if n == 0 else f".{n}")
+                        try:
+                            with open(bak, "x", encoding="utf-8") as f:
+                                f.write(old)
+                            break
+                        except FileExistsError:
+                            n += 1
+                # atomic replace: the live file is always whole-old or whole-new, never truncated
+                tmp = path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.write(content)
+                os.replace(tmp, path)
+                return self._send_json({"ok": True, "backup": os.path.basename(bak) if bak else None})
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)})
         if parsed.path == "/memories":
             if not csrf_ok(form.get("csrf", [""])[0]):
                 return self._send_json({"ok": False, "error": "CSRF"})
