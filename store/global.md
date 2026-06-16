@@ -12,6 +12,6 @@ _mem0ry4ai store. Format: see `store/FORMAT.md`._
 - confidence: 1.0
 - source: manual
 
-This seed record demonstrates the format. Add your own with `./mem.py add` or the web UI
-(`./server_web.sh` then http://127.0.0.1:8841/). Delete this record whenever you like.
+This seed record demonstrates the format. Add your own with `mem.py add` or the web UI
+(`mem.py serve`, then http://127.0.0.1:8841/). Delete this record whenever you like.
 <!-- mem:end -->
