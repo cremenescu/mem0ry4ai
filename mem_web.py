@@ -28,8 +28,33 @@ sys.path.insert(0, HERE)
 import mem  # the data layer (same store, same parser as the CLI)
 
 ASSETS_DIR = os.path.join(HERE, "web", "assets")
-# Local single-user tool: one process-wide CSRF token (double-submit on POST forms) is adequate.
-_CSRF = secrets.token_hex(16)
+# Local single-user tool: one CSRF token (double-submit on POST forms) is adequate. Persisted in
+# staging/ (already gitignored, never synced) so it survives a server restart: the SessionStart
+# hook relaunches the server and we restart it on upgrades, and a per-process token would break
+# every already-open form with an opaque "CSRF" error.
+def _load_or_make_csrf():
+    path = os.path.join(mem.DATA, "staging", ".csrf")
+    try:
+        tok = open(path, encoding="utf-8").read().strip()
+        if len(tok) >= 16:
+            return tok
+    except OSError:
+        pass
+    tok = secrets.token_hex(16)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(tok)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except OSError:
+        pass
+    return tok
+
+
+_CSRF = _load_or_make_csrf()
 
 # When the server runs detached (no console — e.g. launched by the SessionStart hook),
 # every child process (git, the hook subprocess) pops its own cmd window that flashes on
@@ -133,6 +158,7 @@ RO = {
     "Mark as superseded?": "Marchezi ca superseded?",
     "Delete permanently? (it stays in git history)": "Stergi definitiv? (ramane in istoricul git)",
     "New scope (global or project:slug):": "Scope nou (global sau project:slug):", "Network error": "Eroare de retea",
+    "Session expired (the server restarted) — reload the page and try again.": "Sesiune expirata (serverul a repornit) — reincarca pagina si incearca din nou.",
     "help.intro": "O memorie e un fapt scurt pe care vrei sa-l pastrezi intre sesiuni. Sursa de adevar e "
                   "markdown + git; web UI-ul si <code>mem.py</code> sunt doua ferestre spre acelasi store.",
 }
@@ -1234,7 +1260,7 @@ form.addEventListener('submit', function(e){
     .then(function(r){ return r.json(); })
     .then(function(j){
       btn.disabled = false;
-      if (!j.ok){ var err = document.getElementById('m-err'); err.textContent = j.error || TXT.failed; err.style.display = 'block'; return; }
+      if (!j.ok){ var err = document.getElementById('m-err'); err.textContent = (j.error === 'CSRF' ? TXT.csrf : (j.error || TXT.failed)); err.style.display = 'block'; return; }
       location.reload();
     })
     .catch(function(){ btn.disabled = false; var err = document.getElementById('m-err'); err.textContent = TXT.network; err.style.display = 'block'; });
@@ -1262,7 +1288,7 @@ function postAction(action, id, extra){
   if (extra) Object.keys(extra).forEach(function(k){ fd.set(k, extra[k]); });
   return fetch('/memories', { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' }, body: fd })
     .then(function(r){ return r.json(); })
-    .then(function(j){ if (!j.ok) { alert(j.error || TXT.failed); throw new Error(); } return j; });
+    .then(function(j){ if (!j.ok) { if (j.error === 'CSRF') { alert(TXT.csrf); location.reload(); } else { alert(j.error || TXT.failed); } throw new Error(); } return j; });
 }
 function selected(){ return Array.from(document.querySelectorAll('.rowsel:checked')).map(function(c){ return c.closest('tr').dataset.id; }); }
 function refreshBulk(){
@@ -1818,7 +1844,8 @@ def page_memories(qs=None):
     txt = {"supersedeQ": t("Mark as superseded?"),
            "deleteQ": t("Delete permanently? (it stays in git history)"),
            "rescopeQ": t("New scope (global or project:slug):"), "failed": t("Operation failed"),
-           "network": t("Network error"), "addTitle": t("Add memory"), "editTitle": t("Edit")}
+           "network": t("Network error"), "addTitle": t("Add memory"), "editTitle": t("Edit"),
+           "csrf": t("Session expired (the server restarted) — reload the page and try again.")}
     js = ("<script>\nvar CSRF = " + json.dumps(_CSRF) + ";\nvar STATUS_FILTER = " + json.dumps(fstat)
           + ";\nvar TXT = " + json.dumps(txt, ensure_ascii=False) + ";\n" + _MEM_JS_BODY + "\n</script>")
     return layout(t("Memories") + " — mem0ry4ai", "memories", "\n".join(parts), aside, after + js)
