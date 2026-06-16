@@ -127,6 +127,60 @@ launches the same way. Data lives in `%USERPROFILE%\.mem0ry4ai`. (The plugin-mar
 invokes `python3`; on native Windows the clone + `install.py` path above is the most reliable. WSL
 also works like plain Linux.)
 
+<details>
+<summary><strong>Full Windows walkthrough</strong> — real install transcript (username shown as <code>xxxxx</code>)</summary>
+
+On a clean Windows 11 box with neither Python nor git, install both with `winget`, then
+**close and reopen PowerShell** (PATH only refreshes in new windows):
+
+```text
+PS C:\WINDOWS\system32> winget install -e --id Python.Python.3.12
+Found Python 3.12 [Python.Python.3.12] Version 3.12.10
+Successfully installed
+PS C:\WINDOWS\system32> winget install -e --id Git.Git
+Found Git [Git.Git] Version 2.54.0
+Successfully installed
+
+PS C:\WINDOWS\system32> py --version
+Python 3.12.10
+PS C:\WINDOWS\system32> git --version
+git version 2.54.0.windows.1
+
+PS C:\WINDOWS\system32> cd $env:USERPROFILE
+PS C:\Users\xxxxx> git clone https://github.com/cremenescu/mem0ry4ai.git
+Cloning into 'mem0ry4ai'...
+Receiving objects: 100% (368/368), 4.01 MiB | 6.30 MiB/s, done.
+Resolving deltas: 100% (211/211), done.
+PS C:\Users\xxxxx> cd mem0ry4ai
+PS C:\Users\xxxxx\mem0ry4ai> py hooks\install.py --target user
+installed in C:\Users\xxxxx/.claude/settings.json
+Restart Claude Code (or /clear) so the hooks get loaded.
+```
+
+If `winget` is unavailable (older Windows), install Python from python.org — **tick "Add
+python.exe to PATH"** — and git from git-scm.com, then continue from the version checks.
+
+**If Claude Code then shows "Git is required for local sessions"** — it was running *before* git
+was installed, so it doesn't know where `bash.exe` is. Point it at git-bash and fully restart:
+
+```powershell
+# confirm the path (default install location)
+Test-Path "C:\Program Files\Git\bin\bash.exe"
+
+# if it returns True:
+[Environment]::SetEnvironmentVariable("CLAUDE_CODE_GIT_BASH_PATH", "C:\Program Files\Git\bin\bash.exe", "User")
+
+# if git is installed elsewhere, resolve bash.exe dynamically:
+$bash = Join-Path (Split-Path (Split-Path (Get-Command git).Source)) "bin\bash.exe"
+[Environment]::SetEnvironmentVariable("CLAUDE_CODE_GIT_BASH_PATH", $bash, "User")
+```
+
+Then **close Claude Code completely** (check the system tray and Task Manager — it reads the
+variable only at startup) and reopen it. The hooks load on the next session and the web UI comes
+up at `http://127.0.0.1:8841/`.
+
+</details>
+
 ### Teach your agent to write memories
 
 Add an instruction like this to your `CLAUDE.md` (this is the behavioral half of the system —

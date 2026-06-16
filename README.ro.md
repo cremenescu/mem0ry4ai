@@ -43,6 +43,66 @@ python3 hooks/install.py --target user
 # reporneste Claude Code (sau /clear)
 ```
 
+### Windows (nativ — fara WSL, fara PHP)
+
+Pe Windows foloseste `py` (sau `python`) in loc de `./`: `py mem.py ...`, `py hooks\install.py
+--target user`, `py mem.py serve`. `install.py` inregistreaza hook-urile cu interpretorul tau
+(`sys.executable`), deci ruleaza fara `python3` in `PATH`. Datele stau in `%USERPROFILE%\.mem0ry4ai`.
+
+<details>
+<summary><strong>Walkthrough complet pe Windows</strong> — transcript real de instalare (username inlocuit cu <code>xxxxx</code>)</summary>
+
+Pe un Windows 11 curat, fara Python si fara git, instaleaza-le cu `winget`, apoi **inchide si
+redeschide PowerShell** (`PATH`-ul se actualizeaza doar in ferestre noi):
+
+```text
+PS C:\WINDOWS\system32> winget install -e --id Python.Python.3.12
+Found Python 3.12 [Python.Python.3.12] Version 3.12.10
+Successfully installed
+PS C:\WINDOWS\system32> winget install -e --id Git.Git
+Found Git [Git.Git] Version 2.54.0
+Successfully installed
+
+PS C:\WINDOWS\system32> py --version
+Python 3.12.10
+PS C:\WINDOWS\system32> git --version
+git version 2.54.0.windows.1
+
+PS C:\WINDOWS\system32> cd $env:USERPROFILE
+PS C:\Users\xxxxx> git clone https://github.com/cremenescu/mem0ry4ai.git
+Cloning into 'mem0ry4ai'...
+Receiving objects: 100% (368/368), 4.01 MiB | 6.30 MiB/s, done.
+Resolving deltas: 100% (211/211), done.
+PS C:\Users\xxxxx> cd mem0ry4ai
+PS C:\Users\xxxxx\mem0ry4ai> py hooks\install.py --target user
+installed in C:\Users\xxxxx/.claude/settings.json
+Restart Claude Code (or /clear) so the hooks get loaded.
+```
+
+Daca nu ai `winget` (Windows mai vechi), instaleaza Python de pe python.org — **bifeaza "Add
+python.exe to PATH"** — si git de pe git-scm.com, apoi continua de la verificarea versiunilor.
+
+**Daca apoi Claude Code zice "Git is required for local sessions"** — rula *inainte* sa instalezi
+git, deci nu stie unde e `bash.exe`. Indica-i git-bash-ul si reporneste complet:
+
+```powershell
+# confirma calea (locatia default de instalare)
+Test-Path "C:\Program Files\Git\bin\bash.exe"
+
+# daca intoarce True:
+[Environment]::SetEnvironmentVariable("CLAUDE_CODE_GIT_BASH_PATH", "C:\Program Files\Git\bin\bash.exe", "User")
+
+# daca git e instalat in alta parte, rezolva bash.exe dinamic:
+$bash = Join-Path (Split-Path (Split-Path (Get-Command git).Source)) "bin\bash.exe"
+[Environment]::SetEnvironmentVariable("CLAUDE_CODE_GIT_BASH_PATH", $bash, "User")
+```
+
+Apoi **inchide Claude Code complet** (verifica system tray-ul si Task Manager-ul — citeste
+variabila doar la pornire) si redeschide-l. Hook-urile se incarca la urmatoarea sesiune, iar web
+UI-ul apare la `http://127.0.0.1:8841/`.
+
+</details>
+
 ## Principii
 
 - **Markdown + git = sursa de adevar.** Indexul SQLite FTS5 e derivat si regenerabil.
