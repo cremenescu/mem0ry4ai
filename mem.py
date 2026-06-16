@@ -170,6 +170,147 @@ def render_record(rid, rtype, scope, summary, body, confidence, source, created,
     return "\n".join(lines) + "\n"
 
 
+# ----- write layer (shared by the CLI and the web UI) -----
+
+def render_from_meta(rid, meta, summary, body):
+    """Full record block from a parsed meta dict + summary + body, preserving EVERY meta field
+    (web edit/re-scope). The parser is order-independent, so field order here is just canonical.
+    `updated` is bumped to now (these are mutating operations)."""
+    lines = [f"<!-- mem:start id={rid} -->",
+             f"### {meta.get('type', 'fact')} · {scope_label(meta.get('scope', 'global'))} · {summary}",
+             f"- type: {meta.get('type', 'fact')}",
+             f"- scope: {meta.get('scope', 'global')}",
+             f"- created: {meta.get('created') or now_ts()}",
+             f"- updated: {now_ts()}",
+             f"- status: {meta.get('status', 'active')}"]
+    for k in ("superseded-by", "invalidated", "invalid-reason", "priority", "files", "related-to", "blocked-by"):
+        if meta.get(k):
+            lines.append(f"- {k}: {meta[k]}")
+    lines += [f"- confidence: {meta.get('confidence', '1.0')}",
+              f"- source: {meta.get('source', 'web')}", "", body.strip(), END_MARK]
+    return "\n".join(lines) + "\n"
+
+
+def _find_record_lines(rec_id):
+    """(path, readlines-with-\\n, parsed-record) for rec_id, or (None, None, None)."""
+    for path in store_files():
+        for r in parse_file(path):
+            if r["id"] == rec_id:
+                with open(path, "r", encoding="utf-8") as f:
+                    return path, f.readlines(), r
+    return None, None, None
+
+
+def _rewrite_block(rec_id, new_block):
+    """Replace a record's block with new_block, or delete it (new_block=None). Returns bool."""
+    path, lines, r = _find_record_lines(rec_id)
+    if not path:
+        return False
+    start, end = r["start"], r["end"]
+    if new_block is None:
+        if start > 0 and lines[start - 1].strip() == "":   # drop the blank line above too
+            start -= 1
+        del lines[start:end + 1]
+    else:
+        lines[start:end + 1] = [ln + "\n" for ln in new_block.rstrip("\n").split("\n")]
+    with open(path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+    return True
+
+
+def add_memory(rtype, scope, summary, body, confidence="1.0", source="web", redact_secrets=True):
+    """Append a fresh active record; returns its id. Redacts secrets like every write path."""
+    if rtype not in TYPES:
+        raise ValueError(f"invalid type: {rtype}")
+    body = (body or "").strip()
+    if not body:
+        raise ValueError("empty body")
+    if redact_secrets and redact.enabled():
+        body = redact.redact(body)[0]
+        summary = redact.redact(summary)[0]
+    rid = gen_id()
+    path = scope_file(scope)
+    ensure_header(path, scope)
+    rec = render_record(rid, rtype, scope, summary, body, confidence, source, now_ts(), now_ts(), "active")
+    with open(path, "a", encoding="utf-8") as f:
+        f.write("\n" + rec)
+    return rid
+
+
+def update_memory(rec_id, rtype=None, scope=None, summary=None, body=None, confidence=None):
+    """Edit a record's type/scope/summary/body/confidence in place, preserving all other meta."""
+    path, lines, r = _find_record_lines(rec_id)
+    if not path:
+        return False
+    m = dict(r["meta"])
+    if rtype is not None:
+        m["type"] = rtype
+    if scope is not None:
+        m["scope"] = scope
+    if confidence is not None:
+        m["confidence"] = confidence
+    summ = summary if summary is not None else record_summary(r)
+    bod = body if body is not None else r["body"]
+    return _rewrite_block(rec_id, render_from_meta(r["id"], m, summ, bod))
+
+
+def rescope_memory(rec_id, new_scope):
+    """Move a record to a different scope file (validates the scope first)."""
+    path, lines, r = _find_record_lines(rec_id)
+    if not path:
+        return False
+    if r["meta"].get("scope", "") == new_scope:
+        return True
+    m = dict(r["meta"])
+    m["scope"] = new_scope
+    block = render_from_meta(r["id"], m, record_summary(r), r["body"])
+    newpath = scope_file(new_scope)        # validate BEFORE deleting from the old file
+    _rewrite_block(rec_id, None)
+    ensure_header(newpath, new_scope)
+    with open(newpath, "a", encoding="utf-8") as f:
+        f.write("\n" + block)
+    return True
+
+
+def delete_memory(rec_id):
+    return _rewrite_block(rec_id, None)
+
+
+def supersede_memory(rec_id, by="", reason=""):
+    """Mark a record superseded (bi-temporal: keep it + WHEN it stopped being valid + WHY).
+    Line-level so all other meta is untouched. Returns the relpath written, or None if not found."""
+    for path in store_files():
+        for r in parse_file(path):
+            if r["id"] != rec_id:
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            inserts = []
+            if by:
+                inserts.append(f"- superseded-by: {by}\n")
+            inserts.append(f"- invalidated: {now_ts()}\n")
+            if reason:
+                inserts.append(f"- invalid-reason: {reason}\n")
+            new_block = []
+            for k in range(r["start"], r["end"] + 1):
+                line = lines[k]
+                mm = META_RE.match(line.rstrip("\n"))
+                if mm and mm.group("k") in ("superseded-by", "invalidated", "invalid-reason"):
+                    continue  # drop old copies; re-added after status
+                if mm and mm.group("k") == "status":
+                    line = "- status: superseded\n"
+                elif mm and mm.group("k") == "updated":
+                    line = f"- updated: {now_ts()}\n"
+                new_block.append(line)
+                if mm and mm.group("k") == "status":
+                    new_block.extend(inserts)
+            lines[r["start"]:r["end"] + 1] = new_block
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            return os.path.relpath(path, DATA)
+    return None
+
+
 # ----- commands -----
 
 def cmd_add(a):
@@ -580,42 +721,12 @@ def cmd_reindex(a):
 
 
 def cmd_supersede(a):
-    for path in store_files():
-        recs = parse_file(path)
-        for r in recs:
-            if r["id"] != a.id:
-                continue
-            with open(path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            # bi-temporal: record WHEN it stopped being valid (= when we learned) + WHY,
-            # and keep it (supersede never deletes). Drop any prior copies so re-supersede is clean.
-            inserts = []
-            if a.by:
-                inserts.append(f"- superseded-by: {a.by}\n")
-            inserts.append(f"- invalidated: {now_ts()}\n")
-            if getattr(a, "reason", None):
-                inserts.append(f"- invalid-reason: {a.reason}\n")
-            new_block = []
-            for k in range(r["start"], r["end"] + 1):
-                line = lines[k]
-                mm = META_RE.match(line.rstrip("\n"))
-                if mm and mm.group("k") in ("superseded-by", "invalidated", "invalid-reason"):
-                    continue  # drop old copies; re-added after status
-                if mm and mm.group("k") == "status":
-                    line = "- status: superseded\n"
-                elif mm and mm.group("k") == "updated":
-                    line = f"- updated: {now_ts()}\n"
-                new_block.append(line)
-                if mm and mm.group("k") == "status":
-                    new_block.extend(inserts)
-            lines[r["start"]:r["end"] + 1] = new_block
-            with open(path, "w", encoding="utf-8") as f:
-                f.writelines(lines)
-            extra = f" (replaced by {a.by})" if a.by else ""
-            extra += f" — {a.reason}" if getattr(a, "reason", None) else ""
-            print(f"superseded {a.id}{extra}  in {os.path.relpath(path, DATA)}")
-            return
-    sys.exit(f"id not found: {a.id}")
+    rel = supersede_memory(a.id, a.by or "", getattr(a, "reason", None) or "")
+    if rel is None:
+        sys.exit(f"id not found: {a.id}")
+    extra = f" (replaced by {a.by})" if a.by else ""
+    extra += f" — {a.reason}" if getattr(a, "reason", None) else ""
+    print(f"superseded {a.id}{extra}  in {rel}")
 
 
 def _set_priority(rec_id, priority):
@@ -816,6 +927,12 @@ def cmd_resume(a):
             print(f"  [{r['meta'].get('type', '?')}]  {record_summary(r)[:80]}")
 
 
+def cmd_serve(a):
+    """Start the pure-Python web UI (no PHP). Cross-platform; stdlib only."""
+    import mem_web
+    mem_web.serve(host=a.host, port=a.port)
+
+
 def cmd_audit(a):
     """Report records containing secret-like patterns. Never modifies anything."""
     recs = [r for r in all_records() if _match_filters(r, a.scope, None, "all")]
@@ -973,6 +1090,11 @@ def main():
     prs = sub.add_parser("resume", help="\"where was I?\" briefing: status + ready todos + recent")
     prs.add_argument("--scope", help="project:<slug> (omit for a cross-project overview)")
     prs.set_defaults(func=cmd_resume)
+
+    psv = sub.add_parser("serve", help="start the web UI (pure Python, no PHP)")
+    psv.add_argument("--port", type=int, help="port (default: MEM_WEB_PORT or 8841)")
+    psv.add_argument("--host", default="127.0.0.1")
+    psv.set_defaults(func=cmd_serve)
 
     px = sub.add_parser("reindex", help="rebuild the derived FTS5 index (+ embeddings if Ollama is up)")
     px.set_defaults(func=cmd_reindex)
