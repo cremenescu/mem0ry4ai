@@ -96,6 +96,7 @@ table.mem { width: 100%; border-collapse: collapse; background: var(--panel);
 .t-preference { background: rgba(31,157,77,.15); color: var(--ok); }
 .t-todo { background: rgba(232,89,12,.15); color: #e8590c; }
 .t-status { background: rgba(12,133,153,.15); color: #0c8599; }
+.t-profile { background: rgba(214,51,108,.13); color: #d6336c; }
 .scope-tag { font-size: 11px; background: var(--panel2); color: var(--muted);
   padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
 .status-superseded { font-size: 11px; color: var(--muted); }

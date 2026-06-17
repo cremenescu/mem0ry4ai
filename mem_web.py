@@ -148,6 +148,17 @@ RO = {
     "Memory": "Memorie", "Added": "Adaugat", "select all": "selecteaza tot", "project page →": "pagina proiect →",
     "No memories match the current filter.": "Nicio memorie nu se potriveste filtrului curent.",
     "Types": "Tipuri", "Bulk": "Bulk", "View chain": "Vezi lantul", "Save": "Salveaza",
+    # about-me page
+    "About me": "Despre mine",
+    "Write something about yourself first.": "Scrie intai ceva despre tine.",
+    "A short profile about you — kept in your memory store and injected at the very top of every "
+    "session, in every project, so the assistant tailors its help to you.":
+        "Un scurt profil despre tine — pastrat in store-ul de memorie si injectat chiar in varful "
+        "fiecarei sesiuni, in orice proiect, ca asistentul sa-si potriveasca ajutorul dupa tine.",
+    "Who you are, your role and expertise, the environment you work in, what you build, and "
+    "how you like to work. Plain text or markdown.":
+        "Cine esti, rolul si expertiza ta, mediul in care lucrezi, ce construiesti si cum iti "
+        "place sa lucrezi. Text simplu sau markdown.",
     # claude.md editor page
     "Saved": "Salvat", "Edit": "Editeaza", "monorepo root": "radacina monorepo",
     "refusing to write an empty file": "refuz sa scriu un fisier gol",
@@ -849,7 +860,7 @@ def topbar(active):
     nav = [("dashboard", "/", t("Dashboard")), ("memories", "/memories", t("Memories")),
            ("projects", "/projects", t("Projects")), ("links", "/links", t("Links")),
            ("git", "/git", t("Git history")), ("inject", "/inject", t("What Claude sees")),
-           ("claudemd", "/claude-md", "CLAUDE.md")]
+           ("claudemd", "/claude-md", "CLAUDE.md"), ("about", "/about", t("About me"))]
     nq = len(queue_pending())
     links = ""
     for k, href, label in nav:
@@ -1188,6 +1199,68 @@ def page_claudemd(qs=None):
     js = ("<script>var CSRF = " + json.dumps(_CSRF) + "; var TXT = "
           + json.dumps(txt, ensure_ascii=False) + ";" + _CLAUDEMD_JS_BODY + "</script>")
     return layout("CLAUDE.md — mem0ry4ai", "claudemd", content, "", js)
+
+
+def profile_record():
+    """The single active global 'profile' record (the About-me), or None. Most recent wins if several."""
+    cands = [r for r in mem.all_records()
+             if r["meta"].get("type") == "profile"
+             and r["meta"].get("scope") == "global"
+             and r["meta"].get("status", "active") == "active"]
+    cands.sort(key=lambda r: r["meta"].get("created", ""), reverse=True)
+    return cands[0] if cands else None
+
+
+# About-me editor JS — verbatim vanilla JS; CSRF + TXT are prepended by the page.
+_ABOUT_JS_BODY = r'''
+(function(){
+  var btn = document.getElementById('about-save');
+  if (!btn) return;
+  btn.addEventListener('click', function(){
+    var ta = document.getElementById('about-edit'), st = document.getElementById('about-status');
+    btn.disabled = true;
+    var fd = new URLSearchParams(); fd.set('csrf', CSRF); fd.set('body', ta.value);
+    fetch('/about', { method:'POST', headers:{'X-Requested-With':'XMLHttpRequest'}, body: fd })
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        btn.disabled = false;
+        if (!j.ok){
+          if (j.error === 'CSRF'){ alert(TXT.csrf); location.reload(); return; }
+          st.textContent = j.error || TXT.failed; st.className = 'cmd-status err'; return;
+        }
+        st.textContent = TXT.saved; st.className = 'cmd-status ok';
+      })
+      .catch(function(){ btn.disabled = false; st.textContent = TXT.network; st.className = 'cmd-status err'; });
+  });
+})();
+'''
+
+
+def page_about(qs=None):
+    rec = profile_record()
+    body = rec["body"] if rec else ""
+    intro = t("A short profile about you — kept in your memory store and injected at the very top of every "
+              "session, in every project, so the assistant tailors its help to you.")
+    placeholder = t("Who you are, your role and expertise, the environment you work in, what you build, and "
+                    "how you like to work. Plain text or markdown.")
+    style = ("<style>.about-edit{width:100%;min-height:300px;box-sizing:border-box;resize:vertical;"
+             "font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;line-height:1.6;padding:12px;"
+             "border:1px solid var(--border,#e2e8f0);border-radius:8px;background:#fff;}"
+             ".cmd-actions{margin-top:10px;display:flex;gap:10px;align-items:center;}"
+             ".cmd-status{font-size:13px;} .cmd-status.ok{color:#1f9d4d;} .cmd-status.err{color:#dc2626;}</style>")
+    content = (f'{style}'
+               f'  <div class="crumb"><a href="/">{t("Dashboard")}</a> / {t("About me")}</div>\n'
+               f'  <h2>{t("About me")}</h2>\n'
+               f'  <p class="foot">{intro}</p>\n'
+               f'  <textarea id="about-edit" class="about-edit" placeholder="{h(placeholder)}" spellcheck="false">{h(body)}</textarea>\n'
+               f'  <div class="cmd-actions"><button type="button" class="btn btn-primary" id="about-save">{t("Save")}</button>'
+               f'<span class="cmd-status" id="about-status"></span></div>')
+    txt = {"failed": t("Operation failed"), "network": t("Network error"),
+           "csrf": t("Session expired (the server restarted) — reload the page and try again."),
+           "saved": t("Saved")}
+    js = ("<script>var CSRF = " + json.dumps(_CSRF) + "; var TXT = "
+          + json.dumps(txt, ensure_ascii=False) + ";" + _ABOUT_JS_BODY + "</script>")
+    return layout(t("About me") + " — mem0ry4ai", "about", content, "", js)
 
 
 # Force-directed graph IIFE — verbatim vanilla JS (no PHP); reads the GRAPH global set just above it.
@@ -2064,7 +2137,7 @@ def endpoint_poll(qs):
 # ---------- HTTP server ----------
 ROUTES_HTML = {"/": page_index, "/projects": page_projects, "/project": page_project,
                "/inject": page_inject, "/git": page_git, "/queue": page_queue, "/links": page_links,
-               "/memories": page_memories, "/claude-md": page_claudemd}
+               "/memories": page_memories, "/claude-md": page_claudemd, "/about": page_about}
 ROUTES_JSON = {"/poll": endpoint_poll}
 
 
@@ -2153,6 +2226,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 ok = False
             return self._send_json({"ok": ok})
+        if parsed.path == "/about":
+            if not csrf_ok(form.get("csrf", [""])[0]):
+                return self._send_json({"ok": False, "error": "CSRF"})
+            body = form.get("body", [""])[0].replace("\r\n", "\n").strip()
+            if not body:
+                return self._send_json({"ok": False, "error": t("Write something about yourself first.")})
+            try:
+                rec = profile_record()
+                if rec:  # update the existing profile in place
+                    ok = mem.update_memory(rec["id"], body=body)
+                else:    # first time: create the single global profile record
+                    mem.add_memory("profile", "global", "About me", body, "1.0", "web")
+                    ok = True
+                return self._send_json({"ok": bool(ok)})
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)})
         if parsed.path == "/claude-md":
             if not csrf_ok(form.get("csrf", [""])[0]):
                 return self._send_json({"ok": False, "error": "CSRF"})

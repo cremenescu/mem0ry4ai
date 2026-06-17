@@ -102,8 +102,14 @@ def main():
     # omitted is announced explicitly with the command that retrieves it.
     BUDGET = int(os.environ.get("MEM_INJECT_BUDGET", "8000"))
 
-    critical = [r for r in recs if r.get("priority") == "critical"]
-    normal = [r for r in recs if r.get("priority") != "critical"]
+    # the user profile ("About me"): the single most-recent GLOBAL profile, matching the web editor.
+    # Injected first, on its own, outside the budget; excluded from the lists below so it never doubles.
+    # (Any other profile record — a CLI/manual duplicate or a project-scoped one — flows normally.)
+    profile = sorted((r for r in recs if r.get("type") == "profile" and r.get("scope") == "global"),
+                     key=lambda r: r.get("created") or "", reverse=True)[:1]
+    prof_ids = {r["id"] for r in profile}
+    critical = [r for r in recs if r["id"] not in prof_ids and r.get("priority") == "critical"]
+    normal = [r for r in recs if r["id"] not in prof_ids and r.get("priority") != "critical"]
 
     by_scope = {}
     for r in normal:
@@ -144,6 +150,16 @@ def main():
         f"Persistent context for {where} (source: mem0ry4ai store/*.md). {hint}",
         "",
     ]
+
+    # --- About me: the user profile, first of all, with body, outside the budget ---
+    if profile:
+        lines.append("## About me")
+        for r in profile:
+            for bl in (r.get("body") or "").strip().splitlines():
+                # neutralize a leading '#' so the profile body can't forge a section heading
+                # (e.g. a fake '## Critical rules') ahead of the real, trust-bearing sections below
+                lines.append("\\" + bl if bl.lstrip().startswith("#") else bl)
+        lines.append("")
 
     # --- Critical rules: ALWAYS first, with bodies, outside the budget ---
     if critical:

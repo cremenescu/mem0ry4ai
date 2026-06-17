@@ -54,7 +54,7 @@ STORE = os.path.join(DATA, "store")
 GLOBAL_FILE = os.path.join(STORE, "global.md")
 PROJ_DIR = os.path.join(STORE, "projects")
 
-TYPES = ["gotcha", "fact", "decision", "command", "procedural", "preference", "todo", "status"]
+TYPES = ["gotcha", "fact", "decision", "command", "procedural", "preference", "todo", "status", "profile"]
 
 START_RE = re.compile(r"^<!-- mem:start id=(?P<id>[0-9a-z-]+) -->\s*$")
 END_MARK = "<!-- mem:end -->"
@@ -241,8 +241,10 @@ def add_memory(rtype, scope, summary, body, confidence="1.0", source="web", reda
     return rid
 
 
-def update_memory(rec_id, rtype=None, scope=None, summary=None, body=None, confidence=None):
-    """Edit a record's type/scope/summary/body/confidence in place, preserving all other meta."""
+def update_memory(rec_id, rtype=None, scope=None, summary=None, body=None, confidence=None,
+                  redact_secrets=True):
+    """Edit a record's type/scope/summary/body/confidence in place, preserving all other meta.
+    Redacts secrets in any field being changed — like add_memory, so no write path bypasses it."""
     path, lines, r = _find_record_lines(rec_id)
     if not path:
         return False
@@ -255,6 +257,11 @@ def update_memory(rec_id, rtype=None, scope=None, summary=None, body=None, confi
         m["confidence"] = confidence
     summ = summary if summary is not None else record_summary(r)
     bod = body if body is not None else r["body"]
+    if redact_secrets and redact.enabled():   # only the fields the caller is changing
+        if body is not None:
+            bod = redact.redact(bod)[0]
+        if summary is not None:
+            summ = redact.redact(summ)[0]
     return _rewrite_block(rec_id, render_from_meta(r["id"], m, summ, bod))
 
 
