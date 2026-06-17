@@ -1648,11 +1648,11 @@ def page_links(qs=None):
                             f'<ul class="sg-items">{rows}</ul></li>')
         smallnote = "semantic — tu confirmi" if lang() == "ro" else "semantic — you confirm"
         cur_th = (os.environ.get("MEM_SUGGEST_THRESHOLD") or "").strip() or "0.62"
-        ctl = (f'<div class="sg-th" style="margin:6px 0 10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+        ctl = (f'<div class="sg-th">'
                f'<label>{t("Threshold")} <input type="number" id="sg-th-input" min="0.5" max="0.95" step="0.01" '
-               f'value="{h(cur_th)}" style="width:5em"></label>'
+               f'value="{h(cur_th)}"></label>'
                f'<button type="button" class="btn" id="sg-th-apply">{t("Apply")}</button>'
-               f'<small class="muted">{t("higher = fewer, stronger matches")}</small></div>')
+               f'<small>{t("higher = fewer, stronger matches")}</small></div>')
         body = (f'<ul id="suggest-list">{sg_html}</ul>' if suggestions
                 else f'<ul id="suggest-list"></ul><div class="empty">{t("No matches at this threshold — lower it to see more.")}</div>')
         parts.append(f'  <div class="suggest"><h3>{t("Suggested links")} <span class="count">{len(suggestions)}</span>'
