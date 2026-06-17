@@ -2426,11 +2426,51 @@ def _load_local_env():
         pass
 
 
+def _reload_watcher(interval=2.0):
+    """Auto-reload (on by default; opt out with MEM_NO_RELOAD=1): re-exec the server when one of its
+    own source files changes AND still compiles — so editing the tool or `git pull`-ing an update takes
+    effect with no manual restart. A syntax error or half-saved file is ignored, so it never kills a
+    running server. The hooks run as fresh subprocesses each time, so they need no watching."""
+    import py_compile
+    watched = [os.path.abspath(__file__)]
+    for m in (mem, sys.modules.get("redact")):
+        f = getattr(m, "__file__", None)
+        if f:
+            watched.append(os.path.abspath(f))
+
+    def mtime(p):
+        try:
+            return os.path.getmtime(p)
+        except OSError:
+            return None
+
+    seen = {p: mtime(p) for p in watched}
+
+    def loop():
+        while True:
+            time.sleep(interval)
+            if not any(mtime(p) != seen[p] for p in watched):
+                continue
+            try:                       # only reload if everything still compiles
+                for p in watched:
+                    py_compile.compile(p, doraise=True)
+            except Exception:
+                seen.update({p: mtime(p) for p in watched})   # remember; retry once it compiles again
+                continue
+            os.execv(sys.executable, [sys.executable] + sys.argv)   # replace this process with fresh code
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
 def serve(host="127.0.0.1", port=None):
     _load_local_env()
     port = int(port or os.environ.get("MEM_WEB_PORT", "8841"))
     httpd = Server((host, port), Handler)
-    print(f"mem0ry4ai web UI on http://{host}:{port}/  (data: {mem.DATA})")
+    reload_on = os.environ.get("MEM_NO_RELOAD", "").strip().lower() not in ("1", "true", "yes")
+    if reload_on:
+        _reload_watcher()
+    print(f"mem0ry4ai web UI on http://{host}:{port}/  (data: {mem.DATA})"
+          + ("  · auto-reload on" if reload_on else ""))
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
