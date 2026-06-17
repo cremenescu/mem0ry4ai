@@ -197,6 +197,37 @@ exists — printing the closest matches and a ready-to-run `supersede` command �
 memories get merged instead of piling up. New memories are **auto-embedded at session end**, so
 search and the Links suggestions stay current without running `mem.py embed` by hand.
 
+## Use from any agent (MCP)
+
+The Claude Code hooks **push** memory into the session automatically. For **any other** MCP-capable
+runtime — Gemini CLI, Cursor, OpenCode, Claude Desktop — there is also an **MCP server** the agent
+can **pull** from:
+
+```bash
+python3 mem.py mcp        # stdio JSON-RPC server (Windows: py mem.py mcp)
+```
+
+It exposes `memory_search`, `memory_get`, `memory_list`, `memory_resume`, and `memory_add`. It's a
+hand-rolled stdio server — still **pure stdlib, no SDK, no `pip install`**. Register it:
+
+```bash
+# Claude Code
+claude mcp add mem0ry4ai -- python3 /absolute/path/to/mem.py mcp
+```
+```jsonc
+// or a .mcp.json (Cursor / Claude Desktop / others)
+{ "mcpServers": { "mem0ry4ai": { "command": "python3", "args": ["/absolute/path/to/mem.py", "mcp"] } } }
+```
+
+On connect the server sends its usage guide (`MEM0RY4AI.md`) as the MCP `instructions`, so the agent
+knows to search before answering and how to save — **without touching your `CLAUDE.md`**. If you
+*want* a pointer there, add one line yourself (optional): `Memory: use the mem0ry4ai MCP tools; see
+MEM0RY4AI.md`.
+
+`memory_add` (write) is **on by default**; set `MEM_MCP_WRITE=0` to make the server read-only. With
+several agents writing to one store, have them `memory_search` before `memory_add` to avoid
+duplicates (writes are serialized by a file lock and secret-redacted regardless).
+
 ## Memory types
 
 | Type | What it holds |

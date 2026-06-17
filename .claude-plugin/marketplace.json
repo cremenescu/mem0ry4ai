@@ -8,8 +8,8 @@
     {
       "name": "mem0ry4ai",
       "source": "./",
-      "description": "Persistent, local-first memory for Claude Code — markdown+git store, scoped SessionStart injection, secret redaction, web UI.",
-      "version": "0.10.3"
+      "description": "Persistent, local-first memory for Claude Code and any MCP agent — markdown+git store, scoped SessionStart injection, an MCP server for on-demand recall, secret redaction, web UI.",
+      "version": "0.11.0"
     }
   ]
 }

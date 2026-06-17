@@ -14,7 +14,9 @@ Commands:
 Storage format: see store/FORMAT.md. No external dependencies.
 """
 import argparse
+import contextlib
 import datetime
+import functools
 import hashlib
 import math
 import os
@@ -24,6 +26,8 @@ import sqlite3
 import struct
 import subprocess
 import sys
+import threading
+import time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
@@ -73,15 +77,16 @@ def gen_id():
 
 
 def scope_file(scope):
-    """Map a scope to its storage file."""
+    """Map a scope to its storage file. Raises ValueError on a bad/unknown scope — NEVER sys.exit,
+    so a bad scope from the long-lived MCP server (or the web UI) can't kill the process."""
     if scope == "global":
         return GLOBAL_FILE
     if scope.startswith("project:"):
         slug = scope.split(":", 1)[1].strip()
-        if not slug or "/" in slug or ".." in slug:
-            sys.exit(f"invalid scope: {scope}")
+        if not slug or "/" in slug or "\\" in slug or ".." in slug or os.path.isabs(slug):
+            raise ValueError(f"invalid scope: {scope}")
         return os.path.join(PROJ_DIR, f"{slug}.md")
-    sys.exit(f"unknown scope: {scope} (use 'global' or 'project:<slug>')")
+    raise ValueError(f"unknown scope: {scope} (use 'global' or 'project:<slug>')")
 
 
 def scope_label(scope):
@@ -205,21 +210,112 @@ def _find_record_lines(rec_id):
     return None, None, None
 
 
+_lock_state = threading.local()
+
+
+def _pid_alive(pid):
+    """Best-effort liveness probe: True if the process is (or might be) alive, False only when we are
+    confident it is dead. Used so a CRASHED holder's lock can be stolen but a slow-but-ALIVE holder's
+    cannot. Never uses os.kill(pid, 0) on Windows (there sig 0 would terminate the process)."""
+    if pid <= 0:
+        return True   # unknown holder -> assume alive (never steal on a missing/empty pid)
+    if os.name == "nt":
+        try:
+            import ctypes
+            h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if h:
+                ctypes.windll.kernel32.CloseHandle(h)
+                return True
+            return False
+        except Exception:
+            return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True   # e.g. EPERM -> the process exists
+
+
+@contextlib.contextmanager
+def _locked(timeout=30.0):
+    """Serialize ALL store writers (CLI, web UI, MCP, multiple agents). Cross-platform + stdlib: an
+    atomic O_EXCL create is the mutex. REENTRANT per thread, so a locked function may call another.
+    A stale lock is stolen ONLY when its recorded holder PID is dead (liveness probe) — never from a
+    slow-but-alive writer — and the steal is atomic (rename) so two waiters can't both steal. Raises
+    after `timeout` instead of hanging forever. Prevents interleaved appends and lost read-modify-writes."""
+    if getattr(_lock_state, "depth", 0) > 0:   # already held by THIS thread -> reentrant no-op
+        _lock_state.depth += 1
+        try:
+            yield
+        finally:
+            _lock_state.depth -= 1
+        return
+    lockpath = os.path.join(DATA, "staging", ".write.lock")
+    os.makedirs(os.path.dirname(lockpath), exist_ok=True)
+    deadline = time.time() + timeout
+    while True:
+        try:
+            fd = os.open(lockpath, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, str(os.getpid()).encode())
+            finally:
+                os.close(fd)
+            break
+        except FileExistsError:
+            try:
+                holder = int(open(lockpath, encoding="utf-8").read().strip() or "0")
+            except (OSError, ValueError):
+                holder = 0
+            if holder and not _pid_alive(holder):
+                tmp = f"{lockpath}.stale.{os.getpid()}"
+                try:                       # atomic steal: only one waiter wins the rename
+                    os.rename(lockpath, tmp)
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                continue
+            if time.time() > deadline:
+                raise TimeoutError(f"could not acquire store write lock within {timeout}s: {lockpath}")
+            time.sleep(0.05)
+    _lock_state.depth = 1
+    try:
+        yield
+    finally:
+        _lock_state.depth = 0
+        try:
+            os.unlink(lockpath)
+        except OSError:
+            pass
+
+
+def _locked_write(fn):
+    """Decorator: run a store-mutating function under the write lock (reentrant-safe)."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _locked():
+            return fn(*args, **kwargs)
+    return wrapper
+
+
 def _rewrite_block(rec_id, new_block):
     """Replace a record's block with new_block, or delete it (new_block=None). Returns bool."""
-    path, lines, r = _find_record_lines(rec_id)
-    if not path:
-        return False
-    start, end = r["start"], r["end"]
-    if new_block is None:
-        if start > 0 and lines[start - 1].strip() == "":   # drop the blank line above too
-            start -= 1
-        del lines[start:end + 1]
-    else:
-        lines[start:end + 1] = [ln + "\n" for ln in new_block.rstrip("\n").split("\n")]
-    with open(path, "w", encoding="utf-8") as f:
-        f.writelines(lines)
-    return True
+    with _locked():
+        # locate + read UNDER the lock, so a concurrent append between read and write is not lost
+        path, lines, r = _find_record_lines(rec_id)
+        if not path:
+            return False
+        start, end = r["start"], r["end"]
+        if new_block is None:
+            if start > 0 and lines[start - 1].strip() == "":   # drop the blank line above too
+                start -= 1
+            del lines[start:end + 1]
+        else:
+            lines[start:end + 1] = [ln + "\n" for ln in new_block.rstrip("\n").split("\n")]
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        return True
 
 
 def add_memory(rtype, scope, summary, body, confidence="1.0", source="web", redact_secrets=True):
@@ -229,15 +325,18 @@ def add_memory(rtype, scope, summary, body, confidence="1.0", source="web", reda
     body = (body or "").strip()
     if not body:
         raise ValueError("empty body")
+    if len(body) > 65536:   # sanity cap (defense against an agent writing an unbounded body via MCP)
+        raise ValueError("body too large (max 64 KiB)")
     if redact_secrets and redact.enabled():
         body = redact.redact(body)[0]
         summary = redact.redact(summary)[0]
     rid = gen_id()
     path = scope_file(scope)
-    ensure_header(path, scope)
     rec = render_record(rid, rtype, scope, summary, body, confidence, source, now_ts(), now_ts(), "active")
-    with open(path, "a", encoding="utf-8") as f:
-        f.write("\n" + rec)
+    with _locked():
+        ensure_header(path, scope)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("\n" + rec)
     return rid
 
 
@@ -265,6 +364,7 @@ def update_memory(rec_id, rtype=None, scope=None, summary=None, body=None, confi
     return _rewrite_block(rec_id, render_from_meta(r["id"], m, summ, bod))
 
 
+@_locked_write
 def rescope_memory(rec_id, new_scope):
     """Move a record to a different scope file (validates the scope first)."""
     path, lines, r = _find_record_lines(rec_id)
@@ -287,6 +387,7 @@ def delete_memory(rec_id):
     return _rewrite_block(rec_id, None)
 
 
+@_locked_write
 def supersede_memory(rec_id, by="", reason=""):
     """Mark a record superseded (bi-temporal: keep it + WHEN it stopped being valid + WHY).
     Line-level so all other meta is untouched. Returns the relpath written, or None if not found."""
@@ -343,7 +444,6 @@ def cmd_add(a):
         if f1 or f2:
             print(f"redacted secrets: {redact.describe(f1 + f2)} (use --no-redact to keep them)")
     path = scope_file(a.scope)
-    ensure_header(path, a.scope)
     files = ", ".join(x.strip() for x in (a.files or "").split(",") if x.strip()) or None
     # duplicate guard: warn (never block) if a very similar memory of the same type already exists,
     # so we supersede instead of silently piling up near-duplicates. Computed before the write so it
@@ -355,8 +455,10 @@ def cmd_add(a):
     rec = render_record(rid, a.type, a.scope, summary, body,
                         a.confidence, a.source, now_ts(), now_ts(), "active",
                         priority="critical" if a.critical else None, files=files)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write("\n" + rec)
+    with _locked():
+        ensure_header(path, a.scope)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("\n" + rec)
     crit = "  [CRITICAL]" if a.critical else ""
     print(f"added {rid}  [{a.type} · {a.scope}]{crit}  -> {os.path.relpath(path, DATA)}")
     sys.stdout.flush()   # so the stdout 'added' line lands before the stderr warning below
@@ -769,6 +871,7 @@ def cmd_supersede(a):
     print(f"superseded {a.id}{extra}  in {rel}")
 
 
+@_locked_write
 def _set_priority(rec_id, priority):
     """In-place meta edit: set (pin) or remove (unpin) the priority field of a record."""
     for path in store_files():
@@ -812,6 +915,7 @@ def _list_meta(rec, key):
     return [x.strip() for x in (rec["meta"].get(key, "") or "").split(",") if x.strip()]
 
 
+@_locked_write
 def _edit_list_meta(rec_id, key, add=(), remove=()):
     """In-place add/remove of ids in a comma-separated meta list field. Drops the line
     when the list becomes empty. Returns (relpath, new_list)."""
@@ -971,6 +1075,12 @@ def cmd_serve(a):
     """Start the pure-Python web UI (no PHP). Cross-platform; stdlib only."""
     import mem_web
     mem_web.serve(host=a.host, port=a.port)
+
+
+def cmd_mcp(a):
+    """Start the MCP server (stdio JSON-RPC) so any MCP runtime can pull memory. stdlib only."""
+    import mcp
+    mcp.serve_stdio()
 
 
 def cmd_audit(a):
@@ -1136,6 +1246,9 @@ def main():
     psv.add_argument("--host", default="127.0.0.1")
     psv.set_defaults(func=cmd_serve)
 
+    pmc = sub.add_parser("mcp", help="start the MCP server (stdio) — pull memory from any MCP runtime (Claude/Gemini/Cursor/OpenCode)")
+    pmc.set_defaults(func=cmd_mcp)
+
     px = sub.add_parser("reindex", help="rebuild the derived FTS5 index (+ embeddings if Ollama is up)")
     px.set_defaults(func=cmd_reindex)
 
@@ -1144,7 +1257,10 @@ def main():
     pe.set_defaults(func=cmd_embed)
 
     a = p.parse_args()
-    a.func(a)
+    try:
+        a.func(a)
+    except ValueError as e:   # invalid input (e.g. bad scope) -> clean message, not a traceback
+        sys.exit(str(e))
 
 
 if __name__ == "__main__":
