@@ -1651,7 +1651,7 @@ def page_links(qs=None):
         ctl = (f'<div class="sg-th">'
                f'<label>{t("Threshold")} <input type="number" id="sg-th-input" min="0.5" max="0.95" step="0.01" '
                f'value="{h(cur_th)}"></label>'
-               f'<button type="button" class="btn" id="sg-th-apply">{t("Apply")}</button>'
+               f'<button type="button" class="btn btn-primary" id="sg-th-apply">{t("Apply")}</button>'
                f'<small>{t("higher = fewer, stronger matches")}</small></div>')
         body = (f'<ul id="suggest-list">{sg_html}</ul>' if suggestions
                 else f'<ul id="suggest-list"></ul><div class="empty">{t("No matches at this threshold — lower it to see more.")}</div>')

@@ -63,7 +63,7 @@ input[type=search] { min-width: 220px; }
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
 .sg-th { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0 14px; font-size: 13px; }
 .sg-th label { display: flex; gap: 6px; align-items: center; color: var(--muted); }
-.sg-th input[type=number] { width: 4.5em; padding: 6px 8px; }
+.sg-th input[type=number] { width: 7em; padding: 6px 8px; }
 .sg-th small { color: var(--muted); }
 
 .btn { display: inline-block; font-size: 13px; font-weight: 600; padding: 8px 16px; border-radius: 6px;
