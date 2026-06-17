@@ -690,7 +690,8 @@ def find_duplicates(rec_type, summary, body, files=None, k=3):
 
 
 def hybrid_search(query, allow_semantic=True):
-    """Keyword (FTS5 + recency) fused with semantic similarity when an embedder is available.
+    """Keyword (FTS5 + recency) fused with semantic similarity via Reciprocal Rank Fusion (k=60),
+    plus a light summary phrase-match rerank, when an embedder is available.
     Returns (ranked_ids, mode); ids is None if FTS5 is missing (caller does the substring fallback).
     mode is one of: 'hybrid', 'keyword', 'off', 'no-vectors', 'embedder-offline', 'substring'
     — so the caller can tell the user which path actually ran."""
@@ -707,11 +708,38 @@ def hybrid_search(query, allow_semantic=True):
     if qvec is None:
         return fts, "embedder-offline"
     sims = {i: _cosine(qvec, v) for i, v in emb.items()}
-    nkw = max(1, len(fts))
-    kw = {i: 1.0 - (n / nkw) for n, i in enumerate(fts)}    # 1..0 by keyword rank
-    cand = set(fts) | {i for i, _ in sorted(sims.items(), key=lambda x: -x[1])[:25]}
-    ranked = sorted(cand, key=lambda i: 0.5 * sims.get(i, 0.0) + 0.5 * kw.get(i, 0.0), reverse=True)
-    return ranked, "hybrid"
+    # Reciprocal Rank Fusion (k=60): fuse the keyword ranking (fts, already recency-nudged) with the
+    # semantic ranking by RANK position, not raw score. Robust to the scale mismatch between bm25 and
+    # cosine — neither signal can swamp the other (the old 0.5*cosine + 0.5*linear-rank blend was
+    # sensitive to cosine's compressed range). Tunable via MEM_RRF_K.
+    K = float(os.environ.get("MEM_RRF_K", "60"))
+    kw_rank = {i: n for n, i in enumerate(fts)}
+    sem_sorted = [i for i, _ in sorted(sims.items(), key=lambda x: -x[1])]
+    sem_rank = {i: n for n, i in enumerate(sem_sorted)}
+    cand = set(fts) | set(sem_sorted[:25])
+    unit = 1.0 / (K + 1.0)   # the max contribution of one list (rank 0) — boosts are scaled to it
+    ql = query.strip().lower()
+    qterms = set(re.findall(r"\w+", ql, flags=re.UNICODE))
+    by = {r["id"]: r for r in all_records()}
+
+    def score(i):
+        s = 0.0
+        if i in kw_rank:
+            s += 1.0 / (K + kw_rank[i] + 1)
+        if i in sem_rank:
+            s += 1.0 / (K + sem_rank[i] + 1)
+        # light rerank: a query hit in the SUMMARY is a strong precision signal the fusion misses.
+        # Scaled to `unit` so it nudges near-ties without overriding a clearly better-ranked pair.
+        r = by.get(i)
+        if r and qterms:
+            summ = (record_summary(r) or "").lower()
+            if ql and ql in summ:
+                s += 2.0 * unit                                  # exact query phrase in summary (~rank-1 in both)
+            elif qterms <= set(re.findall(r"\w+", summ, flags=re.UNICODE)):
+                s += 1.0 * unit                                  # all query terms present in summary
+        return s
+
+    return sorted(cand, key=score, reverse=True), "hybrid"
 
 
 def cmd_embed(a):
