@@ -149,7 +149,7 @@ RO = {
     "No memories match the current filter.": "Nicio memorie nu se potriveste filtrului curent.",
     "Types": "Tipuri", "Bulk": "Bulk", "View chain": "Vezi lantul", "Save": "Salveaza",
     # about-me page
-    "About me": "Despre mine",
+    "About me": "Despre mine", "Stored in": "Salvat in", "created on first save": "se creeaza la prima salvare",
     "Write something about yourself first.": "Scrie intai ceva despre tine.",
     "A short profile about you — kept in your memory store and injected at the very top of every "
     "session, in every project, so the assistant tailors its help to you.":
@@ -1239,10 +1239,13 @@ _ABOUT_JS_BODY = r'''
 def page_about(qs=None):
     rec = profile_record()
     body = rec["body"] if rec else ""
+    path = rec["file"] if rec else mem.GLOBAL_FILE   # the store file the profile record lives in
     intro = t("A short profile about you — kept in your memory store and injected at the very top of every "
               "session, in every project, so the assistant tailors its help to you.")
     placeholder = t("Who you are, your role and expertise, the environment you work in, what you build, and "
                     "how you like to work. Plain text or markdown.")
+    location = (f'{t("Stored in")} <code>{h(path)}</code>'
+                + (f' · id <code>{h(rec["id"])}</code>' if rec else f' — {t("created on first save")}'))
     style = ("<style>.about-edit{width:100%;min-height:300px;box-sizing:border-box;resize:vertical;"
              "font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;line-height:1.6;padding:12px;"
              "border:1px solid var(--border,#e2e8f0);border-radius:8px;background:#fff;}"
@@ -1252,6 +1255,7 @@ def page_about(qs=None):
                f'  <div class="crumb"><a href="/">{t("Dashboard")}</a> / {t("About me")}</div>\n'
                f'  <h2>{t("About me")}</h2>\n'
                f'  <p class="foot">{intro}</p>\n'
+               f'  <p class="foot">{location}</p>\n'
                f'  <textarea id="about-edit" class="about-edit" placeholder="{h(placeholder)}" spellcheck="false">{h(body)}</textarea>\n'
                f'  <div class="cmd-actions"><button type="button" class="btn btn-primary" id="about-save">{t("Save")}</button>'
                f'<span class="cmd-status" id="about-status"></span></div>')
