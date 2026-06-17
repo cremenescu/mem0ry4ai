@@ -150,6 +150,10 @@ RO = {
     "Types": "Tipuri", "Bulk": "Bulk", "View chain": "Vezi lantul", "Save": "Salveaza",
     # about-me page
     "About me": "Despre mine", "Stored in": "Salvat in", "created on first save": "se creeaza la prima salvare",
+    # links: suggestion threshold
+    "Threshold": "Prag", "Apply": "Aplica",
+    "higher = fewer, stronger matches": "mai mare = mai putine, mai puternice",
+    "No matches at this threshold — lower it to see more.": "Nicio potrivire la acest prag — coboara-l ca sa vezi mai multe.",
     "Write something about yourself first.": "Scrie intai ceva despre tine.",
     "A short profile about you — kept in your memory store and injected at the very top of every "
     "session, in every project, so the assistant tailors its help to you.":
@@ -1378,7 +1382,8 @@ _GRAPH_JS = r'''(function(){
 })();'''
 
 _SUGGEST_JS_BODY = r'''
-  document.getElementById('suggest-list').addEventListener('click', function(e){
+  var sl = document.getElementById('suggest-list');
+  if (sl) sl.addEventListener('click', function(e){
     var li = e.target.closest('li[data-a]'); if (!li) return;
     if (e.target.closest('.sg-more')) { li.classList.toggle('expanded'); return; }
     var link = e.target.classList.contains('sg-link');
@@ -1397,6 +1402,16 @@ _SUGGEST_JS_BODY = r'''
         var c = document.querySelector('.suggest .count'); if (c) c.textContent = document.querySelectorAll('#suggest-list li[data-a]').length;
       })
       .catch(function(){ e.target.disabled = false; });
+  });
+  var thBtn = document.getElementById('sg-th-apply');
+  if (thBtn) thBtn.addEventListener('click', function(){
+    var inp = document.getElementById('sg-th-input');
+    thBtn.disabled = true;
+    var fd = new URLSearchParams(); fd.set('csrf', CSRF); fd.set('action', 'threshold'); fd.set('value', inp ? inp.value : '');
+    fetch('/links', { method:'POST', headers:{'X-Requested-With':'XMLHttpRequest'}, body: fd })
+      .then(function(r){ return r.json(); })
+      .then(function(j){ if (j.ok) { location.reload(); } else { thBtn.disabled = false; alert(j.error || 'failed'); } })
+      .catch(function(){ thBtn.disabled = false; });
   });'''
 
 
@@ -1601,37 +1616,47 @@ def page_links(qs=None):
     parts = [f'  <div class="crumb"><a href="/">{t("Dashboard")}</a> / {t("Links")}</div>',
              f'  <h2>{t("Links")} <span class="count">{len(edges)}</span></h2>']
 
-    # suggestions (grouped by project, zebra bands)
-    if suggestions:
-        sg_groups = {}
-        for s in suggestions:
-            A, B = by_id.get(s["a"]), by_id.get(s["b"])
-            if not A or not B:
-                continue
-            sa = A["meta"].get("scope", "global")
-            sB = B["meta"].get("scope", "global")
-            gk = sa if sa == sB else (sB if sa == "global" else (sa if sB == "global" else "__cross__"))
-            sg_groups.setdefault(gk, []).append((s, A, B))
-        ordered = sorted(sg_groups.keys(),
-                         key=lambda x: (0, "") if x == "global" else ((2, "") if x == "__cross__" else (1, x)))
+    # suggestions + threshold control (shown whenever the semantic layer has vectors)
+    nvec = embed_count()
+    if nvec >= 2:
         sg_html = ""
-        for gk in ordered:
-            items = sg_groups[gk]
-            glabel = t("Global") if gk == "global" else (t("Cross-project") if gk == "__cross__" else scope_label(gk))
-            rows = ""
-            for s, A, B in items:
-                rows += (f'<li data-a="{h(s["a"])}" data-b="{h(s["b"])}" data-group="{h(gk)}">'
-                         f'<div class="sg-head"><span class="sg-pct" title="semantic similarity">{round(s["sim"] * 100)}%</span>'
-                         f'<span class="sg-act"><button type="button" class="btn btn-primary sg-link">{t("Link")}</button> '
-                         f'<button type="button" class="btn btn-ghost sg-dismiss">{t("Dismiss")}</button></span></div>'
-                         f'<div class="sg-pair">{_sg_end_html(A)}<div class="sg-mid">&harr;</div>{_sg_end_html(B)}</div>'
-                         f'<button type="button" class="sg-more"><span class="sg-arrow">&#9662;</span> {t("full content")}</button></li>')
-            sg_html += (f'<li class="sg-group" data-group="{h(gk)}">'
-                        f'<div class="sg-group-head">{h(glabel)} <span class="sg-gcount">{len(items)}</span></div>'
-                        f'<ul class="sg-items">{rows}</ul></li>')
+        if suggestions:
+            sg_groups = {}
+            for s in suggestions:
+                A, B = by_id.get(s["a"]), by_id.get(s["b"])
+                if not A or not B:
+                    continue
+                sa = A["meta"].get("scope", "global")
+                sB = B["meta"].get("scope", "global")
+                gk = sa if sa == sB else (sB if sa == "global" else (sa if sB == "global" else "__cross__"))
+                sg_groups.setdefault(gk, []).append((s, A, B))
+            ordered = sorted(sg_groups.keys(),
+                             key=lambda x: (0, "") if x == "global" else ((2, "") if x == "__cross__" else (1, x)))
+            for gk in ordered:
+                items = sg_groups[gk]
+                glabel = t("Global") if gk == "global" else (t("Cross-project") if gk == "__cross__" else scope_label(gk))
+                rows = ""
+                for s, A, B in items:
+                    rows += (f'<li data-a="{h(s["a"])}" data-b="{h(s["b"])}" data-group="{h(gk)}">'
+                             f'<div class="sg-head"><span class="sg-pct" title="semantic similarity">{round(s["sim"] * 100)}%</span>'
+                             f'<span class="sg-act"><button type="button" class="btn btn-primary sg-link">{t("Link")}</button> '
+                             f'<button type="button" class="btn btn-ghost sg-dismiss">{t("Dismiss")}</button></span></div>'
+                             f'<div class="sg-pair">{_sg_end_html(A)}<div class="sg-mid">&harr;</div>{_sg_end_html(B)}</div>'
+                             f'<button type="button" class="sg-more"><span class="sg-arrow">&#9662;</span> {t("full content")}</button></li>')
+                sg_html += (f'<li class="sg-group" data-group="{h(gk)}">'
+                            f'<div class="sg-group-head">{h(glabel)} <span class="sg-gcount">{len(items)}</span></div>'
+                            f'<ul class="sg-items">{rows}</ul></li>')
         smallnote = "semantic — tu confirmi" if lang() == "ro" else "semantic — you confirm"
+        cur_th = (os.environ.get("MEM_SUGGEST_THRESHOLD") or "").strip() or "0.62"
+        ctl = (f'<div class="sg-th" style="margin:6px 0 10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+               f'<label>{t("Threshold")} <input type="number" id="sg-th-input" min="0.5" max="0.95" step="0.01" '
+               f'value="{h(cur_th)}" style="width:5em"></label>'
+               f'<button type="button" class="btn" id="sg-th-apply">{t("Apply")}</button>'
+               f'<small class="muted">{t("higher = fewer, stronger matches")}</small></div>')
+        body = (f'<ul id="suggest-list">{sg_html}</ul>' if suggestions
+                else f'<ul id="suggest-list"></ul><div class="empty">{t("No matches at this threshold — lower it to see more.")}</div>')
         parts.append(f'  <div class="suggest"><h3>{t("Suggested links")} <span class="count">{len(suggestions)}</span>'
-                     f' <small>{smallnote}</small></h3><ul id="suggest-list">{sg_html}</ul></div>')
+                     f' <small>{smallnote}</small></h3>{ctl}{body}</div>')
 
     scripts = ""
     if not edges:
@@ -1663,7 +1688,7 @@ def page_links(qs=None):
         scripts += ('<script>var GRAPH = '
                     + json.dumps({"nodes": gnodes, "edges": gedges}, ensure_ascii=False)
                     + ';\n' + _GRAPH_JS + '</script>')
-    if suggestions:
+    if nvec >= 2:
         scripts += "<script>(function(){ var CSRF = " + json.dumps(_CSRF) + ";" + _SUGGEST_JS_BODY + "})();</script>"
 
     gh = ('Graful tuturor legaturilor dintre memorii. Linie plina <b>↔</b> = inrudite (related-to); sageata '
@@ -2227,6 +2252,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 ok = link_records(a, b)
             elif action == "dismiss":
                 ok = dismiss_pair(a, b)
+            elif action == "threshold":
+                # the threshold is read live from os.environ on every suggested_links() call, so this
+                # takes effect on the next page render — no server reload. Also persist it for restarts.
+                try:
+                    v = max(0.5, min(0.95, float(form.get("value", [""])[0])))
+                except ValueError:
+                    return self._send_json({"ok": False, "error": "invalid"})
+                os.environ["MEM_SUGGEST_THRESHOLD"] = f"{v:.2f}"
+                set_local_env("MEM_SUGGEST_THRESHOLD", f"{v:.2f}")
+                return self._send_json({"ok": True, "value": f"{v:.2f}"})
             else:
                 ok = False
             return self._send_json({"ok": ok})
@@ -2408,6 +2443,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+
+
+def set_local_env(key, value):
+    """Persist KEY=value in .mem-local.env (next to the code), replacing any existing line for key.
+    Used by the web UI to make a setting (e.g. MEM_SUGGEST_THRESHOLD) survive a server restart."""
+    p = os.path.join(HERE, ".mem-local.env")
+    out, found = [], False
+    try:
+        if os.path.isfile(p):
+            with open(p, encoding="utf-8") as f:
+                for line in f:
+                    s = line.strip()
+                    base = s[7:].strip() if s.startswith("export ") else s
+                    if base and not base.startswith("#") and "=" in base and base.partition("=")[0].strip() == key:
+                        out.append(f"{key}={value}\n")
+                        found = True
+                    else:
+                        out.append(line if line.endswith("\n") else line + "\n")
+        if not found:
+            out.append(f"{key}={value}\n")
+        with open(p, "w", encoding="utf-8") as f:
+            f.writelines(out)
+        return True
+    except OSError:
+        return False
 
 
 def _load_local_env():
