@@ -31,6 +31,31 @@ import time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
+LOCAL_ENV = os.path.join(ROOT, ".mem-local.env")
+
+
+def load_local_env():
+    """Ingest .mem-local.env (KEY=VALUE lines, next to the code) into os.environ via setdefault.
+
+    The web UI persists power-user settings here; loading it at import means a setting changed in the
+    UI is honored EVERYWHERE that imports mem — the CLI and the MCP server — not just the web server.
+    setdefault => a real shell export still wins. Gitignored, never synced. Runs before _data_dir() so
+    a MEM_DATA_DIR set in the file is respected too."""
+    try:
+        with open(LOCAL_ENV, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("export "):
+                    line = line[7:].strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+    except OSError:
+        pass
+
+
+load_local_env()
 import redact  # noqa: E402
 
 # Suppress the console window a child process (rg) would pop on Windows when this module

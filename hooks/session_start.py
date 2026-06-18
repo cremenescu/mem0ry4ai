@@ -27,6 +27,42 @@ PLUGIN_MODE = f"{os.sep}.claude{os.sep}plugins{os.sep}" in PROJ + os.sep
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 
+def _load_local_env():
+    """Ingest .mem-local.env (KEY=VALUE, next to the code) into os.environ via setdefault, so settings
+    saved in the web UI — e.g. MEM_INJECT_BUDGET and the injection knobs below — are honored by THIS
+    hook too, not just the web server. Self-contained on purpose: the hook never imports mem, so it
+    stays bulletproof. setdefault => a real shell export still wins."""
+    try:
+        with open(os.path.join(PROJ, ".mem-local.env"), encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("export "):
+                    line = line[7:].strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+    except OSError:
+        pass
+
+
+def _int_env(key, default):
+    """int(os.environ[key]) but never raises — a malformed value in .mem-local.env (or the shell) must
+    NOT break session start, so fall back to the default."""
+    try:
+        return int(os.environ.get(key, default))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _float_env(key, default):
+    try:
+        v = float(os.environ.get(key, default))
+        return v if v == v and v not in (float("inf"), float("-inf")) else float(default)  # reject nan/inf
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def mem_cmd(cwd):
     """The mem.py invocation to show in hints — correct whether mem0ry4ai is the repo
     itself (standalone) or a subfolder of a monorepo: a path relative to where you work."""
@@ -66,6 +102,7 @@ def ensure_web_server():
 
 
 def main():
+    _load_local_env()   # honor web-UI-saved settings (port, injection knobs) before anything reads them
     ensure_web_server()
     try:
         data = json.load(sys.stdin)
@@ -100,7 +137,7 @@ def main():
     # preview — an UNCONTROLLED cut that can silently drop a rule the agent must follow.
     # Here the cut is ours: critical rules always in, the rest fills the budget, anything
     # omitted is announced explicitly with the command that retrieves it.
-    BUDGET = int(os.environ.get("MEM_INJECT_BUDGET", "8000"))
+    BUDGET = _int_env("MEM_INJECT_BUDGET", "8000")
 
     # the user profile ("About me"): the single most-recent GLOBAL profile, matching the web editor.
     # Injected first, on its own, outside the budget; excluded from the lists below so it never doubles.
@@ -129,7 +166,7 @@ def main():
         return f"  (blocked by {n})" if n else ""
 
     # Progressive disclosure: above the threshold inject summaries only, below it bodies too.
-    BODY_THRESHOLD = 12
+    BODY_THRESHOLD = _int_env("MEM_INJECT_BODY_THRESHOLD", "12")
     include_bodies = len(recs) <= BODY_THRESHOLD
 
     TYPE_PRIO = {"status": 0, "todo": 1, "gotcha": 2, "decision": 3, "preference": 4, "fact": 5, "command": 6}
@@ -207,8 +244,8 @@ def main():
         lines.append("")
         return True
 
-    ROOT_RECENT_DAYS = 30
-    ROOT_MAX_PER_PROJECT = 6
+    ROOT_RECENT_DAYS = _int_env("MEM_INJECT_ROOT_RECENT_DAYS", "30")
+    ROOT_MAX_PER_PROJECT = _int_env("MEM_INJECT_ROOT_MAX_PER_PROJECT", "6")
 
     def emit_project_capped(scope):
         """Root mode: one capped block per project. Returns False when the budget is gone."""
@@ -242,7 +279,8 @@ def main():
     if is_root:
         # global gets at most ~40% of what remains after the rules — the rest belongs to
         # the project index (the value of root mode = "where was I, everywhere")
-        glimit = size() + int((BUDGET - size()) * 0.4)
+        split = _float_env("MEM_INJECT_GLOBAL_SPLIT", "0.4")
+        glimit = size() + int((BUDGET - size()) * split)
         emit_budgeted("Global", ordered(by_scope.get("global", [])),
                       f"{MEM_CMD} list --scope global", limit=glimit)
         # recently touched projects first — under budget pressure they matter, not the alphabet

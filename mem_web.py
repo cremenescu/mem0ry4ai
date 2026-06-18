@@ -12,6 +12,7 @@ parity the PHP server keeps running for real use and this one is developed/teste
 import html
 import http.server
 import json
+import math
 import os
 import re
 import secrets
@@ -61,6 +62,15 @@ _CSRF = _load_or_make_csrf()
 # each request. CREATE_NO_WINDOW suppresses it. The flag only exists on Windows.
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
+
+def _int_env(key, default):
+    """int(os.environ[key]) that never raises — a hand-edited .mem-local.env must not 500 a page."""
+    try:
+        return int(os.environ.get(key, default))
+    except (TypeError, ValueError):
+        return int(default)
+
+
 # ---------- per-request context (thread-safe language) ----------
 _ctx = threading.local()
 
@@ -73,6 +83,22 @@ def lang():
 # (subset for the ported pages; grows as more pages land. Missing keys fall back to English.)
 RO = {
     "local memory": "memorie locala",
+    # settings (power-user)
+    "Settings": "Setari", "Power-user settings": "Setari avansate", "advanced": "avansat",
+    "applies on": "se aplica la", "overridden": "modificat", "next session": "sesiunea urmatoare",
+    "restart web server": "repornire server web", "next MCP session": "sesiunea MCP urmatoare",
+    "Search & ranking": "Cautare & ranking", "Web UI": "Interfata web",
+    "Embeddings & local LLM (Ollama)": "Embeddings & LLM local (Ollama)", "Safety": "Siguranta",
+    "Save settings": "Salveaza setarile", "Reset all to defaults": "Reseteaza tot la implicit",
+    "restart the web server to apply": "reporneste serverul web ca sa se aplice",
+    "Tune the knobs that control injection, search and the UI. Saved to .mem-local.env "
+    "(gitignored) and honored by the hook, the CLI and the MCP server. On load, a value "
+    "exported in your shell takes precedence over the file.":
+        "Regleaza parametrii care controleaza injectarea, cautarea si interfata. Salvate in "
+        ".mem-local.env (gitignored) si respectate de hook, CLI si serverul MCP. La incarcare, o "
+        "valoare exportata in shell are prioritate fata de fisier.",
+    "Reset every setting to its default? This clears your overrides in .mem-local.env.":
+        "Resetezi toate setarile la implicit? Asta sterge override-urile din .mem-local.env.",
     "Dashboard": "Panou", "Memories": "Memorii", "Projects": "Proiecte", "Links": "Legaturi",
     "Git history": "Istoric git", "What Claude sees": "Ce vede Claude", "to review": "de revizuit",
     "System status": "Status sistem", "Health": "Health", "Recent activity": "Activitate recenta",
@@ -422,7 +448,7 @@ def health_checks():
 def injection_stats():
     """Real injection size (root mode = the maximal case) vs budget + active critical-rule count."""
     hook = os.path.join(HERE, "hooks", "session_start.py")
-    bud = int(os.environ.get("MEM_INJECT_BUDGET", "8000"))
+    bud = _int_env("MEM_INJECT_BUDGET", "8000")
     if not os.path.isfile(hook):
         return (None, bud, 0)
     try:
@@ -864,7 +890,8 @@ def topbar(active):
     nav = [("dashboard", "/", t("Dashboard")), ("memories", "/memories", t("Memories")),
            ("projects", "/projects", t("Projects")), ("links", "/links", t("Links")),
            ("git", "/git", t("Git history")), ("inject", "/inject", t("What Claude sees")),
-           ("claudemd", "/claude-md", "CLAUDE.md"), ("about", "/about", t("About me"))]
+           ("claudemd", "/claude-md", "CLAUDE.md"), ("about", "/about", t("About me")),
+           ("settings", "/settings", t("Settings"))]
     nq = len(queue_pending())
     links = ""
     for k, href, label in nav:
@@ -1046,7 +1073,7 @@ def page_inject(qs=None):
     elif not (output or "").strip():
         bodyblock = f'<div class="empty">{t("The hook injects nothing for")} {h(label)} {t("(no relevant memories).")}</div>'
     else:
-        ibud = int(os.environ.get("MEM_INJECT_BUDGET", "8000"))
+        ibud = _int_env("MEM_INJECT_BUDGET", "8000")
         exact = ('Acesta e output-ul exact al hook-ului real (<code>hooks/session_start.py</code>), nu o aproximare.'
                  if lang() == "ro" else
                  'This is the exact output of the real hook (<code>hooks/session_start.py</code>), not an approximation.')
@@ -1269,6 +1296,298 @@ def page_about(qs=None):
     js = ("<script>var CSRF = " + json.dumps(_CSRF) + "; var TXT = "
           + json.dumps(txt, ensure_ascii=False) + ";" + _ABOUT_JS_BODY + "</script>")
     return layout(t("About me") + " — mem0ry4ai", "about", content, "", js)
+
+
+# ---------- power-user settings (config knobs editable from the UI) ----------
+SETTINGS_GROUPS = [
+    ("injection", "SessionStart injection",
+     "The memory block injected into every session. Changes apply at the NEXT session start "
+     "(the hook re-reads these each time)."),
+    ("search", "Search & ranking",
+     "Hybrid keyword+semantic retrieval and the duplicate guard, used by the CLI and the MCP server."),
+    ("web", "Web UI", "This dashboard."),
+    ("ollama", "Embeddings & local LLM (Ollama)",
+     "Optional semantic features. These bind when a module loads, so they apply after a server restart."),
+    ("safety", "Safety", "Security-relevant toggles — change with care."),
+]
+
+
+def _S(key, group, vtype, default, label, hlp, **kw):
+    return {"key": key, "group": group, "vtype": vtype, "default": default, "label": label, "help": hlp,
+            "min": kw.get("min"), "max": kw.get("max"), "step": kw.get("step"),
+            "choices": kw.get("choices"), "advanced": kw.get("advanced", False),
+            "warn": kw.get("warn"), "apply": kw.get("apply", "live")}
+
+
+SETTINGS = [
+    _S("MEM_INJECT_BUDGET", "injection", "int", "8000", "Injection byte budget",
+       "Target UTF-8 size of the memory block injected at the top of every session. Your critical rules "
+       "and profile are always injected in full and never trimmed, but they DO count toward this budget — "
+       "they eat into the room left for everything else, and if they alone are large the total can exceed "
+       "it. The budget bounds the trimmable sections, which cut deterministically and announce what they "
+       "drop. Raise it to keep more memories in context up front (more tokens every session); lower it for "
+       "a leaner start. Default 8000.", min=2000, max=32000, step=500, apply="next session"),
+    _S("MEM_INJECT_BODY_THRESHOLD", "injection", "int", "12", "Full-body threshold",
+       "Progressive disclosure: when the number of active in-scope memories is at or below this, each is "
+       "injected with its full body; above it, only one-line summaries go in (with a hint to search for "
+       "the rest). Raise it to keep full detail in larger projects (more tokens); lower it to fall back to "
+       "summaries sooner. Default 12.", min=3, max=60, apply="next session"),
+    _S("MEM_INJECT_ROOT_MAX_PER_PROJECT", "injection", "int", "6", "Root: max items per project",
+       "Only in monorepo-root mode (when you start a session from the repo root). Caps how many memory "
+       "summaries each recently-touched project shows before the rest collapse to a '+N more' line. Higher "
+       "= more depth per project but fewer projects fit the budget; lower = more breadth across projects. "
+       "Default 6.", min=1, max=30, apply="next session"),
+    _S("MEM_INJECT_ROOT_RECENT_DAYS", "injection", "int", "30", "Root: recency window (days)",
+       "Only in monorepo-root mode. A project whose newest memory is older than this many days is shown as "
+       "a single '(N memories, not touched recently)' line instead of a full list, so the budget goes to "
+       "active work. A larger window shows detail for more projects; a smaller one collapses stale ones "
+       "faster. Default 30.", min=1, max=365, apply="next session"),
+    _S("MEM_INJECT_GLOBAL_SPLIT", "injection", "float", "0.4", "Root: global budget share",
+       "Only in monorepo-root mode. Of the budget left after the always-injected sections (profile + "
+       "critical rules), this fraction goes to the Global section (cross-project facts and preferences) "
+       "and the rest to the per-project index. Raise it to favour global knowledge, lower it to favour the "
+       "'where was I in each project' index. Default 0.4 (40%).",
+       min=0.1, max=0.8, step=0.05, apply="next session"),
+
+    _S("MEM_RECENCY_WEIGHT", "search", "float", "1.5", "Recency weight",
+       "In keyword (bm25) search, a recency bonus is folded into each hit's score so newer memories edge "
+       "out older ones on near-ties. 0 = rank purely by text relevance; higher = let recency tip the "
+       "balance more aggressively. Default 1.5.", min=0, max=10, step=0.1),
+    _S("MEM_RRF_K", "search", "float", "60", "RRF k",
+       "The constant in Reciprocal Rank Fusion, which merges the keyword ranking and the semantic ranking "
+       "into one list. A small k lets the top hit from each method dominate the blend; a large k flattens "
+       "it so lower-ranked hits also count. Only matters when semantic vectors exist. Default 60.",
+       min=1, max=200, step=1, advanced=True),
+    _S("MEM_DUP_CHECK", "search", "bool", "1", "Duplicate guard on add",
+       "When you add a memory, warn if a very similar one already exists — so you supersede it instead of "
+       "piling up duplicates. Turn off to silence those warnings entirely. Default on.", advanced=True),
+    _S("MEM_DUP_THRESHOLD", "search", "float", "0.62", "Duplicate: semantic threshold",
+       "Cosine-similarity cutoff for the duplicate warning: two memories count as near-duplicates above "
+       "this. Raise it so only near-identical memories are flagged (fewer warnings); lower it to catch "
+       "looser overlaps. Used only when semantic vectors are available. Default 0.62.",
+       min=0, max=1, step=0.01, advanced=True),
+    _S("MEM_DUP_JACCARD", "search", "float", "0.5", "Duplicate: keyword fallback",
+       "Fallback duplicate cutoff when no embeddings exist: the share of shared words (Jaccard) above "
+       "which two memories are flagged. Same direction as the semantic threshold — higher = stricter, "
+       "lower = more aggressive. Default 0.5.", min=0, max=1, step=0.01, advanced=True),
+
+    _S("MEM_UI_LANG", "web", "enum", "en", "Default UI language",
+       "The default language for this dashboard when a request has no ?lang query and no saved cookie. The "
+       "EN/RO switch in the top bar overrides it for your session and is remembered in a cookie. "
+       "Default en.", choices=["en", "ro"]),
+    _S("MEM_SUGGEST_THRESHOLD", "web", "float", "0.62", "Link suggestion threshold",
+       "Minimum semantic similarity for a pair to appear under 'suggested links' on the Links page. Raise "
+       "it for fewer, tighter suggestions; lower it for more candidates (and more noise). Same control as "
+       "the slider on the Links page. Default 0.62.", min=0.5, max=0.95, step=0.01),
+    _S("MEM_WEB_PORT", "web", "int", "8841", "Web UI port",
+       "TCP port this web dashboard listens on. Change it only if 8841 clashes with another service; "
+       "you'll need to restart the server and reopen it on the new port. Default 8841.",
+       min=1024, max=65535, advanced=True, apply="restart web server"),
+    _S("MEM_NO_RELOAD", "web", "bool", "0", "Disable auto-reload",
+       "Normally the server watches its own source files and restarts itself when they change (e.g. after "
+       "a git-pull). Enable this to disable that auto-restart — useful if the re-exec interrupts "
+       "something. Default off (auto-reload on).", advanced=True, apply="restart web server"),
+
+    _S("OLLAMA_URL", "ollama", "string", "http://localhost:11434", "Ollama URL",
+       "Base URL of the local Ollama server used for semantic embeddings and the optional offline "
+       "extraction LLM. Leave the default unless Ollama runs on another host or port. Bound when the "
+       "process starts, so a change needs a server restart. Default http://localhost:11434.",
+       advanced=True, apply="restart web server"),
+    _S("MEM_LLM_MODEL", "ollama", "string", "qwen2.5:7b-instruct", "LLM model",
+       "The Ollama chat model for the optional offline memory-extraction fallback (unused when extraction "
+       "runs through Claude directly). Must be a model you have pulled in Ollama. Applies after a restart. "
+       "Default qwen2.5:7b-instruct.", advanced=True, apply="restart web server"),
+    _S("MEM_EMBED_MODEL", "ollama", "string", "all-minilm", "Embedding model",
+       "The Ollama model that turns memories into vectors for semantic search and link suggestions. "
+       "Changing it invalidates the existing vectors, so re-run `mem.py embed --force` afterwards — plain "
+       "`mem.py embed` is incremental (keyed on a record's text, not the model) and skips unchanged "
+       "records, silently keeping the old-model vectors. Applies after a restart. Default all-minilm.",
+       advanced=True, apply="restart web server"),
+    _S("MEM_EMBED_MAXCHARS", "ollama", "int", "1200", "Embedding max chars",
+       "How many characters of a memory are sent to the embedder. Small embedding models have a short "
+       "context and reject long inputs, so the embedder also retries with shorter slices; this caps the "
+       "first attempt. Raise it only for a larger embedding model. Default 1200.",
+       min=200, max=8000, step=100, advanced=True),
+
+    _S("MEM_REDACT", "safety", "bool", "1", "Redact secrets on write",
+       "On every write, replace secret-looking values (API keys, tokens, passwords) with a "
+       "[REDACTED:LABEL] marker, so credentials never reach the markdown store or its git history. Keep "
+       "this on.", advanced=True,
+       warn="Turning this OFF lets API keys, tokens and passwords land in the markdown store and its "
+            "git history."),
+    _S("MEM_MCP_WRITE", "safety", "bool", "1", "Allow MCP memory_add",
+       "Allow MCP clients (Claude Code, Gemini, ...) to create memories via the memory_add tool. Turn it "
+       "off to make a client read-only. Applies to the next MCP session.", advanced=True,
+       apply="next MCP session",
+       warn="With several agents writing to one store, leave this OFF on the extra agents to avoid "
+            "duplicate records."),
+]
+_FALSEY = ("0", "false", "no", "off", "")
+
+
+def validate_setting(s, raw):
+    """Return (value_str, error): validate & clamp a raw form value for setting `s`."""
+    raw = (raw or "").strip()
+    vt = s["vtype"]
+    if vt == "bool":
+        return ("1" if raw.lower() not in _FALSEY else "0"), None
+    if vt == "enum":
+        return (raw, None) if raw in (s["choices"] or []) else (None, "invalid choice")
+    if vt == "string":
+        # reject control chars: a newline would inject a second KEY=VALUE line into .mem-local.env
+        # (env-var smuggling); other C0 chars / DEL have no business in a URL or model name.
+        if any(ord(c) < 0x20 or ord(c) == 0x7f for c in raw):
+            return None, "control characters not allowed"
+        if len(raw) > 500:
+            return None, "too long"
+        return raw, None
+    try:
+        n = int(raw) if vt == "int" else float(raw)
+    except ValueError:
+        return None, "not a number"
+    if vt == "float" and not math.isfinite(n):   # nan/inf would poison ranking/dedup silently
+        return None, "not a finite number"
+    if s["min"] is not None:
+        n = max(n, s["min"])
+    if s["max"] is not None:
+        n = min(n, s["max"])
+    return (str(int(n)) if vt == "int" else f"{float(n):g}"), None
+
+
+def _local_env_keys():
+    keys = set()
+    try:
+        with open(mem.LOCAL_ENV, encoding="utf-8") as f:
+            for line in f:
+                t_ = line.strip()
+                base = t_[7:].strip() if t_.startswith("export ") else t_
+                if base and not base.startswith("#") and "=" in base:
+                    keys.add(base.partition("=")[0].strip())
+    except OSError:
+        pass
+    return keys
+
+
+def render_setting_row(s, cur, overridden):
+    key, vt = s["key"], s["vtype"]
+    if vt == "bool":
+        chk = "checked" if str(cur).lower() not in _FALSEY else ""
+        ctrl = f'<input type="checkbox" data-key="{key}" data-type="bool" {chk}>'
+    elif vt == "enum":
+        opts = "".join(f'<option value="{h(c)}"{" selected" if str(cur) == c else ""}>{h(c)}</option>'
+                       for c in (s["choices"] or []))
+        ctrl = f'<select data-key="{key}" data-type="enum">{opts}</select>'
+    elif vt == "string":
+        ctrl = f'<input type="text" data-key="{key}" data-type="string" value="{h(str(cur))}" size="32">'
+    else:
+        step = s["step"] if s["step"] is not None else ("1" if vt == "int" else "0.01")
+        mn = f' min="{s["min"]}"' if s["min"] is not None else ""
+        mx = f' max="{s["max"]}"' if s["max"] is not None else ""
+        ctrl = (f'<input type="number" data-key="{key}" data-type="{vt}" value="{h(str(cur))}" '
+                f'step="{step}"{mn}{mx}>')
+    badges = ""
+    if s["advanced"]:
+        badges += f'<span class="st-badge st-adv">{t("advanced")}</span>'
+    if s["apply"] != "live":
+        badges += f'<span class="st-badge st-apply">{t("applies on")}: {h(t(s["apply"]))}</span>'
+    if overridden:
+        badges += f'<span class="st-badge st-over">{t("overridden")}</span>'
+    warn = f'<div class="st-warn">{h(t(s["warn"]))}</div>' if s["warn"] else ""
+    return (f'<div class="st-row"><div class="st-main"><label class="st-label">{h(t(s["label"]))} '
+            f'<code>{key}</code></label>{badges}<div class="st-help">{h(t(s["help"]))}</div>{warn}</div>'
+            f'<div class="st-ctrl">{ctrl}</div></div>')
+
+
+_SETTINGS_JS = r'''
+(function(){
+  var save = document.getElementById('st-save'), reset = document.getElementById('st-reset'),
+      st = document.getElementById('st-status');
+  function collect(){
+    var fd = new URLSearchParams(); fd.set('csrf', CSRF); fd.set('action','save');
+    document.querySelectorAll('[data-key]').forEach(function(el){
+      var v = (el.getAttribute('data-type')==='bool') ? (el.checked ? '1':'0') : el.value;
+      fd.set(el.getAttribute('data-key'), v);
+    });
+    return fd;
+  }
+  if (save) save.addEventListener('click', function(){
+    save.disabled = true; st.textContent = '';
+    fetch('/settings',{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest'},body:collect()})
+      .then(function(r){return r.json();}).then(function(j){
+        save.disabled = false;
+        if(!j.ok){ if(j.error==='CSRF'){ alert(TXT.csrf); location.reload(); return; }
+                   st.textContent = j.error || TXT.failed; st.className = 'cmd-status err'; return; }
+        if(j.values){ Object.keys(j.values).forEach(function(k){   // reflect clamps back into the field
+          var el = document.querySelector('[data-key="'+k+'"]'); if(!el) return;
+          if(el.getAttribute('data-type')==='bool') el.checked = (j.values[k] !== '0');
+          else el.value = j.values[k];
+        }); }
+        st.textContent = TXT.saved + (j.note ? (' — ' + j.note) : '');
+        st.className = 'cmd-status ok';
+      })
+      .catch(function(){ save.disabled=false; st.textContent=TXT.network; st.className='cmd-status err'; });
+  });
+  if (reset) reset.addEventListener('click', function(){
+    if(!confirm(TXT.resetConfirm)) return;
+    var fd = new URLSearchParams(); fd.set('csrf', CSRF); fd.set('action','reset');
+    fetch('/settings',{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest'},body:fd})
+      .then(function(r){return r.json();}).then(function(j){
+        if(j.ok){ location.reload(); }
+        else { st.textContent = j.error || TXT.failed; st.className = 'cmd-status err'; }
+      });
+  });
+})();
+'''
+
+
+def page_settings(qs=None):
+    over = _local_env_keys()
+    groups = []
+    for gkey, gtitle, gdesc in SETTINGS_GROUPS:
+        rows = "".join(render_setting_row(s, os.environ.get(s["key"], s["default"]), s["key"] in over)
+                       for s in SETTINGS if s["group"] == gkey)
+        groups.append(f'<div class="card"><h3>{h(t(gtitle))}</h3>'
+                      f'<p class="foot">{h(t(gdesc))}</p>{rows}</div>')
+    intro = t("Tune the knobs that control injection, search and the UI. Saved to .mem-local.env "
+              "(gitignored) and honored by the hook, the CLI and the MCP server. On load, a value "
+              "exported in your shell takes precedence over the file.")
+    style = ("<style>"
+             ".st-row{display:flex;gap:16px;align-items:flex-start;justify-content:space-between;"
+             "padding:12px 0;border-top:1px solid var(--border,#e2e8f0);}"
+             ".st-row:first-of-type{border-top:0;} .st-main{flex:1 1 auto;min-width:0;}"
+             ".st-label{font-weight:600;font-size:14px;} .st-label code{font-weight:400;font-size:12px;"
+             "color:#64748b;background:#f1f5f9;padding:1px 5px;border-radius:4px;margin-left:6px;}"
+             ".st-help{font-size:12.5px;color:#475569;margin-top:3px;line-height:1.5;}"
+             ".st-warn{font-size:12.5px;color:#b45309;background:#fffbeb;border:1px solid #fde68a;"
+             "border-radius:6px;padding:6px 9px;margin-top:6px;}"
+             ".st-badge{display:inline-block;font-size:10.5px;font-weight:600;padding:1px 7px;border-radius:"
+             "999px;margin-left:6px;vertical-align:middle;}"
+             ".st-adv{background:#ede9fe;color:#6d28d9;} .st-apply{background:#e0f2fe;color:#0369a1;}"
+             ".st-over{background:#dcfce7;color:#15803d;}"
+             ".st-ctrl{flex:0 0 auto;} .st-ctrl input[type=number],.st-ctrl input[type=text],"
+             ".st-ctrl select{padding:6px 8px;border:1px solid var(--border,#cbd5e1);border-radius:7px;"
+             "font-size:13px;font-family:ui-monospace,Menlo,Consolas,monospace;}"
+             ".st-ctrl input[type=number]{width:8em;} .st-ctrl input[type=text]{width:22em;}"
+             ".cmd-actions{margin:16px 0 4px;display:flex;gap:12px;align-items:center;}"
+             ".cmd-status{font-size:13px;} .cmd-status.ok{color:#1f9d4d;} .cmd-status.err{color:#dc2626;}"
+             "</style>")
+    actions = (f'<div class="cmd-actions">'
+               f'<button type="button" class="btn btn-primary" id="st-save">{h(t("Save settings"))}</button>'
+               f'<button type="button" class="btn" id="st-reset">{h(t("Reset all to defaults"))}</button>'
+               f'<span class="cmd-status" id="st-status"></span></div>')
+    content = (f'{style}'
+               f'  <div class="crumb"><a href="/">{t("Dashboard")}</a> / {t("Settings")}</div>\n'
+               f'  <h2>{t("Power-user settings")}</h2>\n'
+               f'  <p class="foot">{h(intro)}</p>\n'
+               + "".join(groups) + actions)
+    txt = {"failed": t("Operation failed"), "network": t("Network error"),
+           "csrf": t("Session expired (the server restarted) — reload the page and try again."),
+           "saved": t("Saved"),
+           "resetConfirm": t("Reset every setting to its default? This clears your overrides in "
+                             ".mem-local.env.")}
+    js = ("<script>var CSRF = " + json.dumps(_CSRF) + "; var TXT = "
+          + json.dumps(txt, ensure_ascii=False) + ";" + _SETTINGS_JS + "</script>")
+    return layout(t("Settings") + " — mem0ry4ai", "settings", content, "", js)
 
 
 # Force-directed graph IIFE — verbatim vanilla JS (no PHP); reads the GRAPH global set just above it.
@@ -2166,7 +2485,8 @@ def endpoint_poll(qs):
 # ---------- HTTP server ----------
 ROUTES_HTML = {"/": page_index, "/projects": page_projects, "/project": page_project,
                "/inject": page_inject, "/git": page_git, "/queue": page_queue, "/links": page_links,
-               "/memories": page_memories, "/claude-md": page_claudemd, "/about": page_about}
+               "/memories": page_memories, "/claude-md": page_claudemd, "/about": page_about,
+               "/settings": page_settings}
 ROUTES_JSON = {"/poll": endpoint_poll}
 
 
@@ -2281,6 +2601,39 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._send_json({"ok": bool(ok)})
             except Exception as e:
                 return self._send_json({"ok": False, "error": str(e)})
+        if parsed.path == "/settings":
+            if not csrf_ok(form.get("csrf", [""])[0]):
+                return self._send_json({"ok": False, "error": "CSRF"})
+            action = form.get("action", [""])[0]
+            if action == "reset":   # clear every override -> in-code defaults govern again
+                file_keys = _local_env_keys()
+                _write_local_env({}, removes=[s["key"] for s in SETTINGS])
+                for s in SETTINGS:
+                    if s["key"] in file_keys:        # only clear keys we actually had in the file —
+                        os.environ.pop(s["key"], None)  # don't nuke a genuine shell export
+                return self._send_json({"ok": True})
+            if action != "save":
+                return self._send_json({"ok": False, "error": "unknown action"})
+            # validate EVERYTHING first; write nothing if any field is bad (atomic save)
+            vals, errors, restart = {}, [], []
+            for s in SETTINGS:
+                if s["key"] not in form:
+                    continue
+                val, err = validate_setting(s, form.get(s["key"], [""])[0])
+                if err:
+                    errors.append(f'{s["key"]}: {err}')
+                elif val != os.environ.get(s["key"], s["default"]):
+                    vals[s["key"]] = val
+                    if s["apply"] == "restart web server":
+                        restart.append(s["key"])
+            if errors:
+                return self._send_json({"ok": False, "error": "; ".join(errors)})
+            _write_local_env(vals)                  # one atomic, locked write for all changed keys
+            for k, v in vals.items():
+                os.environ[k] = v                   # live for web-read knobs + the injection preview
+            note = (t("restart the web server to apply") + ": " + ", ".join(restart)) if restart else ""
+            # echo the effective stored values so the client reflects any clamp (e.g. 999999 -> 32000)
+            return self._send_json({"ok": True, "saved": len(vals), "values": vals, "note": note})
         if parsed.path == "/claude-md":
             if not csrf_ok(form.get("csrf", [""])[0]):
                 return self._send_json({"ok": False, "error": "CSRF"})
@@ -2445,49 +2798,60 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
 
 
-def set_local_env(key, value):
-    """Persist KEY=value in .mem-local.env (next to the code), replacing any existing line for key.
-    Used by the web UI to make a setting (e.g. MEM_SUGGEST_THRESHOLD) survive a server restart."""
-    p = os.path.join(HERE, ".mem-local.env")
-    out, found = [], False
+def _write_local_env(updates, removes=()):
+    """One atomic, locked read-modify-write of .mem-local.env: apply `updates` (key->value, replacing in
+    place or appending) and drop every key in `removes`. Temp-file + os.replace = never a torn file;
+    mem._locked() serializes concurrent web threads (no lost update). An 'export ' prefix the user
+    hand-wrote on a replaced line is preserved."""
+    p = mem.LOCAL_ENV
+    removes = set(removes)
     try:
-        if os.path.isfile(p):
-            with open(p, encoding="utf-8") as f:
-                for line in f:
-                    s = line.strip()
-                    base = s[7:].strip() if s.startswith("export ") else s
-                    if base and not base.startswith("#") and "=" in base and base.partition("=")[0].strip() == key:
-                        out.append(f"{key}={value}\n")
-                        found = True
-                    else:
-                        out.append(line if line.endswith("\n") else line + "\n")
-        if not found:
-            out.append(f"{key}={value}\n")
-        with open(p, "w", encoding="utf-8") as f:
-            f.writelines(out)
+        with mem._locked():
+            try:
+                with open(p, encoding="utf-8") as f:
+                    existing = f.readlines()
+            except OSError:
+                existing = []
+            out, seen = [], set()
+            for line in existing:
+                s = line.strip()
+                exp = s.startswith("export ")
+                base = s[7:].strip() if exp else s
+                if base and not base.startswith("#") and "=" in base:
+                    k = base.partition("=")[0].strip()
+                    if k in removes:
+                        continue
+                    if k in updates:
+                        out.append(f'{"export " if exp else ""}{k}={updates[k]}\n')
+                        seen.add(k)
+                        continue
+                out.append(line if line.endswith("\n") else line + "\n")
+            for k, v in updates.items():
+                if k not in seen:
+                    out.append(f"{k}={v}\n")
+            tmp = p + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.writelines(out)
+            os.replace(tmp, p)
         return True
     except OSError:
         return False
 
 
+def set_local_env(key, value):
+    """Persist a single KEY=value in .mem-local.env (atomic). Used by the /links threshold control."""
+    return _write_local_env({key: value})
+
+
+def del_local_env(key):
+    """Remove KEY's line from .mem-local.env so the in-code default governs again (reset-to-default)."""
+    return _write_local_env({}, removes=(key,))
+
+
 def _load_local_env():
-    """Per-machine overrides (gitignored .mem-local.env next to the code): KEY=value lines,
-    e.g. MEM_UI_LANG=ro. Does not override variables already set in the environment."""
-    p = os.path.join(HERE, ".mem-local.env")
-    if not os.path.isfile(p):
-        return
-    try:
-        with open(p, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("export "):
-                    line = line[7:].strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, _, v = line.partition("=")
-                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
-    except OSError:
-        pass
+    """Per-machine overrides from the gitignored .mem-local.env next to the code. Single source of
+    truth = mem.load_local_env (already run when mem was imported); re-run here is idempotent."""
+    mem.load_local_env()
 
 
 def _reload_watcher(interval=2.0):
