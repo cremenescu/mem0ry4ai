@@ -653,6 +653,7 @@ def build_index():
     """(Re)build the FTS5 index from markdown. Returns False if FTS5 is unavailable."""
     idx = index_path()
     tmp = idx + ".build"
+    os.makedirs(os.path.dirname(idx), exist_ok=True)   # fresh/empty store: store/ may not exist yet
     if os.path.exists(tmp):
         os.remove(tmp)
     con = sqlite3.connect(tmp)
@@ -801,6 +802,7 @@ def embed_index(force=False):
     import llm
     if not llm.embedder_up():
         return None
+    os.makedirs(os.path.dirname(embed_path()), exist_ok=True)   # fresh/empty store: store/ may not exist yet
     con = sqlite3.connect(embed_path())
     con.execute("CREATE TABLE IF NOT EXISTS emb (id TEXT PRIMARY KEY, hash TEXT, vec BLOB)")
     have = {row[0]: row[1] for row in con.execute("SELECT id, hash FROM emb")}
