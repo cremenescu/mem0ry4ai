@@ -85,7 +85,7 @@ RO = {
     "local memory": "memorie locala",
     # settings (power-user)
     "Settings": "Setari", "Power-user settings": "Setari avansate", "advanced": "avansat",
-    "Working notes": "Note de lucru", "Promote": "Promoveaza", "Dismiss": "Renunta", "working": "de lucru",
+    "Working notes": "Note de lucru", "Working": "De lucru", "Promote": "Promoveaza", "Dismiss": "Renunta",
     "No working notes left.": "Nicio nota de lucru ramasa.",
     "Dismiss this working note? (it is marked superseded, not deleted)":
         "Renunti la aceasta nota de lucru? (e marcata superseded, nu stearsa)",
@@ -891,21 +891,21 @@ def lang_switch():
 
 
 def topbar(active):
+    nwk = sum(1 for r in mem.all_records() if r["meta"].get("status") == "working")
     nav = [("dashboard", "/", t("Dashboard")), ("memories", "/memories", t("Memories")),
            ("projects", "/projects", t("Projects")), ("links", "/links", t("Links")),
            ("git", "/git", t("Git history")), ("inject", "/inject", t("What Claude sees")),
            ("claudemd", "/claude-md", "CLAUDE.md"), ("about", "/about", t("About me")),
-           ("settings", "/settings", t("Settings"))]
+           ("settings", "/settings", t("Settings")),
+           ("working", "/working", t("Working") + (f" ({nwk})" if nwk else ""))]
     nq = len(queue_pending())
-    nwk = sum(1 for r in mem.all_records() if r["meta"].get("status") == "working")
     links = ""
     for k, href, label in nav:
         on = ' class="nav-on"' if active == k else ""
         links += f'<a{on} href="{href}">{h(label)}</a> '
-    working = f'<a class="review-tag" href="/working">{nwk} {t("working")}</a> ' if nwk else ""
     review = f'<a class="review-tag" href="/queue">{nq} {t("to review")}</a> ' if nq else ""
     return (f'<div class="topbar"><a class="brand" href="/">mem0ry4ai '
-            f'<small>{t("local memory")}</small></a><div class="right">{links}{working}{review}{lang_switch()}</div></div>')
+            f'<small>{t("local memory")}</small></a><div class="right">{links}{review}{lang_switch()}</div></div>')
 
 
 def layout(title, active, content, aside="", scripts=""):
