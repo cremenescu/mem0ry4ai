@@ -155,8 +155,10 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {"scope": {"type": "string"}}}},
     {"name": "memory_add", "fn": t_add,
      "description": "Save a durable memory (secrets are redacted). type: gotcha|fact|decision|command|"
-                    "preference|procedural|todo|status. scope: global or project:<slug>. NOTE: with "
-                    "several agents writing to one store, check memory_search first to avoid duplicates.",
+                    "preference|procedural|todo|status. scope: global or project:<slug>. Write "
+                    "AGENT-NEUTRAL (2nd person, not tied to one model) — the store is shared across "
+                    "agents. To REVISE a memory there is no update/delete tool: supersede the old + add "
+                    "a new one (CLI/web). With several agents writing, memory_search first to avoid dupes.",
      "inputSchema": {"type": "object", "properties": {
          "type": {"type": "string"}, "scope": {"type": "string"}, "summary": {"type": "string"},
          "body": {"type": "string"}, "confidence": {"type": "string"}},

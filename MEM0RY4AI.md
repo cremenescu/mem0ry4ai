@@ -14,6 +14,10 @@ markdown+git store. Reach it through these MCP tools:
 - **`memory_add(type, scope, summary, body)`** — save durable knowledge (secrets are auto-redacted).
   May be disabled (`MEM_MCP_WRITE=0`).
 
+These five are the **only** memory tools exposed over MCP. There is **no update and no delete tool** — to
+revise a record, *supersede* the old one and *add* a new one (`mem.py supersede <id> --by <new>` on the
+CLI, or the web UI `/memories` page). The store is markdown+git, so nothing is ever lost.
+
 ## When to save (memory_add)
 Save only what you'd want to know **next session** — durable and generalizable:
 - **gotcha** — a non-obvious trap + cause + fix.
@@ -29,6 +33,10 @@ Search first to avoid duplicates — overlapping memories should be merged, not 
 ## Scope
 `global` if it applies across projects; otherwise `project:<slug>` (the project folder name).
 
-## Note for multi-agent setups
-If several agents write to the same store, call `memory_search` before `memory_add` to avoid
-duplicate records.
+## Multi-agent: write agent-neutral
+This store is shared across agents (Claude Code, Gemini/Antigravity, Cursor, …) — they all read and
+write the same records. So:
+- Write every memory **agent-neutrally**: second person ("you, the agent" / "do X"), never first-person
+  tied to one model ("I, Claude…"). A memory phrased around one assistant misreads to the others.
+- Keep model-specific tool names or limits as **examples**, not as the rule itself.
+- Before `memory_add`, run `memory_search` first to avoid duplicate records.
