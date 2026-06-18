@@ -9,7 +9,7 @@
       "name": "mem0ry4ai",
       "source": "./",
       "description": "Persistent, local-first memory for Claude Code and any MCP agent — markdown+git store, scoped SessionStart injection, an MCP server for on-demand recall, secret redaction, web UI with a power-user settings page.",
-      "version": "0.12.1"
+      "version": "0.13.0"
     }
   ]
 }

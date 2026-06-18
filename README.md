@@ -80,8 +80,9 @@ Desktop** — **pulls** it on demand from a built-in **MCP server**:
 python3 mem.py mcp        # stdio JSON-RPC server (Windows: py mem.py mcp)
 ```
 
-It exposes `memory_search`, `memory_get`, `memory_list`, `memory_resume`, and `memory_add`. It's a
-hand-rolled stdio server — still **pure stdlib, no SDK, no `pip install`**. Register it:
+It exposes seven tools — `memory_search`, `memory_get`, `memory_list`, `memory_resume`, `memory_add`,
+plus `memory_note` / `memory_promote` (working memory, below). It's a hand-rolled stdio server — still
+**pure stdlib, no SDK, no `pip install`**. Register it:
 
 ```bash
 # Claude Code
@@ -100,6 +101,15 @@ MEM0RY4AI.md`.
 `memory_add` (write) is **on by default**; set `MEM_MCP_WRITE=0` to make the server read-only. With
 several agents writing to one store, have them `memory_search` before `memory_add` to avoid
 duplicates (writes are serialized by a file lock and secret-redacted regardless).
+
+**Working memory.** `memory_note` jots a *scratch* note (status `working`): **not** injected at session
+start and hidden from search/recall, so tentative findings during a long task don't pollute the durable
+store. `memory_promote` flips the keepers to a durable memory; review them on the web UI's **Working
+notes** page or with `mem.py list --status working`. (CLI: `mem.py add --working`, `mem.py promote <id>`.)
+
+**Fragment refs.** `memory_get` shows a record's body with 1-based line numbers; pass `"<id>:5-9"` (or a
+`lines` arg) to retrieve just those lines and cite a precise line of a longer memory. (CLI: `mem.py get
+<id>:5-9`.)
 
 ## Quick start
 

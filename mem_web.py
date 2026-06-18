@@ -85,6 +85,10 @@ RO = {
     "local memory": "memorie locala",
     # settings (power-user)
     "Settings": "Setari", "Power-user settings": "Setari avansate", "advanced": "avansat",
+    "Working notes": "Note de lucru", "Promote": "Promoveaza", "Dismiss": "Renunta", "working": "de lucru",
+    "No working notes left.": "Nicio nota de lucru ramasa.",
+    "Dismiss this working note? (it is marked superseded, not deleted)":
+        "Renunti la aceasta nota de lucru? (e marcata superseded, nu stearsa)",
     "applies on": "se aplica la", "overridden": "modificat", "next session": "sesiunea urmatoare",
     "restart web server": "repornire server web", "next MCP session": "sesiunea MCP urmatoare",
     "Search & ranking": "Cautare & ranking", "Web UI": "Interfata web",
@@ -893,13 +897,15 @@ def topbar(active):
            ("claudemd", "/claude-md", "CLAUDE.md"), ("about", "/about", t("About me")),
            ("settings", "/settings", t("Settings"))]
     nq = len(queue_pending())
+    nwk = sum(1 for r in mem.all_records() if r["meta"].get("status") == "working")
     links = ""
     for k, href, label in nav:
         on = ' class="nav-on"' if active == k else ""
         links += f'<a{on} href="{href}">{h(label)}</a> '
+    working = f'<a class="review-tag" href="/working">{nwk} {t("working")}</a> ' if nwk else ""
     review = f'<a class="review-tag" href="/queue">{nq} {t("to review")}</a> ' if nq else ""
     return (f'<div class="topbar"><a class="brand" href="/">mem0ry4ai '
-            f'<small>{t("local memory")}</small></a><div class="right">{links}{review}{lang_switch()}</div></div>')
+            f'<small>{t("local memory")}</small></a><div class="right">{links}{working}{review}{lang_switch()}</div></div>')
 
 
 def layout(title, active, content, aside="", scripts=""):
@@ -2483,10 +2489,87 @@ def endpoint_poll(qs):
 
 
 # ---------- HTTP server ----------
+_WORKING_JS = r'''
+(function(){
+  var box = document.getElementById('wcards'); if(!box) return;
+  function post(data){
+    var fd = new URLSearchParams(); fd.set('csrf', CSRF);
+    Object.keys(data).forEach(function(k){ fd.set(k, data[k]); });
+    return fetch('/working', {method:'POST', headers:{'X-Requested-With':'XMLHttpRequest'}, body: fd})
+      .then(function(r){ return r.json(); });
+  }
+  function drop(id){
+    var c = box.querySelector('.qcard[data-id="'+id+'"]'); if(c) c.remove();
+    var left = box.querySelectorAll('.qcard').length;
+    var cnt = document.querySelector('.count'); if(cnt) cnt.textContent = left;
+    if(!left) box.innerHTML = '<div class="empty">'+TXT.empty+'</div>';
+  }
+  box.addEventListener('click', function(e){
+    var card = e.target.closest('.qcard'); if(!card) return;
+    var id = card.dataset.id;
+    if(e.target.classList.contains('w-promote')){
+      post({action:'promote', id:id}).then(function(j){ if(j.ok) drop(id); else alert(j.error||TXT.error); });
+    } else if(e.target.classList.contains('w-dismiss')){
+      if(!confirm(TXT.dismissQ)) return;
+      post({action:'dismiss', id:id}).then(function(j){ if(j.ok) drop(id); else alert(j.error||TXT.error); });
+    }
+  });
+})();
+'''
+
+
+def page_working(qs=None):
+    notes = sorted([r for r in mem.all_records() if r["meta"].get("status") == "working"],
+                   key=lambda r: r["meta"].get("created", ""), reverse=True)
+    intro = ('Note de lucru (scratch), status <code>working</code> — NU se injecteaza la SessionStart si sunt '
+             'ascunse din cautare/recall. Promoveaza-le pe cele care merita tinute durabil; arunca restul.'
+             if lang() == "ro" else
+             'Working (scratch) notes, status <code>working</code> — NOT injected at session start and hidden '
+             'from search/recall. Promote the ones worth keeping; dismiss the rest.')
+    if not notes:
+        empty = ('Nicio nota de lucru. Un agent le scrie cu <code>memory_note</code> (MCP) sau '
+                 '<code>mem.py add --working</code>.' if lang() == "ro" else
+                 'No working notes. An agent writes them with <code>memory_note</code> (MCP) or '
+                 '<code>mem.py add --working</code>.')
+        cards = f'<div class="empty">{empty}</div>'
+    else:
+        cards = ""
+        for r in notes:
+            m = r["meta"]
+            cards += (
+                f'<div class="qcard" data-id="{h(r["id"])}">'
+                f'<div class="qhead">{type_badge(m.get("type", "?"))} '
+                f'<span class="scope-tag">{h(scope_label(m.get("scope", "global")))}</span> '
+                f'<span class="qsrc">{h(m.get("source", ""))}</span> '
+                f'<span class="conf">{h((m.get("created", "") or "")[:16])}</span></div>'
+                f'<div class="qsum">{h(mem.record_summary(r))}</div>'
+                f'<div class="qbody">{render_body(r.get("body", ""))}</div>'
+                f'<div class="qactions">'
+                f'<button type="button" class="btn btn-primary w-promote">{t("Promote")}</button> '
+                f'<button type="button" class="btn btn-danger w-dismiss">{t("Dismiss")}</button></div></div>')
+    content = (
+        f'  <div class="crumb"><a href="/">{t("Dashboard")}</a> / {t("Working notes")}</div>\n'
+        f'  <h2>{t("Working notes")} <span class="count">{len(notes)}</span></h2>\n'
+        f'  <p class="meta" style="margin-top:0">{intro}</p>\n'
+        f'  <div id="wcards">{cards}</div>')
+    aside_txt = ('<b>Promote</b> = devine memorie durabila (working &rarr; active): se injecteaza si devine '
+                 'cautabila. <b>Dismiss</b> = marcata superseded (ramane in git, dar iese din lista).'
+                 if lang() == "ro" else
+                 '<b>Promote</b> = becomes a durable memory (working &rarr; active): injected and searchable. '
+                 '<b>Dismiss</b> = marked superseded (kept in git, leaves the list).')
+    aside = f'<aside class="help"><h3>{t("Actions")}</h3><p>{aside_txt}</p></aside>'
+    txt = {"error": t("Error"),
+           "dismissQ": t("Dismiss this working note? (it is marked superseded, not deleted)"),
+           "empty": t("No working notes left.")}
+    script = ("<script>var CSRF = " + json.dumps(_CSRF) + "; var TXT = "
+              + json.dumps(txt, ensure_ascii=False) + ";" + _WORKING_JS + "</script>")
+    return layout(t("Working notes") + " — mem0ry4ai", "working", content, aside, script)
+
+
 ROUTES_HTML = {"/": page_index, "/projects": page_projects, "/project": page_project,
                "/inject": page_inject, "/git": page_git, "/queue": page_queue, "/links": page_links,
                "/memories": page_memories, "/claude-md": page_claudemd, "/about": page_about,
-               "/settings": page_settings}
+               "/settings": page_settings, "/working": page_working}
 ROUTES_JSON = {"/poll": endpoint_poll}
 
 
@@ -2599,6 +2682,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     mem.add_memory("profile", "global", "About me", body, "1.0", "web")
                     ok = True
                 return self._send_json({"ok": bool(ok)})
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)})
+        if parsed.path == "/working":
+            if not csrf_ok(form.get("csrf", [""])[0]):
+                return self._send_json({"ok": False, "error": "CSRF"})
+            action = form.get("action", [""])[0]
+            rid = (form.get("id", [""])[0] or "").strip()
+            try:
+                if action == "promote":
+                    res = mem.promote_memory(rid)
+                    if res is None:
+                        return self._send_json({"ok": False, "error": "not found"})
+                    if res is False:
+                        return self._send_json({"ok": False, "error": "not a working note"})
+                    return self._send_json({"ok": True})
+                if action == "dismiss":
+                    rel = mem.supersede_memory(rid, "", "dismissed working note")
+                    return self._send_json({"ok": rel is not None})
+                return self._send_json({"ok": False, "error": "unknown action"})
             except Exception as e:
                 return self._send_json({"ok": False, "error": str(e)})
         if parsed.path == "/settings":

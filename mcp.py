@@ -74,35 +74,48 @@ def t_search(a):
         ids = [r["id"] for r in by.values() if ql in (mem.record_summary(r) + " " + r.get("body", "")).lower()]
         mode = "substring"
     scope, typ, limit = a.get("scope"), a.get("type"), int(a.get("limit") or 10)
-    hits = []
-    for i in ids:
-        r = by.get(i)
-        if not r or (scope and r["meta"].get("scope") != scope) or (typ and r["meta"].get("type") != typ):
-            continue
-        hits.append(r)
-        if len(hits) >= limit:
-            break
+    matched = [by[i] for i in ids
+               if i in by and by[i]["meta"].get("status", "active") != "working"  # scratch notes aren't recall
+               and (not scope or by[i]["meta"].get("scope") == scope)
+               and (not typ or by[i]["meta"].get("type") == typ)]
+    hits = matched[:limit]
     if not hits:
         return f"(no matches for {q!r})"
-    return f"{len(hits)} match(es) [{mode}]:\n\n" + "\n\n".join(_fmt(r) for r in hits)
+    head = f"{len(hits)} match(es) [{mode}]"
+    if len(matched) > len(hits):   # never truncate silently — tell the caller more exist
+        head += f" — showing top {len(hits)} of {len(matched)}; pass a higher `limit` for the rest"
+    return head + ":\n\n" + "\n\n".join(_fmt(r) for r in hits)
 
 
 def t_get(a):
-    rid = (a.get("id") or "").strip()
-    r = next((x for x in mem.all_records() if x["id"] == rid), None)
-    return _fmt(r, full=True) if r else f"(no record {rid})"
+    # fragment refs: id may be "<id>", "<id>:5", "<id>:5-9" (leading @ ok); or an explicit `lines` arg
+    rid, rng = mem.parse_ref(a.get("id") or "")
+    if a.get("lines"):
+        _, rng = mem.parse_ref(f"{rid}:{a['lines']}")
+    r = mem.get_record(rid)
+    if not r:
+        return f"(no record {rid})"
+    m = r["meta"]
+    st = m.get("status", "active")
+    head = f"[{r['id']}] {m.get('type', '?')} · {m.get('scope', '?')}" + ("" if st == "active" else f" ({st})")
+    return f"{head}\n{mem.record_summary(r)}\n\n{mem.number_body(r.get('body', ''), rng)}".rstrip()
 
 
 def t_list(a):
     scope, typ = a.get("scope"), a.get("type")
     status, limit = (a.get("status") or "active"), int(a.get("limit") or 30)
-    out = [r for r in mem.all_records()
-           if (status == "all" or r["meta"].get("status", "active") == status)
-           and (not scope or r["meta"].get("scope") == scope)
-           and (not typ or r["meta"].get("type") == typ)]
-    out.sort(key=lambda r: r["meta"].get("created", ""), reverse=True)
-    out = out[:limit]
-    return (f"{len(out)} record(s):\n\n" + "\n".join(_fmt(r) for r in out)) if out else "(no records)"
+    matched = [r for r in mem.all_records()
+               if (status == "all" or r["meta"].get("status", "active") == status)
+               and (not scope or r["meta"].get("scope") == scope)
+               and (not typ or r["meta"].get("type") == typ)]
+    matched.sort(key=lambda r: r["meta"].get("created", ""), reverse=True)
+    out = matched[:limit]
+    if not out:
+        return "(no records)"
+    head = f"{len(out)} record(s)"
+    if len(matched) > len(out):   # never truncate silently — tell the caller more exist
+        head += f" — showing newest {len(out)} of {len(matched)}; pass a higher `limit` for the rest"
+    return head + ":\n\n" + "\n".join(_fmt(r) for r in out)
 
 
 def t_resume(a):
@@ -135,6 +148,34 @@ def t_add(a):
         return f"error: {e}"
 
 
+def t_note(a):
+    """Write a WORKING (scratch) note — status=working, not injected, hidden from default recall."""
+    if not WRITE_ENABLED:
+        return "error: writing is disabled (set MEM_MCP_WRITE=1 to enable)"
+    try:
+        rid = mem.add_memory((a.get("type") or "fact").strip(), (a.get("scope") or "").strip(),
+                             (a.get("summary") or "").strip(), a.get("body") or "",
+                             (a.get("confidence") or "0.85"), "mcp", status="working")
+        return f"working note {rid} — promote it with memory_promote once it earns a durable place"
+    except Exception as e:
+        return f"error: {e}"
+
+
+def t_promote(a):
+    if not WRITE_ENABLED:
+        return "error: writing is disabled (set MEM_MCP_WRITE=1 to enable)"
+    rid = (a.get("id") or "").strip()
+    try:
+        res = mem.promote_memory(rid)
+    except Exception as e:
+        return f"error: {e}"
+    if res is None:
+        return f"error: no record {rid}"
+    if res is False:
+        return f"error: {rid} is not a working note"
+    return f"promoted {rid} (working -> active)"
+
+
 TOOLS = [
     {"name": "memory_search", "fn": t_search,
      "description": "Search durable memory (hybrid keyword+semantic). Call BEFORE answering to recall "
@@ -143,13 +184,20 @@ TOOLS = [
          "query": {"type": "string"}, "scope": {"type": "string", "description": "global or project:<slug>"},
          "type": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["query"]}},
     {"name": "memory_get", "fn": t_get,
-     "description": "Get one memory record (full body) by id.",
-     "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
+     "description": "Get one memory by id, body shown with 1-based line numbers. Fragment refs: pass id "
+                    "as '<id>', '<id>:5' or '<id>:5-9' (or a separate `lines` arg like '5-9') to get only "
+                    "those lines — handy for citing a precise line of a longer memory.",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string", "description": "record id, optionally '<id>:<line>[-<line>]'"},
+         "lines": {"type": "string", "description": "optional line range, e.g. '5' or '5-9'"}},
+         "required": ["id"]}},
     {"name": "memory_list", "fn": t_list,
-     "description": "List/browse memories, newest first; filter by scope/type/status.",
+     "description": "List/browse memories, newest first; filter by scope/type/status. (status 'working' "
+                    "lists scratch notes; they are hidden from search and from status 'active'.)",
      "inputSchema": {"type": "object", "properties": {
          "scope": {"type": "string"}, "type": {"type": "string"},
-         "status": {"type": "string", "description": "active|superseded|all"}, "limit": {"type": "integer"}}}},
+         "status": {"type": "string", "description": "active|working|superseded|all"},
+         "limit": {"type": "integer"}}}},
     {"name": "memory_resume", "fn": t_resume,
      "description": "'Where was I' briefing for a scope: latest status + open todos + recent memories.",
      "inputSchema": {"type": "object", "properties": {"scope": {"type": "string"}}}},
@@ -163,6 +211,20 @@ TOOLS = [
          "type": {"type": "string"}, "scope": {"type": "string"}, "summary": {"type": "string"},
          "body": {"type": "string"}, "confidence": {"type": "string"}},
          "required": ["type", "scope", "summary", "body"]}},
+    {"name": "memory_note", "fn": t_note,
+     "description": "Jot a WORKING (scratch) note for the current task — saved with status=working: NOT "
+                    "injected at session start and hidden from default search/list, so it won't pollute "
+                    "durable recall. Use for in-progress findings you're not yet sure are durable, then "
+                    "memory_promote the ones that earn a place. Same fields as memory_add (type defaults "
+                    "to 'fact'). Review them with memory_list status='working'.",
+     "inputSchema": {"type": "object", "properties": {
+         "type": {"type": "string"}, "scope": {"type": "string"}, "summary": {"type": "string"},
+         "body": {"type": "string"}, "confidence": {"type": "string"}},
+         "required": ["scope", "summary", "body"]}},
+    {"name": "memory_promote", "fn": t_promote,
+     "description": "Promote a working note to a durable memory (status working -> active, so it starts "
+                    "being injected and searchable). Give the note's id.",
+     "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
 ]
 TOOLS_BY_NAME = {t["name"]: t for t in TOOLS}
 

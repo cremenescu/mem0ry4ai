@@ -343,10 +343,15 @@ def _rewrite_block(rec_id, new_block):
         return True
 
 
-def add_memory(rtype, scope, summary, body, confidence="1.0", source="web", redact_secrets=True):
-    """Append a fresh active record; returns its id. Redacts secrets like every write path."""
+def add_memory(rtype, scope, summary, body, confidence="1.0", source="web", redact_secrets=True,
+               status="active"):
+    """Append a fresh record; returns its id. Redacts secrets like every write path.
+    status="working" makes it a scratch note: not injected at SessionStart, hidden from default
+    search/list — until promote_memory() flips it to active."""
     if rtype not in TYPES:
         raise ValueError(f"invalid type: {rtype}")
+    if status not in ("active", "working"):
+        raise ValueError(f"invalid status for add: {status} (use 'active' or 'working')")
     body = (body or "").strip()
     if not body:
         raise ValueError("empty body")
@@ -357,7 +362,7 @@ def add_memory(rtype, scope, summary, body, confidence="1.0", source="web", reda
         summary = redact.redact(summary)[0]
     rid = gen_id()
     path = scope_file(scope)
-    rec = render_record(rid, rtype, scope, summary, body, confidence, source, now_ts(), now_ts(), "active")
+    rec = render_record(rid, rtype, scope, summary, body, confidence, source, now_ts(), now_ts(), status)
     with _locked():
         ensure_header(path, scope)
         with open(path, "a", encoding="utf-8") as f:
@@ -448,6 +453,74 @@ def supersede_memory(rec_id, by="", reason=""):
     return None
 
 
+@_locked_write
+def promote_memory(rec_id):
+    """Promote a working note to a durable memory (status working -> active). Line-level, like
+    supersede. Returns the relpath written, None if the id is not found, or False if the record
+    exists but is not a working note."""
+    for path in store_files():
+        for r in parse_file(path):
+            if r["id"] != rec_id:
+                continue
+            if r["meta"].get("status") != "working":
+                return False
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            new_block = []
+            for k in range(r["start"], r["end"] + 1):
+                line = lines[k]
+                mm = META_RE.match(line.rstrip("\n"))
+                if mm and mm.group("k") == "status":
+                    line = "- status: active\n"
+                elif mm and mm.group("k") == "updated":
+                    line = f"- updated: {now_ts()}\n"
+                new_block.append(line)
+            lines[r["start"]:r["end"] + 1] = new_block
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            return os.path.relpath(path, DATA)
+    return None
+
+
+# ----- fragment references (@id:line) -----
+
+def parse_ref(ref):
+    """Parse a fragment reference into (id, (start,end)|None). Accepts 'id', 'id:5', 'id:5-9', and a
+    leading '@'. Line numbers are 1-based, inclusive."""
+    ref = (ref or "").strip().lstrip("@")
+    rng = None
+    if ":" in ref:
+        ref, _, ln = ref.partition(":")
+        ln = ln.strip()
+        if ln:
+            a, _, b = ln.partition("-")
+            try:
+                rng = (int(a), int(b)) if b else (int(a), int(a))
+            except ValueError:
+                raise ValueError(f"invalid line range in reference: {ln!r}")
+    return ref.strip(), rng
+
+
+def get_record(rec_id):
+    """The parsed record with this id (any status), or None."""
+    return next((r for r in all_records() if r["id"] == rec_id), None)
+
+
+def number_body(body, rng=None):
+    """Body with 1-based line numbers; if rng=(start,end), only those lines. Lets a caller SEE line
+    numbers (to form an @id:line ref) and retrieve a precise fragment."""
+    blines = (body or "").rstrip("\n").split("\n")
+    if not blines:
+        return ""
+    lo, hi = (1, len(blines))
+    if rng:
+        lo, hi = max(1, rng[0]), min(len(blines), rng[1])
+    if lo > hi:
+        return f"(no such lines; record has {len(blines)})"
+    width = len(str(hi))
+    return "\n".join(f"{i:>{width}}: {blines[i - 1]}" for i in range(lo, hi + 1))
+
+
 # ----- commands -----
 
 def cmd_add(a):
@@ -477,15 +550,16 @@ def cmd_add(a):
     if not a.no_dup_check and os.environ.get("MEM_DUP_CHECK", "1") != "0":
         dup_warn = find_duplicates(a.type, summary, body, files)
     rid = gen_id()
+    status = "working" if getattr(a, "working", False) else "active"
     rec = render_record(rid, a.type, a.scope, summary, body,
-                        a.confidence, a.source, now_ts(), now_ts(), "active",
-                        priority="critical" if a.critical else None, files=files)
+                        a.confidence, a.source, now_ts(), now_ts(), status,
+                        priority="critical" if a.critical and status == "active" else None, files=files)
     with _locked():
         ensure_header(path, a.scope)
         with open(path, "a", encoding="utf-8") as f:
             f.write("\n" + rec)
-    crit = "  [CRITICAL]" if a.critical else ""
-    print(f"added {rid}  [{a.type} · {a.scope}]{crit}  -> {os.path.relpath(path, DATA)}")
+    tag = "  [working]" if status == "working" else ("  [CRITICAL]" if a.critical else "")
+    print(f"added {rid}  [{a.type} · {a.scope}]{tag}  -> {os.path.relpath(path, DATA)}")
     sys.stdout.flush()   # so the stdout 'added' line lands before the stderr warning below
     if dup_warn:
         print("note: a very similar memory of this type already exists — supersede instead of duplicating?",
@@ -676,7 +750,8 @@ def cmd_search(a):
     if ids is not None:
         by_id = {r["id"]: r for r in all_records()}
         hits = [by_id[i] for i in ids
-                if i in by_id and _match_filters(by_id[i], a.scope, a.type, "all", since, until)]
+                if i in by_id and by_id[i]["meta"].get("status") != "working"  # scratch notes aren't recall
+                and _match_filters(by_id[i], a.scope, a.type, "all", since, until)]
         _print_mode(mode, len(hits))
         _print_hits(hits)
         return
@@ -696,7 +771,8 @@ def cmd_search(a):
     for path in (cand_files or store_files()):
         for r in parse_file(path):
             blob = f"{r['title']}\n{r['body']}\n{r['meta'].get('scope','')}".lower()
-            if ql in blob and _match_filters(r, a.scope, a.type, "all", since, until):
+            if ql in blob and r["meta"].get("status") != "working" \
+                    and _match_filters(r, a.scope, a.type, "all", since, until):
                 hits.append(r)
     _print_mode("substring", len(hits))
     _print_hits(hits)
@@ -894,6 +970,31 @@ def cmd_supersede(a):
     extra = f" (replaced by {a.by})" if a.by else ""
     extra += f" — {a.reason}" if getattr(a, "reason", None) else ""
     print(f"superseded {a.id}{extra}  in {rel}")
+
+
+def cmd_promote(a):
+    rec = get_record(a.id)
+    if not rec:
+        sys.exit(f"id not found: {a.id}")
+    st = rec["meta"].get("status", "active")
+    if st != "working":
+        sys.exit(f"{a.id} is '{st}', not a working note — nothing to promote")
+    rel = promote_memory(a.id)
+    print(f"promoted {a.id} (working -> active)  in {rel}")
+
+
+def cmd_get(a):
+    rid, rng = parse_ref(a.ref)
+    rec = get_record(rid)
+    if not rec:
+        sys.exit(f"no record {rid}")
+    m = rec["meta"]
+    st = m.get("status", "active")
+    suffix = "" if st == "active" else f" ({st})"
+    print(f"[{rec['id']}] {m.get('type', '?')} · {m.get('scope', '?')}{suffix}")
+    print(record_summary(rec))
+    print()
+    print(number_body(rec.get("body", ""), rng))
 
 
 @_locked_write
@@ -1189,6 +1290,9 @@ def main():
                     help="skip the semantic warning about a similar existing memory")
     pa.add_argument("--critical", action="store_true",
                     help="critical action rule: ALWAYS injected, first, regardless of the budget")
+    pa.add_argument("--working", action="store_true",
+                    help="scratch note: status=working — NOT injected, hidden from default search/list "
+                         "until `mem.py promote <id>`")
     pa.set_defaults(func=cmd_add)
 
     pl = sub.add_parser("list", help="list memories")
@@ -1215,6 +1319,14 @@ def main():
     pp.add_argument("--by", help="id of the record that replaces it")
     pp.add_argument("--reason", help="why it is no longer valid (kept for the audit trail)")
     pp.set_defaults(func=cmd_supersede)
+
+    ppr = sub.add_parser("promote", help="promote a working note to a durable memory (working -> active)")
+    ppr.add_argument("id")
+    ppr.set_defaults(func=cmd_promote)
+
+    pg = sub.add_parser("get", help="show one memory, body line-numbered; ref 'id', 'id:5' or 'id:5-9'")
+    pg.add_argument("ref", help="record id, optionally with a line range: <id>[:<line>[-<line>]] (@ ok)")
+    pg.set_defaults(func=cmd_get)
 
     pr = sub.add_parser("propose", help="queue a candidate for human review (NOT written to the store)")
     pr.add_argument("--type", required=True, help=f"one of: {', '.join(TYPES)}")
