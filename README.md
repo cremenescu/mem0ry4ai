@@ -98,6 +98,14 @@ knows to search before answering and how to save — **without touching your `CL
 *want* a pointer there, add one line yourself (optional): `Memory: use the mem0ry4ai MCP tools; see
 MEM0RY4AI.md`.
 
+**Push for hook-less agents.** For agents that have no SessionStart hook (Gemini/Antigravity, Cursor, …)
+the `instructions` also carry your **global essentials — the user profile and every critical rule —
+straight from the store**, so the must-haves are present before the model's first turn, not left to a
+tool call (the same guarantee the Claude Code hook gives). Project context stays a `memory_resume` /
+`memory_search` pull (at `initialize` the server doesn't yet know the project). Claude Code already gets
+these from its hook, so the push is skipped there — **but you can still add the MCP to Claude Code** for
+the pull tools (fragment refs, working memory, fine-grained search) alongside the hook.
+
 `memory_add` (write) is **on by default**; set `MEM_MCP_WRITE=0` to make the server read-only. With
 several agents writing to one store, have them `memory_search` before `memory_add` to avoid
 duplicates (writes are serialized by a file lock and secret-redacted regardless).

@@ -36,15 +36,57 @@ def _version():
         return "dev"
 
 
-def _instructions():
-    """The canonical agent guidance (MEM0RY4AI.md), surfaced to the LLM via the initialize result."""
+def _essentials():
+    """Render the GLOBAL non-negotiables — the user profile + every critical rule — straight from the
+    store, to PUSH them in the MCP `instructions`. This is the equivalent, for hook-less agents, of what
+    the Claude Code SessionStart hook injects: the must-haves are present before the model's first turn,
+    instead of relying on it to call a tool. Global only — at initialize the server doesn't yet know the
+    project (roots arrive after init), so project context stays a memory_resume/memory_search pull."""
+    try:
+        recs = [r for r in mem.all_records() if r["meta"].get("status", "active") == "active"]
+    except Exception:
+        return ""
+    profile = sorted((r for r in recs if r["meta"].get("type") == "profile"
+                      and r["meta"].get("scope") == "global"),
+                     key=lambda r: r["meta"].get("created", ""), reverse=True)[:1]
+    critical = sorted((r for r in recs if r["meta"].get("priority") == "critical"),
+                      key=lambda r: (r["meta"].get("scope", "") != "global", r["meta"].get("created", "")))
+    if not profile and not critical:
+        return ""
+    parts = []
+    if profile:
+        parts.append("## About this user\n" + (profile[0].get("body") or "").strip())
+    if critical:
+        rules = []
+        for r in critical:
+            body = (r.get("body") or "").strip()
+            rules.append(f"- **{mem.record_summary(r)}**"
+                         + ("\n  " + body.replace("\n", "\n  ") if body else ""))
+        parts.append("## Critical rules — follow in every task\n" + "\n".join(rules))
+    return "\n\n".join(parts)
+
+
+def _instructions(client=""):
+    """Agent guidance (MEM0RY4AI.md) + the user's global essentials, surfaced via the initialize result.
+
+    The essentials (profile + critical rules) are pushed for hook-less clients. Claude Code already gets
+    them from its SessionStart hook, so we skip them there to avoid double-injecting the same rules."""
     try:
         with open(os.path.join(HERE, "MEM0RY4AI.md"), encoding="utf-8") as f:
-            return f.read()
+            base = f.read()
     except OSError:
-        return ("mem0ry4ai durable memory. Call memory_search to recall gotchas/decisions/facts/"
+        base = ("mem0ry4ai durable memory. Call memory_search to recall gotchas/decisions/facts/"
                 "preferences BEFORE answering; memory_get to load a record by id; memory_resume for "
                 "a 'where was I' briefing. Save durable knowledge with memory_add (if enabled).")
+    if "claude" in (client or "").lower():   # Claude Code's SessionStart hook already pushes these
+        return base
+    ess = _essentials()
+    if not ess:
+        return base
+    return (base + "\n\n---\n\n# Already recalled for you — the user's profile & standing rules\n"
+            "(Follow these; don't re-derive them. They were pushed at connect so you start informed.)\n\n"
+            + ess + "\n\nThis is the GLOBAL slice. For the project you're working in, call `memory_resume` "
+            "(scope `project:<the project folder name>`) at the start, and `memory_search` as you go.")
 
 
 # ---------- record -> text ----------
@@ -243,12 +285,13 @@ def handle(msg):
         return None
     if method == "initialize":
         client_ver = params.get("protocolVersion")
+        client = (params.get("clientInfo") or {}).get("name", "")
         return _result(mid, {
             # echo the client's version if we support it, else advertise our newest
             "protocolVersion": client_ver if client_ver in SUPPORTED_VERSIONS else PROTOCOL_VERSION,
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "mem0ry4ai", "version": _version()},
-            "instructions": _instructions()})
+            "instructions": _instructions(client)})
     if method == "ping":
         return _result(mid, {})
     if method == "tools/list":
