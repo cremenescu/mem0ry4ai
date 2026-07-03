@@ -26,7 +26,7 @@ PATTERNS = [
     ("AWS_KEY", re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")),
     ("PRIVATE_KEY", re.compile(
         r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]+?-----END [A-Z ]*PRIVATE KEY-----")),
-    ("PASSWORD", re.compile(r"(?:password|passwd|pwd)\s*[:=]\s*['\"][^'\"]{4,}['\"]", re.I)),
+    ("PASSWORD", re.compile(r"(?:password|passwd|pwd)\s*[:=]\s*(?:['\"][^'\"]{4,}['\"]|[^\s'\"]{4,})", re.I)),
     ("GITHUB_TOKEN", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),
     ("OPENAI_KEY", re.compile(r"\bsk-[A-Za-z0-9]{32,}\b")),
     ("SLACK_TOKEN", re.compile(r"\bxox[bpras]-[A-Za-z0-9-]{10,}\b")),

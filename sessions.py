@@ -165,6 +165,8 @@ def build_index(data_dir, rebuild=False):
             n_sessions += 1
             n_msgs += len(msgs)
         con.commit()
+    except sqlite3.OperationalError:   # index locked by a concurrent builder — caller treats None as unavailable
+        return None
     finally:
         con.close()
     try:

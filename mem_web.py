@@ -44,12 +44,10 @@ def _load_or_make_csrf():
     tok = secrets.token_hex(16)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
+        # create owner-only in one step — no open()+chmod window where the token is world-readable
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(tok)
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
     except OSError:
         pass
     return tok
@@ -678,7 +676,7 @@ def supersede_chain(rec_id):
     back, cur = [], rec_id
     while True:
         prev = next((r["id"] for r in all_recs if r["meta"].get("superseded-by", "") == cur), None)
-        if not prev:
+        if not prev or prev in back or prev == rec_id:   # stop on a cyclic superseded-by edge (else infinite loop)
             break
         back.append(prev)
         cur = prev

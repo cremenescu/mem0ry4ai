@@ -370,10 +370,13 @@ def add_memory(rtype, scope, summary, body, confidence="1.0", source="web", reda
     return rid
 
 
+@_locked_write
 def update_memory(rec_id, rtype=None, scope=None, summary=None, body=None, confidence=None,
                   redact_secrets=True):
     """Edit a record's type/scope/summary/body/confidence in place, preserving all other meta.
-    Redacts secrets in any field being changed — like add_memory, so no write path bypasses it."""
+    Redacts secrets in any field being changed — like add_memory, so no write path bypasses it.
+    Locked across the whole read-modify-write (lock is reentrant, so the inner _rewrite_block is a
+    no-op) so a concurrent writer can't slip a change in between the read and the rewrite (lost update)."""
     path, lines, r = _find_record_lines(rec_id)
     if not path:
         return False
@@ -658,7 +661,7 @@ def index_stale():
 def build_index():
     """(Re)build the FTS5 index from markdown. Returns False if FTS5 is unavailable."""
     idx = index_path()
-    tmp = idx + ".build"
+    tmp = idx + ".build." + str(os.getpid())   # per-process temp: concurrent builders don't collide
     os.makedirs(os.path.dirname(idx), exist_ok=True)   # fresh/empty store: store/ may not exist yet
     if os.path.exists(tmp):
         os.remove(tmp)
@@ -809,7 +812,9 @@ def embed_index(force=False):
     if not llm.embedder_up():
         return None
     os.makedirs(os.path.dirname(embed_path()), exist_ok=True)   # fresh/empty store: store/ may not exist yet
-    con = sqlite3.connect(embed_path())
+    # autocommit (isolation_level=None): each row is its own short write, so we don't hold one write
+    # transaction open across the per-record Ollama HTTP calls and block a concurrent embed run.
+    con = sqlite3.connect(embed_path(), isolation_level=None)
     con.execute("CREATE TABLE IF NOT EXISTS emb (id TEXT PRIMARY KEY, hash TEXT, vec BLOB)")
     have = {row[0]: row[1] for row in con.execute("SELECT id, hash FROM emb")}
     recs = [r for r in all_records() if r["meta"].get("status", "active") == "active"]
