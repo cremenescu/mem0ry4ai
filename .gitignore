@@ -1,6 +1,7 @@
 # Derived index (regenerable from store/*.md) — never versioned
 store/.index.db*
 store/.embed.db*
+store/.sessions.db*
 
 # Raw episodic staging (captured by hooks, pre-consolidation)
 staging/
