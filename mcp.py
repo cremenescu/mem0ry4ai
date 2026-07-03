@@ -182,9 +182,14 @@ def t_add(a):
     if not WRITE_ENABLED:
         return "error: writing is disabled (set MEM_MCP_WRITE=1 to enable)"
     try:
+        summary, body = (a.get("summary") or "").strip(), a.get("body") or ""
         rid = mem.add_memory((a.get("type") or "").strip(), (a.get("scope") or "").strip(),
-                             (a.get("summary") or "").strip(), a.get("body") or "",
-                             (a.get("confidence") or "0.85"), "mcp")
+                             summary, body, (a.get("confidence") or "0.85"), "mcp")
+        inj = mem.redact.scan_injection(summary + "\n" + body)
+        if inj:   # this memory will be re-injected into context every session — flag it back to the caller
+            return (f"saved {rid} — WARNING: it contains prompt-injection-like phrasing ({', '.join(inj)}). "
+                    "Since memories are injected into context every session, double-check it is legitimate; "
+                    "supersede it if not.")
         return f"saved {rid}"
     except Exception as e:
         return f"error: {e}"
@@ -216,6 +221,28 @@ def t_promote(a):
     if res is False:
         return f"error: {rid} is not a working note"
     return f"promoted {rid} (working -> active)"
+
+
+def t_session_search(a):
+    """Search PAST CONVERSATIONS (raw transcripts), NOT the distilled memory store."""
+    q = (a.get("query") or "").strip()
+    if not q:
+        return "error: query required"
+    import sessions
+    try:
+        hits = sessions.search(q, mem.DATA, project=a.get("project"), limit=int(a.get("limit") or 15))
+    except Exception as e:
+        return f"error: {e}"
+    if hits is None:
+        return "error: FTS5 unavailable — cannot search past sessions"
+    if not hits:
+        return f"(no past messages match {q!r})"
+    lines = [f"{len(hits)} message(s) from past conversations (raw transcript, not summarized):", ""]
+    for h in hits:
+        lines.append(f"[{h['ts'][:16].replace('T', ' ')}] {h['project'] or '?'} · {h['role']} "
+                     f"({h['session_id'][:8]})")
+        lines.append(f"  {h['snippet']}")
+    return "\n".join(lines)
 
 
 TOOLS = [
@@ -267,6 +294,15 @@ TOOLS = [
      "description": "Promote a working note to a durable memory (status working -> active, so it starts "
                     "being injected and searchable). Give the note's id.",
      "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
+    {"name": "session_search", "fn": t_session_search,
+     "description": "Search PAST CONVERSATION TRANSCRIPTS (the raw messages of earlier sessions), NOT the "
+                    "distilled memory store — use this to recall 'what did we actually discuss/decide weeks "
+                    "ago?' when memory_search (curated knowledge) comes up short. Returns real message "
+                    "snippets, newest-relevant first, at zero LLM cost. Optional `project` = the "
+                    "working-directory folder name to narrow to one project.",
+     "inputSchema": {"type": "object", "properties": {
+         "query": {"type": "string"}, "project": {"type": "string"},
+         "limit": {"type": "integer"}}, "required": ["query"]}},
 ]
 TOOLS_BY_NAME = {t["name"]: t for t in TOOLS}
 

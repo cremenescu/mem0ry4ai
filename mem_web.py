@@ -2808,6 +2808,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not ok:
                 return self._send_json({"ok": False, "error": t("Operation failed")})
             resp = {"ok": True, "action": action, "id": rid}
+            if action in ("add", "edit"):   # same injection flag the CLI/MCP write paths surface
+                inj = mem.redact.scan_injection(form.get("summary", [""])[0] + "\n" + form.get("body", [""])[0])
+                if inj:
+                    resp["warning"] = ("Prompt-injection-like phrasing (" + ", ".join(inj)
+                                       + "). Memories are injected into context — double-check it is legitimate.")
             if action in ("add", "edit", "supersede", "rescope"):
                 rec = next((r for r in mem.all_records() if r["id"] == rid), None)
                 if rec:

@@ -122,7 +122,8 @@ def auto_commit_store(reason="end of session"):
             if not os.path.exists(gi):
                 with open(gi, "w", encoding="utf-8") as f:
                     # derived dbs (FTS index + embeddings) are regenerable + churn on every checkpoint
-                    f.write("staging/\nstore/.index.db*\nstore/.embed.db*\n.web-server.pid\n.web-server.log\n")
+                    f.write("staging/\nstore/.index.db*\nstore/.embed.db*\nstore/.sessions.db*\n"
+                            ".web-server.pid\n.web-server.log\n")
         # -uall: list untracked files individually ('?? store/' alone would yield an empty label)
         r = subprocess.run(base + ["status", "--porcelain", "-uall", "store"],
                            capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW)

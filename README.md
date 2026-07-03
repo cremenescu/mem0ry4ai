@@ -80,9 +80,10 @@ Desktop** — **pulls** it on demand from a built-in **MCP server**:
 python3 mem.py mcp        # stdio JSON-RPC server (Windows: py mem.py mcp)
 ```
 
-It exposes seven tools — `memory_search`, `memory_get`, `memory_list`, `memory_resume`, `memory_add`,
-plus `memory_note` / `memory_promote` (working memory, below). It's a hand-rolled stdio server — still
-**pure stdlib, no SDK, no `pip install`**. Register it:
+It exposes eight tools — `memory_search`, `memory_get`, `memory_list`, `memory_resume`, `memory_add`,
+`memory_note` / `memory_promote` (working memory, below), and `session_search` (past-conversation
+search, below). It's a hand-rolled stdio server — still **pure stdlib, no SDK, no `pip install`**.
+Register it:
 
 ```bash
 # Claude Code
@@ -114,6 +115,12 @@ duplicates (writes are serialized by a file lock and secret-redacted regardless)
 start and hidden from search/recall, so tentative findings during a long task don't pollute the durable
 store. `memory_promote` flips the keepers to a durable memory; review them on the web UI's **Working
 notes** page or with `mem.py list --status working`. (CLI: `mem.py add --working`, `mem.py promote <id>`.)
+
+**Session search.** `memory_search` searches the *distilled* store; `session_search` searches your **raw
+conversation history** instead — "what did we actually discuss weeks ago?" — over a derived FTS5 index of
+the Claude Code transcripts, at zero LLM cost. Secrets are stripped before indexing and the index is
+owner-only, gitignored, and never leaves your machine. (CLI: `mem.py sessions "<query>"`, `--list`,
+`--reindex`, `--project <name>`.)
 
 **Fragment refs.** `memory_get` shows a record's body with 1-based line numbers; pass `"<id>:5-9"` (or a
 `lines` arg) to retrieve just those lines and cite a precise line of a longer memory. (CLI: `mem.py get

@@ -12,11 +12,15 @@ markdown+git store. Reach it through these MCP tools:
 - **`memory_list(scope?, type?, status?)`** — browse, newest first.
 - **`memory_resume(scope?)`** — a "where was I?" briefing for a scope: latest status + open todos +
   recent knowledge. Good at the start of work on a project.
-- **`memory_add(type, scope, summary, body)`** — save durable knowledge (secrets are auto-redacted).
+- **`memory_add(type, scope, summary, body)`** — save durable knowledge (secrets are auto-redacted;
+  prompt-injection-like phrasing is flagged back to you, since a memory is re-injected every session).
   May be disabled (`MEM_MCP_WRITE=0`).
 - **`memory_note(scope, summary, body, type?)`** — jot a **working** (scratch) note: NOT injected, hidden
   from default search/list, so it won't pollute recall. For findings you're not yet sure are durable.
 - **`memory_promote(id)`** — promote a working note to a durable memory (working → active).
+- **`session_search(query, project?, limit?)`** — search **past conversation transcripts** (the raw
+  messages of earlier sessions), NOT the curated store. Use when `memory_search` comes up short and you
+  need "what did we actually discuss/decide weeks ago?". Returns real message snippets at zero LLM cost.
 
 There is **no edit and no delete tool** — to revise a record's content, *supersede* the old one and *add*
 a new one (`mem.py supersede <id> --by <new>`, or the web UI `/memories`). The store is markdown+git, so

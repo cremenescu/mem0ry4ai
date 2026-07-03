@@ -549,6 +549,7 @@ def cmd_add(a):
     dup_warn = []
     if not a.no_dup_check and os.environ.get("MEM_DUP_CHECK", "1") != "0":
         dup_warn = find_duplicates(a.type, summary, body, files)
+    inj = redact.scan_injection(summary + "\n" + body)
     rid = gen_id()
     status = "working" if getattr(a, "working", False) else "active"
     rec = render_record(rid, a.type, a.scope, summary, body,
@@ -568,6 +569,11 @@ def cmd_add(a):
             print(f"   {round(s * 100):>3}%  {did}  [{a.type}·{dscope}]  {dsum[:78]}", file=sys.stderr)
         print(f"   -> mem.py supersede <old-id> --by {rid}   (mute: --no-dup-check / MEM_DUP_CHECK=0)",
               file=sys.stderr)
+    if inj:
+        print(f"warning: this memory contains prompt-injection-like phrasing ({', '.join(inj)}).",
+              file=sys.stderr)
+        print("   it gets injected into the agent's context every session — review it if it wasn't "
+              "written deliberately (mute: MEM_SCAN_INJECTION=0).", file=sys.stderr)
 
 
 def _match_filters(rec, scope, rtype, status, since=None, until=None):
@@ -1212,24 +1218,67 @@ def cmd_mcp(a):
 
 
 def cmd_audit(a):
-    """Report records containing secret-like patterns. Never modifies anything."""
+    """Report records with secret-like OR prompt-injection-like patterns. Never modifies anything."""
     recs = [r for r in all_records() if _match_filters(r, a.scope, None, "all")]
     findings = []
     for r in recs:
-        labels = redact.scan(record_summary(r) + "\n" + r["body"])
-        if labels:
-            findings.append((r, labels))
+        text = record_summary(r) + "\n" + r["body"]
+        sec = redact.scan(text)
+        inj = redact.scan_injection(text)
+        if sec or inj:
+            findings.append((r, sec, inj))
     if not findings:
-        print(f"audit clean: no secret-like patterns in {len(recs)} records")
+        print(f"audit clean: no secret-like or injection-like patterns in {len(recs)} records")
         return
-    for r, labels in findings:
+    for r, sec, inj in findings:
         st = r["meta"].get("status", "active")
         flag = "" if st == "active" else f"  ({st})"
+        labels = ([f"secret:{l}" for l in sec] + [f"injection:{l}" for l in inj])
         print(f"{r['id']}  [{r['meta'].get('type','?')} · {r['meta'].get('scope','?')}]{flag}  -> {', '.join(labels)}")
         print(f"    {record_summary(r)[:100]}")
-    print(f"\n{len(findings)} of {len(recs)} records contain secret-like patterns.")
-    print("Nothing was modified — review them (edit in the web UI, or supersede + re-add redacted).")
+    n_sec = sum(1 for _, s, _ in findings if s)
+    n_inj = sum(1 for _, _, i in findings if i)
+    print(f"\n{len(findings)} of {len(recs)} records flagged "
+          f"({n_sec} secret-like, {n_inj} injection-like).")
+    print("Nothing was modified — review them (edit in the web UI, or supersede + re-add).")
     sys.exit(1)
+
+
+def cmd_sessions(a):
+    """Search PAST CONVERSATIONS (raw transcripts, zero LLM cost) — distinct from `search`, which
+    searches the distilled memory store. Backed by sessions.py (a derived FTS5 index)."""
+    import sessions
+    if a.reindex:
+        res = sessions.build_index(DATA, rebuild=True)
+        if res is None:
+            sys.exit("FTS5 unavailable — cannot index sessions")
+        print(f"indexed {res[1]} messages across {res[0]} session(s)")
+        return
+    if a.list:
+        rows = sessions.list_sessions(DATA, project=a.project, limit=a.limit)
+        if rows is None:
+            sys.exit("FTS5 unavailable — cannot list sessions")
+        if not rows:
+            print("(no captured sessions yet)")
+            return
+        for s in rows:
+            print(f"{s['start'][:10]}  {(s['project'] or '?'):22.22}  {s['nmsg']:>4} msg  [{s['session_id'][:8]}]")
+            if s["first"]:
+                print(f"    {s['first']}")
+        print(f"\n{len(rows)} session(s)")
+        return
+    if not a.query:
+        sys.exit("pass a query to search, or --list / --reindex")
+    hits = sessions.search(a.query, DATA, project=a.project, limit=a.limit)
+    if hits is None:
+        sys.exit("FTS5 unavailable — cannot search sessions")
+    if not hits:
+        print("(no past messages match)")
+        return
+    for h in hits:
+        print(f"{h['ts'][:16].replace('T', ' ')}  {h['project'] or '?'}  · {h['role']}  [{h['session_id'][:8]}]")
+        print(f"    {h['snippet']}")
+    print(f"\n{len(hits)} message(s) — raw transcript search, zero LLM cost")
 
 
 def queue_path():
@@ -1340,7 +1389,7 @@ def main():
     pr.add_argument("--no-redact", action="store_true", help="keep secret values verbatim (redacted by default)")
     pr.set_defaults(func=cmd_propose)
 
-    pu = sub.add_parser("audit", help="report secret-like patterns in the store (read-only)")
+    pu = sub.add_parser("audit", help="report secret-like or injection-like patterns in the store (read-only)")
     pu.add_argument("--scope")
     pu.set_defaults(func=cmd_audit)
 
@@ -1387,6 +1436,15 @@ def main():
 
     pmc = sub.add_parser("mcp", help="start the MCP server (stdio) — pull memory from any MCP runtime (Claude/Gemini/Cursor/OpenCode)")
     pmc.set_defaults(func=cmd_mcp)
+
+    pss = sub.add_parser("sessions",
+                         help="full-text search your PAST CONVERSATIONS (raw transcripts; zero LLM cost)")
+    pss.add_argument("query", nargs="?", help="text to find in past conversation messages")
+    pss.add_argument("--project", help="limit to sessions whose working-dir folder has this name")
+    pss.add_argument("--limit", type=int, default=20)
+    pss.add_argument("--list", action="store_true", help="list recent sessions instead of searching")
+    pss.add_argument("--reindex", action="store_true", help="rebuild the session index from scratch")
+    pss.set_defaults(func=cmd_sessions)
 
     px = sub.add_parser("reindex", help="rebuild the derived FTS5 index (+ embeddings if Ollama is up)")
     px.set_defaults(func=cmd_reindex)
