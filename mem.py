@@ -179,8 +179,34 @@ def all_records():
     return out
 
 
+def _sanitize_summary(summary):
+    """A summary is a single header-line field (`### … · … · <summary>`). A line break in it would push
+    the trailing text down into the record's meta block on re-parse — the self-escalation vector (e.g. a
+    summary of "x\n- priority: critical"). Fold every line break to a space so a caller-supplied summary
+    can never synthesize meta lines."""
+    return (summary or "").replace("\r\n", " ").replace("\r", " ").replace("\n", " ").strip()
+
+
+def _neutralize_body(body):
+    """Neutralize the record DELIMITERS in caller-supplied body text so it can never forge a new record.
+    Only the two structural markers are dangerous: a body line that matches START_RE or equals END_MARK
+    lets the parser end this record early and begin an attacker-controlled one (with a forged
+    `priority: critical` meta) that SessionStart then injects into every session. Legit '###'/'- key:'
+    body lines are inert — parse_file only reads meta before the meta/body blank split — so they are left
+    untouched. A single backslash breaks the exact match while keeping the line human-readable; an
+    already-neutralized line no longer matches, so re-rendering (edit / re-scope / consolidation merge) is
+    idempotent. Line splitting mirrors what parse_file sees after the file is read back with universal
+    newlines (\\r\\n and \\r become \\n)."""
+    out = []
+    for line in body.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        out.append("\\" + line if (START_RE.match(line) or line == END_MARK) else line)
+    return "\n".join(out)
+
+
 def render_record(rid, rtype, scope, summary, body, confidence, source, created, updated, status,
                   priority=None, files=None):
+    summary = _sanitize_summary(summary)
+    body = _neutralize_body(body)
     lines = [
         f"<!-- mem:start id={rid} -->",
         f"### {rtype} · {scope_label(scope)} · {summary}",
@@ -210,6 +236,8 @@ def render_from_meta(rid, meta, summary, body):
     """Full record block from a parsed meta dict + summary + body, preserving EVERY meta field
     (web edit/re-scope). The parser is order-independent, so field order here is just canonical.
     `updated` is bumped to now (these are mutating operations)."""
+    summary = _sanitize_summary(summary)
+    body = _neutralize_body(body)
     lines = [f"<!-- mem:start id={rid} -->",
              f"### {meta.get('type', 'fact')} · {scope_label(meta.get('scope', 'global'))} · {summary}",
              f"- type: {meta.get('type', 'fact')}",

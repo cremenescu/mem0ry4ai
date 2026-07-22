@@ -101,6 +101,20 @@ def ensure_web_server():
         pass
 
 
+def _body_lines(body_str, indent=""):
+    """Render a memory body into injected-context lines, neutralizing any line that would open a
+    markdown heading (leading '#', with 0-3 leading spaces per CommonMark) so a memory body can't
+    forge one of the hook's own trust-bearing sections — e.g. a normal memory (creatable by a
+    low-trust agent write) whose body contains '## Critical rules (mandatory in every task)'. A
+    backslash makes the '#' literal, so the line is no longer an ATX heading. The 2-space indent
+    some callers use does NOT neutralize a heading on its own (CommonMark allows up to 3 leading
+    spaces), which is why this escape is applied even to indented bodies."""
+    out = []
+    for bl in body_str.splitlines():
+        out.append(indent + ("\\" + bl if bl.lstrip().startswith("#") else bl))
+    return out
+
+
 def main():
     _load_local_env()   # honor web-UI-saved settings (port, injection knobs) before anything reads them
     ensure_web_server()
@@ -192,10 +206,7 @@ def main():
     if profile:
         lines.append("## About me")
         for r in profile:
-            for bl in (r.get("body") or "").strip().splitlines():
-                # neutralize a leading '#' so the profile body can't forge a section heading
-                # (e.g. a fake '## Critical rules') ahead of the real, trust-bearing sections below
-                lines.append("\\" + bl if bl.lstrip().startswith("#") else bl)
+            lines.extend(_body_lines((r.get("body") or "").strip()))
         lines.append("")
 
     # --- Critical rules: ALWAYS first, with bodies, outside the budget ---
@@ -204,8 +215,7 @@ def main():
         for r in sorted(critical, key=lambda r: (r["scope"] != "global", rec_date(r))):
             sl = "global" if r["scope"] == "global" else r["scope"].split(":", 1)[1]
             lines.append(f"- **[{r['type']} · {sl}]** {r['summary']}")
-            for bl in (r.get("body") or "").strip().splitlines():
-                lines.append(f"  {bl}")
+            lines.extend(_body_lines((r.get("body") or "").strip(), "  "))
         lines.append("")
 
     size = lambda: len(("\n".join(lines)).encode("utf-8"))
@@ -225,7 +235,7 @@ def main():
         for r in rs:
             item = [f"- **[{r['type']}]** {r['summary']}{todo_note(r)}"]
             if include_bodies:
-                item += [f"  {bl}" for bl in (r.get("body") or "").strip().splitlines()]
+                item += _body_lines((r.get("body") or "").strip(), "  ")
             lines.extend(item)
             if size() > cap - 120:   # reserve for the omission note
                 del lines[len(lines) - len(item):]
