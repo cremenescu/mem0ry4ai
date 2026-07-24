@@ -11,14 +11,17 @@
 
 ## Testing
 <!-- How did you verify this works? -->
-- [ ] Built Release locally (`./build/package.sh test`)
-- [ ] Manually verified on macOS ___
-- [ ] No regressions in: tab switching, copy-on-select, paste-on-right-click, auto-scroll on drag, cursor blink, shell integration
+- [ ] `python3 tests/test_guards.py` passes
+- [ ] `python3 tests/test_guards.py --canary` passes (required if you touched a rule it covers,
+      and add your new guard to `MUTATIONS` if you added one)
+- [ ] `tools/bench_recall.py` run before/after, if this touches ranking or the embedder
+- [ ] Exercised the surfaces this affects: CLI / SessionStart hook / MCP server / web UI
+- [ ] Tested against a scratch store (`MEM_DATA_DIR=/tmp/...`), not a real one
 
 ## License
 - [ ] My contribution is licensed under GPL-2.0-or-later (matches the project).
-- [ ] New `.swift` files include the SPDX header.
-- [ ] Any imported third-party code is GPL-compatible and noted in `NOTICE`.
+- [ ] New files include the SPDX header (`# SPDX-License-Identifier: GPL-2.0-or-later`).
+- [ ] Any imported third-party code is GPL-compatible and credited in the README.
 
-## Screenshots / output
-<!-- If UI changes or visible behavior changed. -->
+## Output
+<!-- Paste the relevant command output. If the web UI changed, a screenshot. -->

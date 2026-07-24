@@ -371,7 +371,7 @@ def resources_list():
 def resource_templates_list():
     return {"resourceTemplates": [
         {"uriTemplate": "mem0ry4ai://resume/{scope}", "name": "Where was I (one scope)",
-         "description": "Briefing for a single scope, e.g. mem0ry4ai://resume/project:vyos-webui "
+         "description": "Briefing for a single scope, e.g. mem0ry4ai://resume/project:my-app "
                         "or mem0ry4ai://resume/global.",
          "mimeType": "text/markdown"},
     ]}
@@ -394,11 +394,11 @@ PROMPTS = [
     {"name": "recall",
      "description": "Pull the memories relevant to a question into the conversation before answering.",
      "arguments": [{"name": "query", "description": "what to recall about", "required": True},
-                   {"name": "scope", "description": "limit to one scope, e.g. project:vyos-webui",
+                   {"name": "scope", "description": "limit to one scope, e.g. project:my-app",
                     "required": False}]},
     {"name": "resume",
      "description": "Load the 'where was I' briefing for a project: status, open todos, recent knowledge.",
-     "arguments": [{"name": "scope", "description": "e.g. project:vyos-webui (default: all)",
+     "arguments": [{"name": "scope", "description": "e.g. project:my-app (default: all)",
                     "required": False}]},
 ]
 
