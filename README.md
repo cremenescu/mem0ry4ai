@@ -6,6 +6,10 @@
 
 Persistent, local-first memory for coding agents — built for [Claude Code](https://claude.com/claude-code), usable from **any MCP client** (Gemini CLI, Cursor, OpenCode…).
 
+![mem0ry4ai demo: saving a gotcha, recalling it later from a plain-language question, then resuming a project](demo/demo.gif)
+
+*One session saves a lesson; a later one asks in plain words and gets it back — then picks the project up where it stopped. (Reproduce it: `./demo/seed-demo-store.sh && ./demo/demo.sh`.)*
+
 **Works with:** Claude Code · Gemini CLI · Cursor · OpenCode — any MCP client.
 **Landing page:** [cremenescu.ro/en/mem0ry4ai](https://cremenescu.ro/en/mem0ry4ai/)
 
