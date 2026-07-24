@@ -85,6 +85,42 @@ PROJ_DIR = os.path.join(STORE, "projects")
 
 TYPES = ["gotcha", "fact", "decision", "command", "procedural", "preference", "todo", "status", "profile"]
 
+
+def access_db_path():
+    return os.path.join(STORE, ".access.db")
+
+
+def log_access(rec_id, action):
+    """Log an access event (inject, get, search) for a record ID to .access.db."""
+    path = access_db_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        con = sqlite3.connect(path, timeout=5.0)
+        try:
+            con.execute("CREATE TABLE IF NOT EXISTS access (id TEXT, action TEXT, ts TEXT)")
+            con.execute("INSERT INTO access (id, action, ts) VALUES (?, ?, ?)", (rec_id, action, now_ts()))
+            con.commit()
+        finally:
+            con.close()
+    except Exception:
+        pass
+
+
+def get_last_accessed():
+    """Return a dict of {rec_id: last_accessed_timestamp_str}."""
+    path = access_db_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        con = sqlite3.connect(path, timeout=5.0)
+        try:
+            rows = con.execute("SELECT id, MAX(ts) FROM access GROUP BY id").fetchall()
+        finally:
+            con.close()
+        return {row[0]: row[1] for row in rows}
+    except Exception:
+        return {}
+
 START_RE = re.compile(r"^<!-- mem:start id=(?P<id>[0-9a-z-]+) -->\s*$")
 END_MARK = "<!-- mem:end -->"
 META_RE = re.compile(r"^- (?P<k>[a-z-]+):\s*(?P<v>.*)$")
@@ -99,6 +135,31 @@ def gen_id():
     stamp = datetime.date.today().strftime("%Y%m%d")
     h = hashlib.sha1(os.urandom(8)).hexdigest()[:6]
     return f"{stamp}-{h}"
+
+
+def session_marker_path():
+    return os.path.join(DATA, "staging", ".session")
+
+
+def current_session():
+    """Best-effort current session id, to stamp `session:` provenance on writes (which conversation
+    produced a memory). MEM_SESSION_ID wins; else the marker the SessionStart hook writes, but only if
+    recent — a stale marker from a session that ended long ago must not claim new writes. None if unknown."""
+    import json
+    sid = (os.environ.get("MEM_SESSION_ID") or "").strip()
+    if sid:
+        return sid
+    try:
+        with open(session_marker_path(), encoding="utf-8") as f:
+            m = json.load(f)
+        ts = (m.get("ts") or "")[:19]
+        if ts:
+            age = (datetime.datetime.now() - datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")).total_seconds()
+            if age > 16 * 3600:   # marker older than 16h -> the session is almost certainly over
+                return None
+        return (m.get("session_id") or "").strip() or None
+    except Exception:
+        return None
 
 
 def scope_file(scope):
@@ -182,8 +243,8 @@ def all_records():
 def _sanitize_summary(summary):
     """A summary is a single header-line field (`### … · … · <summary>`). A line break in it would push
     the trailing text down into the record's meta block on re-parse — the self-escalation vector (e.g. a
-    summary of "x\n- priority: critical"). Fold every line break to a space so a caller-supplied summary
-    can never synthesize meta lines."""
+    summary of "x\n- priority: critical\n- protected: true"). Fold every line break to a space so a
+    caller-supplied summary can never synthesize meta lines."""
     return (summary or "").replace("\r\n", " ").replace("\r", " ").replace("\n", " ").strip()
 
 
@@ -191,12 +252,12 @@ def _neutralize_body(body):
     """Neutralize the record DELIMITERS in caller-supplied body text so it can never forge a new record.
     Only the two structural markers are dangerous: a body line that matches START_RE or equals END_MARK
     lets the parser end this record early and begin an attacker-controlled one (with a forged
-    `priority: critical` meta) that SessionStart then injects into every session. Legit '###'/'- key:'
-    body lines are inert — parse_file only reads meta before the meta/body blank split — so they are left
-    untouched. A single backslash breaks the exact match while keeping the line human-readable; an
-    already-neutralized line no longer matches, so re-rendering (edit / re-scope / consolidation merge) is
-    idempotent. Line splitting mirrors what parse_file sees after the file is read back with universal
-    newlines (\\r\\n and \\r become \\n)."""
+    `priority: critical` / `protected: true` meta) that SessionStart then injects into every session.
+    Legit '###'/'- key:' body lines are inert — parse_file only reads meta before the meta/body blank
+    split — so they are left untouched. A single backslash breaks the exact match while keeping the line
+    human-readable; an already-neutralized line no longer matches, so re-rendering (edit / re-scope /
+    consolidation merge) is idempotent. Line splitting mirrors what parse_file sees after the file is read
+    back with universal newlines (\\r\\n and \\r become \\n)."""
     out = []
     for line in body.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         out.append("\\" + line if (START_RE.match(line) or line == END_MARK) else line)
@@ -204,7 +265,7 @@ def _neutralize_body(body):
 
 
 def render_record(rid, rtype, scope, summary, body, confidence, source, created, updated, status,
-                  priority=None, files=None):
+                  priority=None, files=None, protected=None, session=None):
     summary = _sanitize_summary(summary)
     body = _neutralize_body(body)
     lines = [
@@ -220,6 +281,10 @@ def render_record(rid, rtype, scope, summary, body, confidence, source, created,
         lines.append(f"- priority: {priority}")
     if files:
         lines.append(f"- files: {files}")
+    if protected:
+        lines.append(f"- protected: {protected}")
+    if session:
+        lines.append(f"- session: {session}")
     lines += [
         f"- confidence: {confidence}",
         f"- source: {source}",
@@ -245,7 +310,7 @@ def render_from_meta(rid, meta, summary, body):
              f"- created: {meta.get('created') or now_ts()}",
              f"- updated: {now_ts()}",
              f"- status: {meta.get('status', 'active')}"]
-    for k in ("superseded-by", "invalidated", "invalid-reason", "priority", "files", "related-to", "blocked-by"):
+    for k in ("superseded-by", "invalidated", "invalid-reason", "priority", "files", "related-to", "blocked-by", "protected", "session"):
         if meta.get(k):
             lines.append(f"- {k}: {meta[k]}")
     lines += [f"- confidence: {meta.get('confidence', '1.0')}",
@@ -372,7 +437,7 @@ def _rewrite_block(rec_id, new_block):
 
 
 def add_memory(rtype, scope, summary, body, confidence="1.0", source="web", redact_secrets=True,
-               status="active"):
+               status="active", protected=None, session=None):
     """Append a fresh record; returns its id. Redacts secrets like every write path.
     status="working" makes it a scratch note: not injected at SessionStart, hidden from default
     search/list — until promote_memory() flips it to active."""
@@ -390,7 +455,10 @@ def add_memory(rtype, scope, summary, body, confidence="1.0", source="web", reda
         summary = redact.redact(summary)[0]
     rid = gen_id()
     path = scope_file(scope)
-    rec = render_record(rid, rtype, scope, summary, body, confidence, source, now_ts(), now_ts(), status)
+    if session is None:
+        session = current_session()   # provenance: stamp the session that produced this memory
+    rec = render_record(rid, rtype, scope, summary, body, confidence, source, now_ts(), now_ts(), status,
+                        protected=protected, session=session)
     with _locked():
         ensure_header(path, scope)
         with open(path, "a", encoding="utf-8") as f:
@@ -400,7 +468,7 @@ def add_memory(rtype, scope, summary, body, confidence="1.0", source="web", reda
 
 @_locked_write
 def update_memory(rec_id, rtype=None, scope=None, summary=None, body=None, confidence=None,
-                  redact_secrets=True):
+                  redact_secrets=True, bypass_protected=False):
     """Edit a record's type/scope/summary/body/confidence in place, preserving all other meta.
     Redacts secrets in any field being changed — like add_memory, so no write path bypasses it.
     Locked across the whole read-modify-write (lock is reentrant, so the inner _rewrite_block is a
@@ -408,6 +476,9 @@ def update_memory(rec_id, rtype=None, scope=None, summary=None, body=None, confi
     path, lines, r = _find_record_lines(rec_id)
     if not path:
         return False
+    if not bypass_protected:
+        if r["meta"].get("protected", "").strip().lower() in ("true", "yes", "1"):
+            raise ValueError(f"cannot update protected memory: {rec_id}")
     m = dict(r["meta"])
     if rtype is not None:
         m["type"] = rtype
@@ -444,18 +515,28 @@ def rescope_memory(rec_id, new_scope):
     return True
 
 
-def delete_memory(rec_id):
+@_locked_write
+def delete_memory(rec_id, bypass_protected=False):
+    path, lines, r = _find_record_lines(rec_id)
+    if not path:
+        return False
+    if not bypass_protected:
+        if r["meta"].get("protected", "").strip().lower() in ("true", "yes", "1"):
+            raise ValueError(f"cannot delete protected memory: {rec_id}")
     return _rewrite_block(rec_id, None)
 
 
 @_locked_write
-def supersede_memory(rec_id, by="", reason=""):
+def supersede_memory(rec_id, by="", reason="", bypass_protected=False):
     """Mark a record superseded (bi-temporal: keep it + WHEN it stopped being valid + WHY).
     Line-level so all other meta is untouched. Returns the relpath written, or None if not found."""
     for path in store_files():
         for r in parse_file(path):
             if r["id"] != rec_id:
                 continue
+            if not bypass_protected:
+                if r["meta"].get("protected", "").strip().lower() in ("true", "yes", "1"):
+                    raise ValueError(f"cannot supersede protected memory: {rec_id}")
             with open(path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
             inserts = []
@@ -585,7 +666,9 @@ def cmd_add(a):
     status = "working" if getattr(a, "working", False) else "active"
     rec = render_record(rid, a.type, a.scope, summary, body,
                         a.confidence, a.source, now_ts(), now_ts(), status,
-                        priority="critical" if a.critical and status == "active" else None, files=files)
+                        priority="critical" if a.critical and status == "active" else None, files=files,
+                        protected="true" if getattr(a, "protected", False) else None,
+                        session=(getattr(a, "session", None) or current_session()))
     with _locked():
         ensure_header(path, a.scope)
         with open(path, "a", encoding="utf-8") as f:
@@ -645,16 +728,19 @@ def cmd_list(a):
     recs = [r for r in all_records() if _match_filters(r, a.scope, a.type, a.status, since, until)]
     if getattr(a, "json", False):
         import json
+        access_times = get_last_accessed()
         out = [{
             "id": r["id"], "type": r["meta"].get("type"), "scope": r["meta"].get("scope"),
             "summary": record_summary(r), "status": r["meta"].get("status", "active"),
             "confidence": r["meta"].get("confidence"), "source": r["meta"].get("source"),
             "created": r["meta"].get("created"), "updated": r["meta"].get("updated"),
+            "last_accessed": access_times.get(r["id"]),
             "superseded_by": r["meta"].get("superseded-by"),
             "priority": r["meta"].get("priority"),
             "related_to": r["meta"].get("related-to"),
             "blocked_by": r["meta"].get("blocked-by"),
             "files": r["meta"].get("files"),
+            "session": r["meta"].get("session"),
             "invalidated": r["meta"].get("invalidated"),
             "invalid_reason": r["meta"].get("invalid-reason"),
             "body": r["body"],
@@ -989,7 +1075,7 @@ def hybrid_search(query, allow_semantic=True):
 def cmd_embed(a):
     r = embed_index(force=a.force)
     if r is None:
-        print("embedder unavailable — start Ollama and `ollama pull all-minilm` (or set MEM_EMBED_MODEL).")
+        print("embedder unavailable — start Ollama and `ollama pull bge-m3` (or set MEM_EMBED_MODEL).")
         sys.exit(1)
     print(f"embeddings up to date: {r[0]} (re)embedded of {r[1]} active -> {os.path.relpath(embed_path(), DATA)}")
 
@@ -1357,6 +1443,229 @@ def cmd_propose(a):
     print(f"proposed {rec['qid']}  [{a.type} · {a.scope}]  -> review queue (web UI)")
 
 
+def cmd_log_access(a):
+    if not a.ids:
+        sys.exit("error: missing --ids (comma-separated list of IDs)")
+    ids = [i.strip() for i in a.ids.split(",") if i.strip()]
+    action = a.action or "inject"
+    for rid in ids:
+        log_access(rid, action)
+    print(f"logged {action} access for {len(ids)} record(s)")
+
+
+def find_all_clusters(allow_semantic=True):
+    """Group all active memories of the same type into connected duplicate components.
+
+    Returns a list of list of records: [[recA1, recA2, ...], [recB1, ...]].
+    """
+    recs = all_records()
+    active_recs = [r for r in recs if r["meta"].get("status", "active") == "active"]
+    
+    # Group by type
+    by_type = {}
+    for r in active_recs:
+        by_type.setdefault(r["meta"].get("type"), []).append(r)
+        
+    # Similarity logic
+    emb = load_embeddings() if allow_semantic else {}
+    thresh = float(os.environ.get("MEM_DUP_THRESHOLD", "0.62"))
+    jac_thresh = float(os.environ.get("MEM_DUP_JACCARD", "0.5"))
+    
+    def get_tokens(s):
+        return set(re.findall(r"\w+", (s or "").lower()))
+
+    # Build adjacency graph
+    clusters = []
+    
+    for rtype, type_recs in by_type.items():
+        if len(type_recs) < 2:
+            continue
+            
+        # Build adjacency list
+        adj = {r["id"]: [] for r in type_recs}
+        
+        # Cache token sets for Jaccard — over summary AND body, so two memories with near-identical
+        # bodies but different one-line summaries are still caught (summary-only missed those).
+        tokens = {r["id"]: get_tokens(record_summary(r) + " " + (r.get("body") or "")) for r in type_recs}
+        
+        for i in range(len(type_recs)):
+            for j in range(i + 1, len(type_recs)):
+                r1 = type_recs[i]
+                r2 = type_recs[j]
+                
+                # Check semantic first if embeddings exist
+                has_edge = False
+                v1, v2 = emb.get(r1["id"]), emb.get(r2["id"])
+                if v1 and v2:
+                    s = _cosine(v1, v2)
+                    if s >= thresh:
+                        has_edge = True
+                
+                if not has_edge:
+                    # Jaccard fallback
+                    t1, t2 = tokens[r1["id"]], tokens[r2["id"]]
+                    if t1 and t2:
+                        union_len = len(t1 | t2)
+                        if union_len > 0 and len(t1 & t2) / union_len >= jac_thresh:
+                            has_edge = True
+                            
+                if has_edge:
+                    adj[r1["id"]].append(r2["id"])
+                    adj[r2["id"]].append(r1["id"])
+                    
+        # Find connected components (DFS)
+        visited = set()
+        for r in type_recs:
+            rid = r["id"]
+            if rid not in visited:
+                component = []
+                queue = [rid]
+                visited.add(rid)
+                while queue:
+                    curr = queue.pop(0)
+                    component.append(curr)
+                    for neighbor in adj[curr]:
+                        if neighbor not in visited:
+                            visited.add(neighbor)
+                            queue.append(neighbor)
+                if len(component) > 1:
+                    # Map IDs back to record dicts
+                    rec_map = {rc["id"]: rc for rc in type_recs}
+                    clusters.append([rec_map[cid] for cid in component])
+                    
+    return clusters
+
+
+def llm_merge(records):
+    import llm
+    # Format memories text
+    memories_text = ""
+    for r in records:
+        memories_text += f"ID: {r['id']}\nType: {r['meta'].get('type')}\nSummary: {record_summary(r)}\nBody:\n{r['body']}\n\n"
+    
+    schema = {
+        "type": "object",
+        "properties": {
+            "summary": {"type": "string"},
+            "body": {"type": "string"}
+        },
+        "required": ["summary", "body"]
+    }
+    system = (
+        "You are a memory consolidator. Combine the given similar memories into a single, cohesive, "
+        "and clear memory record. The output must be an optimal merge of all information. "
+        "Preserve all technical facts, configurations, and commands. "
+        "Ensure the body is concise (1-4 sentences) and the summary is a short, single sentence. "
+        "Respond with valid JSON matching the schema."
+    )
+    prompt = f"Combine these memories:\n\n{memories_text}"
+    try:
+        res = llm.generate_json(system, prompt, schema)
+        if res and "summary" in res and "body" in res:
+            return res["summary"].strip(), res["body"].strip()
+    except Exception:
+        pass
+    return None
+
+
+def cmd_consolidate(a):
+    # Check if git tree is clean
+    res = subprocess.run(["git", "status", "--porcelain"], cwd=DATA, capture_output=True, text=True, creationflags=_NO_WINDOW)
+    if res.returncode != 0:
+        sys.exit("error: not a git repository or git not available")
+    if res.stdout.strip():
+        sys.exit("error: Git working tree has uncommitted changes. Please commit or stash them first.")
+        
+    clusters = find_all_clusters(allow_semantic=not getattr(a, "no_semantic", False))
+    if not clusters:
+        print("No duplicate memories found. Memory store is clean!")
+        return
+        
+    print(f"Found {len(clusters)} duplicate cluster(s) to consolidate.")
+    
+    # Save original branch
+    res = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=DATA, capture_output=True, text=True, creationflags=_NO_WINDOW)
+    original_branch = res.stdout.strip()
+    
+    # Switch to mem-consolidation
+    res = subprocess.run(["git", "checkout", "-B", "mem-consolidation"], cwd=DATA, capture_output=True, text=True, creationflags=_NO_WINDOW)
+    if res.returncode != 0:
+        sys.exit(f"error: failed to switch to mem-consolidation branch: {res.stderr}")
+        
+    # Process consolidation
+    access_times = get_last_accessed()
+    
+    def master_key(r):
+        prio = 0 if r["meta"].get("priority") == "critical" else 1
+        try:
+            conf = -float(r["meta"].get("confidence", "1.0"))
+        except ValueError:
+            conf = -1.0
+        last_acc = access_times.get(r["id"], "")
+        created = r["meta"].get("created", "")
+        return (prio, conf, -len(last_acc), last_acc, created)
+        
+    llm_enabled = a.llm
+    if llm_enabled:
+        import llm
+        if not llm.ollama_up():
+            print("Warning: Ollama is down. Falling back to deterministic merge.")
+            llm_enabled = False
+            
+    consolidated_count = 0
+    
+    try:
+        for cluster in clusters:
+            # Sort to find master
+            cluster.sort(key=master_key)
+            master = cluster[0]
+            duplicates = cluster[1:]
+            
+            summary, body = None, None
+            if llm_enabled:
+                merged = llm_merge(cluster)
+                if merged:
+                    summary, body = merged
+            
+            if not summary or not body:
+                # Deterministic fallback
+                summary = record_summary(master)
+                body = master["body"]
+                seen = {body.lower()}
+                for r in duplicates:
+                    b = r["body"].strip()
+                    if b.lower() not in seen:
+                        body += "\n\n" + b
+                        seen.add(b.lower())
+            
+            # Update master (bypass protection)
+            update_memory(master["id"], summary=summary, body=body, bypass_protected=True)
+            
+            # Supersede duplicates (bypass protection)
+            for r in duplicates:
+                supersede_memory(r["id"], by=master["id"], reason=f"consolidated into {master['id']}", bypass_protected=True)
+                
+            consolidated_count += 1
+            print(f"Consolidated: {master['id']} (kept) <- " + ", ".join(r["id"] for r in duplicates) + " (superseded)")
+            
+        # Commit changes. -c commit.gpgsign=false: consolidate runs git non-interactively (no TTY), so if
+        # the user has commit.gpgsign=true globally and no local override, a signing commit would hang
+        # forever waiting for a GPG passphrase — force-skip signing for this internal checkpoint commit.
+        subprocess.run(["git", "-c", "commit.gpgsign=false", "commit", "-am", f"Propose memory consolidation ({consolidated_count} clusters)"], cwd=DATA, capture_output=True, text=True, creationflags=_NO_WINDOW)
+        
+    finally:
+        # Restore original branch
+        subprocess.run(["git", "checkout", original_branch], cwd=DATA, capture_output=True, text=True, creationflags=_NO_WINDOW)
+        
+    print("\nConsolidation branch 'mem-consolidation' successfully updated!")
+    print("To review the proposed changes:")
+    print("  git diff HEAD..mem-consolidation")
+    print("To accept and merge:")
+    print("  git merge mem-consolidation")
+    print("To discard:")
+    print("  git branch -D mem-consolidation")
+
+
 def main():
     p = argparse.ArgumentParser(prog="mem.py", description="mem0ry4ai — local memory (markdown+git)")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1377,6 +1686,9 @@ def main():
     pa.add_argument("--working", action="store_true",
                     help="scratch note: status=working — NOT injected, hidden from default search/list "
                          "until `mem.py promote <id>`")
+    pa.add_argument("--protected", action="store_true",
+                    help="protect this memory from being modified or deleted by agents")
+    pa.add_argument("--session", help="session id provenance (default: auto-stamped from the current session)")
     pa.set_defaults(func=cmd_add)
 
     pl = sub.add_parser("list", help="list memories")
@@ -1485,6 +1797,16 @@ def main():
     pe = sub.add_parser("embed", help="build/refresh the optional semantic index (needs Ollama + embed model)")
     pe.add_argument("--force", action="store_true", help="re-embed everything, not just changed records")
     pe.set_defaults(func=cmd_embed)
+
+    pla = sub.add_parser("log-access", help="log an access event for a memory")
+    pla.add_argument("--ids", required=True, help="comma-separated list of memory IDs")
+    pla.add_argument("--action", default="inject", help="inject|get|search")
+    pla.set_defaults(func=cmd_log_access)
+
+    pco = sub.add_parser("consolidate", help="consolidate duplicate memories on a branch")
+    pco.add_argument("--llm", action="store_true", help="use local LLM for merging instead of deterministic fallback")
+    pco.add_argument("--no-semantic", action="store_true", help="use lexical matching instead of embeddings")
+    pco.set_defaults(func=cmd_consolidate)
 
     a = p.parse_args()
     try:

@@ -123,6 +123,11 @@ def t_search(a):
     hits = matched[:limit]
     if not hits:
         return f"(no matches for {q!r})"
+    
+    # Log access for search hits
+    for r in hits:
+        mem.log_access(r["id"], "search")
+        
     head = f"{len(hits)} match(es) [{mode}]"
     if len(matched) > len(hits):   # never truncate silently — tell the caller more exist
         head += f" — showing top {len(hits)} of {len(matched)}; pass a higher `limit` for the rest"
@@ -137,6 +142,10 @@ def t_get(a):
     r = mem.get_record(rid)
     if not r:
         return f"(no record {rid})"
+    
+    # Log access for get
+    mem.log_access(r["id"], "get")
+    
     m = r["meta"]
     st = m.get("status", "active")
     head = f"[{r['id']}] {m.get('type', '?')} · {m.get('scope', '?')}" + ("" if st == "active" else f" ({st})")

@@ -27,6 +27,32 @@ PLUGIN_MODE = f"{os.sep}.claude{os.sep}plugins{os.sep}" in PROJ + os.sep
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 
+def _data_dir():
+    """Same resolution as mem.py (MEM_DATA_DIR > plugin dir > code dir) — call AFTER _load_local_env."""
+    d = os.environ.get("MEM_DATA_DIR")
+    if d:
+        return os.path.abspath(os.path.expanduser(d))
+    if PLUGIN_MODE:
+        return os.path.join(os.path.expanduser("~"), ".mem0ry4ai")
+    return PROJ
+
+
+def _write_session_marker(session_id, cwd):
+    """Record the current session id (staging/.session) so mem.py write paths can stamp `session:`
+    provenance on memories written this session. Best-effort; never fail session start over it."""
+    if not session_id:
+        return
+    import datetime
+    try:
+        staging = os.path.join(_data_dir(), "staging")
+        os.makedirs(staging, exist_ok=True)
+        with open(os.path.join(staging, ".session"), "w", encoding="utf-8") as f:
+            json.dump({"session_id": session_id, "cwd": cwd,
+                       "ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, f)
+    except Exception:
+        pass
+
+
 def _load_local_env():
     """Ingest .mem-local.env (KEY=VALUE, next to the code) into os.environ via setdefault, so settings
     saved in the web UI — e.g. MEM_INJECT_BUDGET and the injection knobs below — are honored by THIS
@@ -123,6 +149,7 @@ def main():
     except Exception:
         return 0
     cwd = data.get("cwd") or os.getcwd()
+    _write_session_marker(data.get("session_id"), cwd)   # provenance marker for `session:` on writes
     is_root = os.path.normpath(cwd) == os.path.normpath(REPO_ROOT)
     slug = os.path.basename(os.path.normpath(cwd))
     MEM_CMD = mem_cmd(cwd)
@@ -146,12 +173,15 @@ def main():
     if not recs:
         return 0
 
+    injected_ids = set()
+
     # BUDGET: the injection trims ITSELF below the harness threshold. If the output grew
     # unbounded, the harness would persist it to a file and show the model only a small
     # preview — an UNCONTROLLED cut that can silently drop a rule the agent must follow.
     # Here the cut is ours: critical rules always in, the rest fills the budget, anything
     # omitted is announced explicitly with the command that retrieves it.
     BUDGET = _int_env("MEM_INJECT_BUDGET", "8000")
+    RECORD_CAP = _int_env("MEM_INJECT_RECORD_CAP", "1000")
 
     # the user profile ("About me"): the single most-recent GLOBAL profile, matching the web editor.
     # Injected first, on its own, outside the budget; excluded from the lists below so it never doubles.
@@ -159,7 +189,11 @@ def main():
     profile = sorted((r for r in recs if r.get("type") == "profile" and r.get("scope") == "global"),
                      key=lambda r: r.get("created") or "", reverse=True)[:1]
     prof_ids = {r["id"] for r in profile}
+    injected_ids.update(prof_ids)
+
     critical = [r for r in recs if r["id"] not in prof_ids and r.get("priority") == "critical"]
+    injected_ids.update(r["id"] for r in critical)
+
     normal = [r for r in recs if r["id"] not in prof_ids and r.get("priority") != "critical"]
 
     by_scope = {}
@@ -188,9 +222,13 @@ def main():
     def rec_date(r):
         return (r.get("created") or "")[:19]
 
+    def access_date(r):
+        return (r.get("last_accessed") or r.get("created") or "")[:19]
+
     def ordered(rs):
-        # status/todo first, then the rest; within the same type, most recent first (stable double sort)
+        # Sort by access recency first, then creation date desc, then type priority
         rs = sorted(rs, key=rec_date, reverse=True)
+        rs = sorted(rs, key=access_date, reverse=True)
         return sorted(rs, key=lambda r: TYPE_PRIO.get(r["type"], 9))
 
     where = "all projects" if is_root else f"project `{slug}`"
@@ -215,7 +253,10 @@ def main():
         for r in sorted(critical, key=lambda r: (r["scope"] != "global", rec_date(r))):
             sl = "global" if r["scope"] == "global" else r["scope"].split(":", 1)[1]
             lines.append(f"- **[{r['type']} · {sl}]** {r['summary']}")
-            lines.extend(_body_lines((r.get("body") or "").strip(), "  "))
+            body_str = (r.get("body") or "").strip()
+            if len(body_str) > RECORD_CAP:
+                body_str = body_str[:RECORD_CAP] + f"\n  (body truncated by per-record cap of {RECORD_CAP} chars — search/get to read full)"
+            lines.extend(_body_lines(body_str, "  "))
         lines.append("")
 
     size = lambda: len(("\n".join(lines)).encode("utf-8"))
@@ -235,12 +276,16 @@ def main():
         for r in rs:
             item = [f"- **[{r['type']}]** {r['summary']}{todo_note(r)}"]
             if include_bodies:
-                item += _body_lines((r.get("body") or "").strip(), "  ")
+                body_str = (r.get("body") or "").strip()
+                if len(body_str) > RECORD_CAP:
+                    body_str = body_str[:RECORD_CAP] + f"\n  (body truncated by per-record cap of {RECORD_CAP} chars — search/get to read full)"
+                item += _body_lines(body_str, "  ")
             lines.extend(item)
             if size() > cap - 120:   # reserve for the omission note
                 del lines[len(lines) - len(item):]
                 break
             shown += 1
+            injected_ids.add(r["id"])
         if shown < len(rs):
             if shown == 0:
                 del lines[head_at:]
@@ -275,6 +320,9 @@ def main():
             if rest:
                 block.append(f"- (+{len(rest)} more — `{hint_cmd}`)")
             block.append("")
+            # Add to set of injected IDs
+            for r in shown:
+                injected_ids.add(r["id"])
         lines.extend(block)
         if size() > BUDGET - 120:   # reserve for the omission note
             # the full block does not fit: try the one-line index, still budget-tracked
@@ -310,6 +358,17 @@ def main():
         emit_budgeted("Global", ordered(by_scope.get("global", [])), f"{MEM_CMD} list --scope global")
 
     sys.stdout.write("\n".join(lines).rstrip() + "\n")
+
+    # Log injected memory IDs asynchronously (fire-and-forget background process)
+    if injected_ids:
+        try:
+            subprocess.Popen(
+                [sys.executable, MEM, "log-access", "--ids", ",".join(injected_ids), "--action", "inject"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=_NO_WINDOW
+            )
+        except Exception:
+            pass
+
     return 0
 
 

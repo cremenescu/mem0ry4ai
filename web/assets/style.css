@@ -83,7 +83,7 @@ table.mem { width: 100%; border-collapse: collapse; background: var(--panel);
   border-bottom: 2px solid var(--line); letter-spacing: .03em; }
 .mem tr:last-child td { border-bottom: 0; }
 .mem tbody tr:hover { background: var(--sel); }
-.mem .summary { cursor: pointer; }
+.mem td.summary { cursor: pointer; overflow-wrap: anywhere; }
 .mem .summary b { font-weight: 600; }
 .mem .meta { color: var(--muted); font-size: 12px; }
 .bodyrow td { background: var(--panel2); white-space: pre-wrap; font-size: 13.5px; }
@@ -108,7 +108,7 @@ table.mem { width: 100%; border-collapse: collapse; background: var(--panel);
 
 /* per-row Actions menu */
 .actwrap { position: relative; display: inline-block; }
-.act-toggle { cursor: pointer; padding: 4px 8px; border-radius: 6px; color: var(--muted); border: 1px solid var(--line); background: var(--panel); }
+.act-toggle { cursor: pointer; padding: 4px 8px; border-radius: 6px; color: var(--muted); border: 1px solid var(--line); background: var(--panel); white-space: nowrap; }
 .act-toggle:hover { background: var(--panel2); }
 .actmenu { position: absolute; right: 0; top: 100%; margin-top: 4px; background: var(--panel);
   border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.12);

@@ -402,7 +402,7 @@ def health_checks():
         out.append([t("FTS index"), False, t("FTS5 unavailable — search falls back to substring")])
     # embedder (optional semantic layer) — informative, never an error
     vec = embed_count()
-    emodel = os.environ.get("MEM_EMBED_MODEL", "all-minilm")
+    emodel = os.environ.get("MEM_EMBED_MODEL", "bge-m3")
     if vec == 0:
         out.append([t("Embedder (semantic)"), None, t("no vectors — optional, run mem.py embed")])
     elif _ollama_up():
@@ -499,6 +499,10 @@ def rec_extras_html(r):
     if files:
         out += ('<div class="rec-files">' + h(t("files")) + ": "
                 + " ".join(f"<code>{h(f)}</code>" for f in files) + "</div>")
+    sess = (r["meta"].get("session") or "").strip()
+    if sess:   # provenance: which conversation produced this memory (search it via `mem.py sessions`)
+        out += ('<div class="rec-files" title="' + h(t("Session that produced this memory")) + '">session: '
+                + f"<code>{h(sess[:8])}</code></div>")
     inv = r["meta"].get("invalidated", "")
     if inv:
         reason = r["meta"].get("invalid-reason", "")
@@ -691,7 +695,7 @@ def supersede_chain(rec_id):
 
 def search_light(mode, q):
     """[state 'on'|'off', label, tooltip] for the search box — green when the local LLM is in play."""
-    model = os.environ.get("MEM_EMBED_MODEL", "all-minilm")
+    model = os.environ.get("MEM_EMBED_MODEL", "bge-m3")
     if q == "":
         if embedder_live():
             return ("on", t("Semantic on") + " · " + model, t("Local LLM is running — searches use keyword + semantic."))
@@ -1313,6 +1317,9 @@ SETTINGS_GROUPS = [
     ("ollama", "Embeddings & local LLM (Ollama)",
      "Optional semantic features. These bind when a module loads, so they apply after a server restart."),
     ("safety", "Safety", "Security-relevant toggles — change with care."),
+    ("maintenance", "Scheduled maintenance",
+     "The local launchd hygiene job (mem_maintenance.py). These apply on its NEXT run; whether the job "
+     "is installed, its interval, and status are managed from the CLI (mem_maintenance.py install/status)."),
 ]
 
 
@@ -1352,6 +1359,11 @@ SETTINGS = [
        "and the rest to the per-project index. Raise it to favour global knowledge, lower it to favour the "
        "'where was I in each project' index. Default 0.4 (40%).",
        min=0.1, max=0.8, step=0.05, apply="next session"),
+    _S("MEM_INJECT_RECORD_CAP", "injection", "int", "1000", "Per-record body cap",
+       "Maximum characters of any single memory's body injected at session start; a longer body is "
+       "truncated with a marker pointing to search/get for the full text. Stops one huge memory from "
+       "eating the whole injection budget. Applies to critical rules and full-body memories. Default 1000.",
+       min=200, max=8000, step=100, apply="next session"),
 
     _S("MEM_RECENCY_WEIGHT", "search", "float", "1.5", "Recency weight",
        "In keyword (bm25) search, a recency bonus is folded into each hit's score so newer memories edge "
@@ -1401,11 +1413,11 @@ SETTINGS = [
        "The Ollama chat model for the optional offline memory-extraction fallback (unused when extraction "
        "runs through Claude directly). Must be a model you have pulled in Ollama. Applies after a restart. "
        "Default qwen2.5:7b-instruct.", advanced=True, apply="restart web server"),
-    _S("MEM_EMBED_MODEL", "ollama", "string", "all-minilm", "Embedding model",
+    _S("MEM_EMBED_MODEL", "ollama", "string", "bge-m3", "Embedding model",
        "The Ollama model that turns memories into vectors for semantic search and link suggestions. "
        "Changing it invalidates the existing vectors, so re-run `mem.py embed --force` afterwards — plain "
        "`mem.py embed` is incremental (keyed on a record's text, not the model) and skips unchanged "
-       "records, silently keeping the old-model vectors. Applies after a restart. Default all-minilm.",
+       "records, silently keeping the old-model vectors. Applies after a restart. Default bge-m3.",
        advanced=True, apply="restart web server"),
     _S("MEM_EMBED_MAXCHARS", "ollama", "int", "1200", "Embedding max chars",
        "How many characters of a memory are sent to the embedder. Small embedding models have a short "
@@ -1425,6 +1437,17 @@ SETTINGS = [
        apply="next MCP session",
        warn="With several agents writing to one store, leave this OFF on the extra agents to avoid "
             "duplicate records."),
+
+    _S("MEM_MAINT_WORKING_DAYS", "maintenance", "int", "30", "Stale working-note age (days)",
+       "The scheduled maintenance job treats a working (scratch) note older than this many days as stale — "
+       "it reports them, and prunes them only if the toggle below is on. Default 30.",
+       min=1, max=365, apply="next maintenance run"),
+    _S("MEM_MAINT_PRUNE_WORKING", "maintenance", "bool", "0", "Prune stale working notes",
+       "When on, the maintenance job DELETES stale working notes (older than the age above) instead of only "
+       "reporting them. Deletions are logged and git-reversible, but the job acts unattended. Default off "
+       "(report only).", apply="next maintenance run",
+       warn="When on, the scheduled job removes old scratch notes on its own — git keeps the history, but "
+            "nothing prompts you first."),
 ]
 _FALSEY = ("0", "false", "no", "off", "")
 
@@ -2612,7 +2635,41 @@ class Handler(http.server.BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         self._set_lang(urllib.parse.parse_qs(parsed.query))
         length = int(self.headers.get("Content-Length", 0) or 0)
-        form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8")) if length else {}
+        raw = self.rfile.read(length) if length else b""
+        if parsed.path == "/api/propose":
+            # Uniform machine-ingestion channel (Vercel eve 'channels' idea, kept local): any agent or
+            # script POSTs JSON to PROPOSE a memory. It goes to the human REVIEW QUEUE, never straight to
+            # the store — so it's the same low-trust path as the LLM extractor. CSRF-exempt on purpose
+            # (a script has no browser token); safe because the server binds 127.0.0.1 and this only
+            # touches the reviewed queue. Body redacted + injection-scanned before it lands.
+            try:
+                d = json.loads(raw or b"{}")
+            except Exception:
+                return self._send_json({"ok": False, "error": "invalid JSON body"})
+            typ = (d.get("type") or "").strip()
+            scope = (d.get("scope") or "global").strip()
+            summary = (d.get("summary") or "").strip()
+            body = (d.get("body") or "").strip()
+            if typ not in mem.TYPES or not summary or not body:
+                return self._send_json({"ok": False, "error": f"need type in ({'|'.join(mem.TYPES)}), summary, body"})
+            if mem.redact.enabled():
+                summary = mem.redact.redact(summary)[0]
+                body = mem.redact.redact(body)[0]
+            existing = queue_load()
+            if any(r.get("status", "pending") == "pending" and r.get("type") == typ
+                   and r.get("summary") == summary and r.get("body") == body for r in existing):
+                return self._send_json({"ok": True, "qid": None, "status": "duplicate",
+                                        "note": "an identical pending proposal is already queued"})
+            inj = mem.redact.scan_injection(summary + "\n" + body)
+            rec = {"qid": mem.gen_id(), "type": typ, "scope": scope, "summary": summary, "body": body,
+                   "confidence": d.get("confidence", 0.7), "source": (d.get("source") or "http:propose"),
+                   "transcript": None, "extracted_at": mem.now_ts(), "status": "pending"}
+            if inj:
+                rec["injection"] = inj
+            queue_save(existing + [rec])
+            return self._send_json({"ok": True, "qid": rec["qid"], "status": "pending",
+                                    "review": "/queue", "injection_flag": inj or None})
+        form = urllib.parse.parse_qs(raw.decode("utf-8")) if raw else {}
         if parsed.path == "/git":
             if not csrf_ok(form.get("csrf", [""])[0]):
                 self.send_response(400)

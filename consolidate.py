@@ -139,9 +139,33 @@ def gen_qid():
     return time.strftime("%Y%m%d") + "-" + hashlib.sha1(os.urandom(8)).hexdigest()[:6]
 
 
+def existing_queue_keys():
+    """Idempotency keys already in the queue — so re-processing a session (e.g. a crash between
+    queueing and mark_processed) doesn't append duplicate candidates."""
+    keys = set()
+    p = queue_path()
+    if os.path.isfile(p):
+        for line in open(p, encoding="utf-8"):
+            try:
+                r = json.loads(line)
+            except Exception:
+                continue
+            if r.get("key"):
+                keys.add(r["key"])
+    return keys
+
+
+def cand_key(source_session, ctype, summary, body):
+    """Deterministic content key for a candidate (idempotency): same session+content -> same key."""
+    return hashlib.sha1(f"{source_session}|{ctype}|{summary}|{body}".encode("utf-8")).hexdigest()[:16]
+
+
 def queue_candidates(cands, source_session, transcript):
-    """Write candidates to the review queue (NOT the store — they await human approval)."""
+    """Write candidates to the review queue (NOT the store — they await human approval).
+    Idempotent: a candidate whose content key is already queued is skipped, so re-running over the
+    same session after an interruption can't duplicate it."""
     os.makedirs(os.path.dirname(queue_path()), exist_ok=True)
+    seen = existing_queue_keys()
     n = 0
     with open(queue_path(), "a", encoding="utf-8") as f:
         for c in cands:
@@ -152,8 +176,14 @@ def queue_candidates(cands, source_session, transcript):
             if redact.enabled():
                 summary, _ = redact.redact(summary)
                 body, _ = redact.redact(body)
+            if not summary or not body:
+                continue
+            key = cand_key(source_session, c.get("type"), summary, body)
+            if key in seen:        # already queued (re-processed session) — idempotent skip
+                continue
+            seen.add(key)
             rec = {
-                "qid": gen_qid(),
+                "qid": gen_qid(), "key": key,
                 "type": c.get("type"), "scope": c.get("scope") or "global",
                 "summary": summary,
                 "body": body,
@@ -163,8 +193,6 @@ def queue_candidates(cands, source_session, transcript):
                 "extracted_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "status": "pending",
             }
-            if not rec["summary"] or not rec["body"]:
-                continue
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             n += 1
     return n

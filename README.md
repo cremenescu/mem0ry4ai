@@ -126,6 +126,14 @@ owner-only, gitignored, and never leaves your machine. (CLI: `mem.py sessions "<
 `lines` arg) to retrieve just those lines and cite a precise line of a longer memory. (CLI: `mem.py get
 <id>:5-9`.)
 
+**Hygiene & housekeeping (v0.16).** As the store grows: `mem.py consolidate` clusters near-duplicate
+memories and writes the merge proposals to a `mem-consolidation` git branch you review with `git diff`
+(never auto-merged); `mem_maintenance.py install` schedules that plus reindex/re-embed and stale
+working-note cleanup as a local launchd job (non-destructive by default). Memories carry a `session:`
+provenance stamp (which conversation produced them) and an optional `protected:` flag that blocks
+in-place edits, and injection at session start honours a per-record body cap. Any non-MCP agent or
+script can `POST /api/propose` JSON to drop a memory into the human review queue.
+
 ## Quick start
 
 Requirements: **Python 3.9+ and git — that's it.** No PHP, no Docker, no vector database, no API

@@ -2,6 +2,7 @@
 store/.index.db*
 store/.embed.db*
 store/.sessions.db*
+store/.access.db*
 
 # Raw episodic staging (captured by hooks, pre-consolidation)
 staging/
