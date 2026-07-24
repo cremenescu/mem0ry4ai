@@ -32,7 +32,7 @@ cd mem0ry4ai
 ./mem.py search "..."             # FTS5 ranked + nudge pe recenta
 ./mem.py search "..." --since 2026-05-01
 ./mem.py audit                    # raport secrete in store (read-only, nu modifica)
-./mem.py embed                    # optional: vectori pt cautare semantica (necesita Ollama + all-minilm)
+./mem.py embed                    # optional: vectori pt cautare semantica (necesita Ollama + bge-m3)
 ./mem.py resume --scope project:x # briefing "unde am ramas": status + todo-uri ready + recente
 
 # 2. Web UI (server Python stdlib — fara PHP, fara Apache)
@@ -127,7 +127,7 @@ UI-ul apare la `http://127.0.0.1:8841/`.
   Pagina **Legaturi** arata **sugestii semantice** (cele mai apropiate perechi nelegate, confirmate
   sau respinse de tine) deasupra unui graf force-directed (SVG, fara dependinte) + lista.
 - **Cautare hibrida (optionala).** Implicit keyword-first (FTS5 + nudge pe recenta), zero dependinte.
-  Cu Ollama + un embedder mic (`all-minilm`), cautarea fuzioneaza scorul keyword cu similaritate
+  Cu Ollama + un embedder (`bge-m3`, multilingv), cautarea fuzioneaza scorul keyword cu similaritate
   cosinus pe vectori locali — „auth token expiry" gaseste „JWT TTL", si scoate la suprafata potriviri
   semantice chiar cand nimic nu prinde keyword. Embedder-ul e DOAR pentru regasire (nu decide, nu scrie
   -> nu atinge gate-ul de incredere); fara Ollama, fallback tacut la keyword. Fara bifa de tinut minte:

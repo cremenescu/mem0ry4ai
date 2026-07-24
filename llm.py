@@ -13,8 +13,11 @@ import urllib.request
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 MODEL = os.environ.get("MEM_LLM_MODEL", "qwen2.5:7b-instruct")
-# tiny embedding model (NOT a chat LLM) — used ONLY for semantic retrieval, never to decide/write.
-EMBED_MODEL = os.environ.get("MEM_EMBED_MODEL", "all-minilm")
+# multilingual embedding model (NOT a chat LLM) — used ONLY for semantic retrieval, never to decide/write.
+# Default is bge-m3: empirically it crushes all-minilm on this RO/EN store (median retrieval rank 1 vs
+# 231 on Romanian paraphrases — all-minilm is English-centric and effectively blind on Romanian).
+# Requires `ollama pull bge-m3`; falls back to keyword search if the model isn't available.
+EMBED_MODEL = os.environ.get("MEM_EMBED_MODEL", "bge-m3")
 
 
 def ollama_up():
@@ -36,8 +39,8 @@ def embed(text, timeout=30):
     text = (text or "").strip()
     if not text:
         return None
-    # small embedding models have a short context (e.g. all-minilm ~256 tokens) and return
-    # HTTP 500 on longer/denser inputs. Cap the text, and on an HTTP error retry with a shorter
+    # bge-m3 has a large context (8192 tokens), but small fallback models (e.g. all-minilm ~256 tokens)
+    # return HTTP 500 on longer/denser inputs. Cap the text, and on an HTTP error retry with a shorter
     # slice — so long memories still get a (slightly truncated) vector instead of being skipped.
     maxchars = int(os.environ.get("MEM_EMBED_MAXCHARS", "1200"))
     for cut in (maxchars, maxchars // 2, maxchars // 4):

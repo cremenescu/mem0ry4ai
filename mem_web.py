@@ -495,6 +495,13 @@ def rec_ids(r, key):
 
 def rec_extras_html(r):
     out = ""
+    tier = mem.record_tier(r)
+    if tier != "open":
+        # The whole point of a tier is that the user can see, at a glance, what an agent will never
+        # be told. A classification nobody can check is a classification nobody trusts.
+        label = {"private": t("private — never sent to a model"),
+                 "redacted": t("redacted — summary only reaches a model")}[tier]
+        out += f'<div class="rec-files"><code>{h(tier)}</code> {h(label)}</div>'
     files = rec_ids(r, "files")
     if files:
         out += ('<div class="rec-files">' + h(t("files")) + ": "

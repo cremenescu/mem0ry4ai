@@ -154,9 +154,16 @@ def main():
     slug = os.path.basename(os.path.normpath(cwd))
     MEM_CMD = mem_cmd(cwd)
 
+    # --dest agent: everything below ends up in a model's context, so it goes through mem.py's
+    # egress choke point first -- private memories never arrive here at all, and a redacted one
+    # arrives without its body. Enforced there rather than in this file, so no surface can differ.
+    # No near-duplicate suppression here on purpose — measured on a 799-record store, the pairs
+    # that clear any firing threshold are stale statuses and adjacent-but-distinct facts, not
+    # copies, and `consolidate` already proposes those for review at a lower bar. Hiding them
+    # from the injection would lose information rather than save budget. See `dedup_near`.
     try:
         out = subprocess.run(
-            [sys.executable, MEM, "list", "--status", "active", "--json"],
+            [sys.executable, MEM, "list", "--status", "active", "--json", "--dest", "agent"],
             capture_output=True, text=True, timeout=30, creationflags=_NO_WINDOW,
         )
         recs = json.loads(out.stdout or "[]")

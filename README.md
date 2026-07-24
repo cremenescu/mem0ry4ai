@@ -89,6 +89,18 @@ It exposes eight tools — `memory_search`, `memory_get`, `memory_list`, `memory
 search, below). It's a hand-rolled stdio server — still **pure stdlib, no SDK, no `pip install`**.
 Register it:
 
+It also serves **resources** and **prompts**, not only tools. A tool is a pull the *model* has to
+decide to make; a resource or a prompt is a surface the *client* drives, which is the supported way
+to get context in before the first turn:
+
+| Kind | Name | What it gives you |
+|---|---|---|
+| resource | `mem0ry4ai://essentials` | your profile + every critical rule — attach it at the start of a conversation |
+| resource | `mem0ry4ai://resume` | latest status, open todos, recent knowledge (all scopes) |
+| template | `mem0ry4ai://resume/{scope}` | the same for one project, e.g. `mem0ry4ai://resume/project:api` |
+| prompt | `recall` | pulls the memories relevant to a question into the conversation |
+| prompt | `resume` | loads the "where was I" briefing for a project |
+
 ```bash
 # Claude Code
 claude mcp add mem0ry4ai -- python3 /absolute/path/to/mem.py mcp
@@ -292,11 +304,18 @@ knowledge); with no scope, a one-line-per-project overview.
 
 ### Record fields beyond the basics
 
-Two optional fields make records sharper and history honest:
+A few optional fields make records sharper and history honest:
 
 - **`files`** — the paths a memory is about (`--files "src/auth/jwt.ts, src/auth/middleware.ts"`).
   They are indexed for search and shown as chips, so a gotcha surfaces when you grep — or work in —
   the file it concerns.
+- **`tier`** — `open` (default), `redacted` or `private`: what this memory is allowed to tell a
+  model. See [Egress tiers](#egress-tiers--what-a-memory-may-tell-a-model).
+- **`protected`** — refuse in-place edit, delete and supersede, for the handful of standing rules
+  no agent (and no stray click) should rewrite. Opt-in, and since a record is a block in a file you
+  own, unsetting it by hand is always available.
+- **`session`** — provenance: which conversation produced this memory, so "where did this claim
+  come from?" is still answerable months later. Pairs with `session_search`.
 - **Bi-temporal supersede** — superseding keeps the old record *and* stamps **when** it stopped
   being true (`invalidated`) and **why** (`invalid-reason`), separately from `created`
   (valid-from). You get the full "what did we believe, and when" history instead of a bare
@@ -335,17 +354,22 @@ available — it never *requires* a model:
 - **Ranked FTS5 + recency** — `mem.py search` ranks with SQLite bm25, then applies a small recency
   nudge (`MEM_RECENCY_WEIGHT`) so that among near-ties the fresher memory wins, without ever
   overriding a clearly stronger keyword match.
-- **Optional hybrid semantic search** — if [Ollama](https://ollama.com) is running with a small
-  embedding model (`all-minilm`, ~40 MB), search fuses keyword scores with cosine similarity over
-  locally-stored vectors, so "auth token expiry" can find a memory that says "JWT TTL" — and it
+- **Optional hybrid semantic search** — if [Ollama](https://ollama.com) is running with an embedding
+  model (`bge-m3`, ~1.2 GB), search fuses keyword scores with cosine similarity over locally-stored
+  vectors, so "auth token expiry" can find a memory that says "JWT TTL" — and it
   surfaces semantic matches even when *nothing* keyword-matches. The embedder is **retrieval-only**:
   it turns text into vectors to *compare*, it never decides what is a memory and never writes — so it
   stays clear of the trust gate. No Ollama → automatic, silent fallback to keyword-only.
   ```bash
-  ollama pull all-minilm
+  ollama pull bge-m3
   ./mem.py embed          # build/refresh vectors (incremental, by content hash) -> store/.embed.db
   ./mem.py search "auth token expiry"   # prints "# search mode: hybrid (FTS + semantic)"; --no-semantic forces keyword
   ```
+  `bge-m3` is the default because it is **multilingual**: on a mixed Romanian/English store the
+  English-centric `all-minilm` (~45 MB) was effectively blind to non-English paraphrases — median
+  retrieval rank 1 versus 231. If your memories are English-only, `MEM_EMBED_MODEL=all-minilm` is
+  40× smaller and works fine. Measure before you switch: `tools/bench_recall.py` (below) exists
+  precisely so this is a number rather than an opinion.
   No toggle to remember: the Memories page **auto-detects** the embedder and shows a status light —
   **green** = the local LLM is up, so search is keyword + semantic; **gray** = it fell back to classic
   keyword search (with the reason on hover). The dashboard health panel reports the embedder too.
@@ -404,6 +428,75 @@ ports, usernames) are not touched — only credential-shaped values are.
 For secrets the agent should be able to *use* across sessions, store a **pointer, not the
 value**: keep the secret in your OS keychain / password manager, and save a `fact` telling
 the agent where it lives and a `command` that fetches it at use time.
+
+## Egress tiers — what a memory may tell a model
+
+Redaction catches what *looks* like a secret. It cannot know that a client's name, a salary or a
+home address must not be handed to a model: nothing about those strings is suspicious. A tier is
+**stated rather than inferred**, so unlike a pattern it has no false negatives.
+
+| Tier | What reaches an agent | What you still see |
+|---|---|---|
+| `open` (default) | everything | everything |
+| `redacted` | the summary only | everything |
+| `private` | nothing — the record is absent | everything: search, `mem.py get`, the web UI |
+
+```bash
+./mem.py add --type fact --scope project:acme --tier private \
+  --summary "who signs off on the migration" --body "..."
+./mem.py tier <id> private        # reclassify an existing memory
+```
+
+One function decides — `emit_for(record, destination)` in `mem.py` — and **every** surface that
+feeds a model goes through it: the SessionStart injection (`mem.py list --dest agent`), the MCP
+tools, and the MCP resources and prompts. That is the point: "a private memory never reaches an
+agent" is a property of one function you can read start to finish, not a convention four files have
+to remember. The web UI labels anything that is not `open`, because a classification you cannot see
+is one you cannot trust.
+
+Not claimed: this is not encryption, and it does not defend against someone who can read your disk.
+It defends against the thing that actually happens — a memory you did not think about being handed
+to a model along with everything else.
+
+## Tests
+
+```bash
+python3 tests/test_guards.py             # 34 checks, isolated store, stdlib only
+python3 tests/test_guards.py --canary    # remove each guard in turn; the suite must notice
+```
+
+The suite covers the rules that must not quietly break: secret redaction (each pattern is fed
+something it *must* catch), the injection scan, record-delimiter forgery, the one-live-`status`
+invariant, `protected`, and egress across every surface.
+
+`--canary` is the part worth stealing. It deletes each guard from a scratch copy and requires the
+suite to go red — because a check that passes while the thing it checks is gone reports green and
+protects nothing. It earned its keep on the first run: the egress test for `memory_get` passed with
+the guard removed, because a branch below it happened to swallow the record anyway. The test proved
+nothing about the rule it was written for.
+
+## Benchmarking recall
+
+Ranking changes are easy to argue and hard to verify. `tools/bench_recall.py` turns them into a
+number: it seeds a throwaway store from a fixture, asks paraphrased questions whose answer is known,
+and reports where the intended record landed. **No LLM judge** — the expected id is written down, so
+the score cannot drift with a model's mood.
+
+```bash
+tools/bench_recall.py                     # fixture store: keyword vs hybrid
+tools/bench_recall.py --no-semantic       # keyword only, no embedder needed
+tools/bench_recall.py --fixture mine.json --store ~/.mem0ry4ai --min-mrr 0.7
+```
+
+On the bundled fixture (14 memories, 48 queries, English + Romanian): keyword `R@1 0.500 / MRR
+0.641`, hybrid with bge-m3 `R@1 0.750 / R@5 0.958 / R@10 1.000 / MRR 0.848`.
+
+**Read the caveat before you tune anything with it.** A 14-memory fixture measures *ordering* — the
+answer is already in the candidate set — not *discrimination*. Sweeping the dense retriever's weight
+(`MEM_RRF_W_DENSE`) on it showed a clean monotone win, `R@1 0.785 → 0.896`, that **did not exist**
+on a real 799-record store: flat at 0.55, no trend from 1× to 10×. That is why the default weight is
+still 1.0. Use the fixture to catch regressions; decide ranking parameters with `--store` against a
+store of realistic size.
 
 ## Web UI
 
@@ -480,10 +573,13 @@ Everything is overridable via environment variables — no config file needed:
 | `MEM_RECENCY_WEIGHT` | `1.5` | how much fresher memories are nudged up in ranking (0 = pure bm25) |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint for offline extraction + embeddings |
 | `MEM_LLM_MODEL` | `qwen2.5:7b-instruct` | model used by `consolidate.py` |
-| `MEM_EMBED_MODEL` | `all-minilm` | embedding model for hybrid search + link suggestions (retrieval only) |
+| `MEM_EMBED_MODEL` | `bge-m3` | embedding model for hybrid search + link suggestions (retrieval only) |
 | `MEM_SUGGEST_THRESHOLD` | `0.62` | min cosine similarity for a suggested link to appear |
 | `MEM_DUP_CHECK` | `1` | `mem.py add` warns (never blocks) when a near-duplicate of the same type already exists; `0` to disable |
 | `MEM_DUP_THRESHOLD` | `0.62` | cosine similarity above which the add-time duplicate warning fires |
+| `MEM_RRF_W_DENSE` / `MEM_RRF_W_KEYWORD` | `1.0` | per-retriever weight in the hybrid fusion — measure with `tools/bench_recall.py --store` before changing |
+| `MEM_STATUS_UNIQUE` | `1` | a new `status` retires the previous one for its scope; `0` to let them pile up |
+| `MEM_RECALL_DEDUP` | `0.8` | Jaccard threshold for the opt-in `--dedup` near-duplicate suppression |
 
 ## Design notes
 
@@ -497,6 +593,16 @@ Everything is overridable via environment variables — no config file needed:
   checkpoints with a custom message.
 - **Your data is yours**: if you fork this repo, do not commit your personal `store/` upstream.
   The store is meant to be versioned in *your* clone, locally.
+
+## Acknowledgements
+
+[**mnema**](https://github.com/MerlijnW70/mnema) by [MerlijnW70](https://github.com/MerlijnW70)
+(MIT OR Apache-2.0) — a local, encrypted memory layer for agents, in Rust. Four things here came
+from reading it: the **egress tiers** resolved at a single choke point, the **no-untested-rule**
+discipline (`tests/test_guards.py --canary`), the shape of the **recall benchmark** (in-repo
+fixture, Recall@k, no LLM judge), and serving MCP **resources and prompts** rather than only tools.
+No code was copied — that project is Rust and this one is Python — but the designs are theirs, and
+implementing the tiers immediately surfaced a hole in ours that had gone unnoticed.
 
 ## License
 

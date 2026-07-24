@@ -1,0 +1,162 @@
+[
+  {
+    "type": "gotcha",
+    "scope": "project:api",
+    "summary": "connection pool exhausted under load",
+    "body": "The pool defaulted to 5 connections, so bursts queued behind each other and eventually gave up. Raise pool_size to 20 and set a 2s acquire timeout so a stuck query fails fast instead of stalling every caller.",
+    "queries": [
+      "why did requests start timing out when traffic went up",
+      "de ce expira cererile cand creste traficul",
+      "we keep running out of database connections",
+      "pool_size acquire timeout"
+    ]
+  },
+  {
+    "type": "decision",
+    "scope": "project:api",
+    "summary": "chose Redis over an in-process cache",
+    "body": "An in-process cache drifts between replicas after a deploy: two nodes answer differently for the same key. Redis keeps one shared view and the extra hop costs about a millisecond.",
+    "queries": [
+      "where should the cache live",
+      "de ce nu tinem cache-ul in interiorul procesului",
+      "nodes answer differently after a rollout"
+    ]
+  },
+  {
+    "type": "fact",
+    "scope": "project:api",
+    "summary": "staging runs Postgres 16, production still on 15",
+    "body": "Migrations using MERGE succeed on staging and fail in production. Target the older syntax until the production upgrade lands.",
+    "queries": [
+      "which database version is production on",
+      "ce versiune de baza de date e in productie",
+      "a migration works before release and breaks after",
+      "MERGE migration Postgres"
+    ]
+  },
+  {
+    "type": "command",
+    "scope": "global",
+    "summary": "rebuild the search index after a bulk import",
+    "body": "Run mem.py reindex. The index is derived from the markdown files, so regenerating it is always safe and never loses anything.",
+    "queries": [
+      "how do I regenerate the lookup structure",
+      "cum refac indexul dupa un import mare",
+      "search returns nothing after importing files",
+      "mem.py reindex"
+    ]
+  },
+  {
+    "type": "preference",
+    "scope": "global",
+    "summary": "no emoji in code or terminal output",
+    "body": "Keep comments and printed output plain text unless explicitly asked otherwise.",
+    "queries": [
+      "should the tool print pictograms",
+      "pot sa pun emoji in mesajele afisate"
+    ]
+  },
+  {
+    "type": "gotcha",
+    "scope": "global",
+    "summary": "macOS has no timeout binary",
+    "body": "Scripts that wrap a command in timeout exit 127 on a Mac, which reads like a hang. Use a background process plus a bounded polling loop instead, or install coreutils and call gtimeout.",
+    "queries": [
+      "the script exits with 127 on a mac",
+      "de ce nu merge comanda de limitare a duratei pe mac",
+      "how do I bound how long a command runs on apple hardware",
+      "gtimeout coreutils"
+    ]
+  },
+  {
+    "type": "gotcha",
+    "scope": "global",
+    "summary": "git commit hangs when signing is on and there is no terminal",
+    "body": "A global commit.gpgsign true makes a non-interactive commit wait forever for a passphrase prompt that nobody can answer. Pass -c commit.gpgsign=false in scripts and CI.",
+    "queries": [
+      "committing freezes inside a script",
+      "de ce se blocheaza commit-ul cand ruleaza automat",
+      "the build never finishes at the commit step",
+      "commit.gpgsign passphrase prompt"
+    ]
+  },
+  {
+    "type": "decision",
+    "scope": "global",
+    "summary": "plain files under version control as the source of truth, not a database",
+    "body": "A database makes the data readable only through its own tooling and a corrupt file unrecoverable. Text under version control can be diffed, reviewed and restored with ordinary tools; the index on top is derived and disposable.",
+    "queries": [
+      "why not keep everything in sqlite",
+      "de ce fisiere text si nu o baza de date",
+      "what makes the history auditable"
+    ]
+  },
+  {
+    "type": "fact",
+    "scope": "project:infra",
+    "summary": "deploys go over rsync + ssh with an isolated key agent",
+    "body": "The deploy script starts its own agent with only the deploy key loaded, so the desktop keychain never takes part and a wrong key cannot reach production.",
+    "queries": [
+      "how does a release actually reach the server",
+      "cum ajunge codul pe masina de productie",
+      "which credentials are used when publishing",
+      "rsync ssh deploy key agent"
+    ]
+  },
+  {
+    "type": "gotcha",
+    "scope": "project:infra",
+    "summary": "ffmpeg drops a GIF's last long-delay frame when converting to video",
+    "body": "The final pause of an animation is not honoured, so the encoded file ends before the last state is visible. Clone the last frame with the tpad filter, then verify by decoding the final frame rather than trusting the reported duration.",
+    "queries": [
+      "the converted clip ends before the final screen",
+      "videoul iese mai scurt decat animatia sursa",
+      "last frame missing after encoding",
+      "tpad filter ffmpeg"
+    ]
+  },
+  {
+    "type": "command",
+    "scope": "project:infra",
+    "summary": "test a fleet change on one device before rolling it out",
+    "body": "Run the script with --ip pointing at a single machine and read the output end to end. Only then run it against the whole fleet.",
+    "queries": [
+      "how do I try a change on a single machine first",
+      "cum verific pe un singur echipament inainte de toate",
+      "avoid breaking two hundred routers at once",
+      "--ip single machine"
+    ]
+  },
+  {
+    "type": "preference",
+    "scope": "global",
+    "summary": "comments in English, explanations to the user in Romanian",
+    "body": "Identifiers and code comments stay in English in every project. Prose addressed to the user is Romanian, keeping technical terms in their English form.",
+    "queries": [
+      "what language do I write code comments in",
+      "in ce limba scriu comentariile din cod"
+    ]
+  },
+  {
+    "type": "gotcha",
+    "scope": "project:infra",
+    "summary": "directory bind fails unless the full distinguished name is used",
+    "body": "Binding with only the account name is rejected: the request needs the complete path including every organizational unit. Build it from the account's own entry rather than assembling it by hand.",
+    "queries": [
+      "authentication against the company directory keeps failing",
+      "autentificarea pe director pica desi parola e buna",
+      "login rejected even with correct credentials"
+    ]
+  },
+  {
+    "type": "status",
+    "scope": "project:api",
+    "summary": "auth rewrite shipped; rate limiting is next",
+    "body": "Token refresh and the session store went out last week. Per-key rate limiting is the next piece, then the retry-after header.",
+    "queries": [
+      "what is the next piece of work on the api",
+      "unde am ramas cu proiectul api",
+      "which part was finished most recently"
+    ]
+  }
+]

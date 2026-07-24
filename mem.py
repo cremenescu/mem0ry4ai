@@ -265,7 +265,7 @@ def _neutralize_body(body):
 
 
 def render_record(rid, rtype, scope, summary, body, confidence, source, created, updated, status,
-                  priority=None, files=None, protected=None, session=None):
+                  priority=None, files=None, protected=None, session=None, tier=None):
     summary = _sanitize_summary(summary)
     body = _neutralize_body(body)
     lines = [
@@ -283,6 +283,8 @@ def render_record(rid, rtype, scope, summary, body, confidence, source, created,
         lines.append(f"- files: {files}")
     if protected:
         lines.append(f"- protected: {protected}")
+    if tier and tier != "open":
+        lines.append(f"- tier: {tier}")
     if session:
         lines.append(f"- session: {session}")
     lines += [
@@ -293,6 +295,56 @@ def render_record(rid, rtype, scope, summary, body, confidence, source, created,
         END_MARK,
     ]
     return "\n".join(lines) + "\n"
+
+
+# ----- egress: what a memory is allowed to say, and to whom -----
+# The tier model (open / redacted / private, resolved at one choke point) is taken from mnema
+# by MerlijnW70 — https://github.com/MerlijnW70/mnema (MIT OR Apache-2.0), where it guards a local
+# model against a cloud one. Adapted here: every agent context we feed is remote, so the
+# destination collapses to "the user" vs "a model".
+# Redaction strips things that LOOK like secrets (regex, keyword-driven). It cannot know that a
+# client's name, a salary or a home address must not be handed to a model — nothing about those
+# strings is suspicious. A tier is the user's own lever for that, and unlike a pattern it never
+# has false negatives: it is stated, not inferred.
+#
+# The single choke point below is the point of the design. Every surface that puts memory into a
+# model's context -- the SessionStart injection, MCP tools, MCP resources and prompts -- resolves
+# what to emit HERE, so "a private memory never reaches an agent" is a property of one function
+# that can be read in full, not a convention repeated across four files and eventually forgotten.
+
+TIERS = ("open", "redacted", "private")
+
+# Where the text is going. LOCAL is the user: the CLI in their terminal, the web UI on their
+# machine, `mem.py get`. AGENT is any model context -- for us that is always a remote model, so
+# there is no third case to reason about.
+DEST_LOCAL, DEST_AGENT = "local", "agent"
+
+
+def record_tier(rec):
+    t = (rec["meta"].get("tier") or "open").strip().lower()
+    return t if t in TIERS else "open"
+
+
+def emit_for(rec, dest=DEST_LOCAL):
+    """What this record may show at `dest`: (summary, body) with body None when withheld,
+    or (None, None) when the record must not appear at all.
+
+    open      -> everything, everywhere.
+    redacted  -> the summary travels, the body stays on this machine. For a memory whose gist an
+                 agent needs ("the X credentials live in Y") but whose detail it does not.
+    private   -> never leaves for a model. Still fully searchable and readable by the user.
+    """
+    tier = record_tier(rec)
+    if dest != DEST_AGENT or tier == "open":
+        return record_summary(rec), rec.get("body", "")
+    if tier == "redacted":
+        return record_summary(rec), None
+    return None, None
+
+
+def visible_for(records, dest=DEST_LOCAL):
+    """The records that may appear at `dest` at all (drops `private` for an agent)."""
+    return [r for r in records if emit_for(r, dest)[0] is not None]
 
 
 # ----- write layer (shared by the CLI and the web UI) -----
@@ -310,7 +362,7 @@ def render_from_meta(rid, meta, summary, body):
              f"- created: {meta.get('created') or now_ts()}",
              f"- updated: {now_ts()}",
              f"- status: {meta.get('status', 'active')}"]
-    for k in ("superseded-by", "invalidated", "invalid-reason", "priority", "files", "related-to", "blocked-by", "protected", "session"):
+    for k in ("superseded-by", "invalidated", "invalid-reason", "priority", "files", "related-to", "blocked-by", "protected", "tier", "session"):
         if meta.get(k):
             lines.append(f"- {k}: {meta[k]}")
     lines += [f"- confidence: {meta.get('confidence', '1.0')}",
@@ -436,11 +488,50 @@ def _rewrite_block(rec_id, new_block):
         return True
 
 
+def _supersede_prior_status(scope, new_id):
+    """A new `status` retires the one it continues: the most recent live status for `scope`.
+    Returns (retired_ids, skipped_protected_ids, still_live_count).
+
+    A status answers "where is this project now", so a stack of live ones makes the injection show
+    several and leaves the agent guessing which is current. Every write path goes through
+    `add_memory`, so this runs here rather than in each caller: an invariant held in one place is an
+    invariant, held in three it is a convention.
+
+    Deliberately retires only ONE, not every live status for the scope. Measured on a real store,
+    13 of 29 scopes had already accumulated several (one had 19), and some are legitimately
+    concurrent — a release state and an open-PR state are both current. Retiring the lot on an
+    unrelated write would be a large, surprising edit triggered by an ordinary `add`; retiring the
+    one it directly continues is the claim actually being made. Older ones are reported, not touched.
+
+    A `protected: true` status is left alone (and reported): the flag exists precisely to stop an
+    automatic rewrite. MEM_STATUS_UNIQUE=0 disables the whole behaviour."""
+    if os.environ.get("MEM_STATUS_UNIQUE", "1") == "0":
+        return [], [], 0
+    # Position is the tie-breaker, not just `created`: timestamps are second-resolution, so several
+    # statuses written in the same second compare equal and the "most recent" would be arbitrary.
+    # A scope maps to one file and records are appended, so a later position IS a later write.
+    live = [(n, r) for n, r in enumerate(all_records())
+            if r["id"] != new_id and r["meta"].get("type") == "status"
+            and r["meta"].get("scope") == scope and r["meta"].get("status", "active") == "active"]
+    if not live:
+        return [], [], 0
+    live.sort(key=lambda nr: ((nr[1]["meta"].get("created") or ""), nr[0]), reverse=True)
+    target = live[0][1]
+    try:
+        supersede_memory(target["id"], by=new_id, reason="superseded by a newer status")
+        return [target["id"]], [], len(live) - 1
+    except ValueError:
+        return [], [target["id"]], len(live) - 1   # protected — the user asked for it to stay put
+
+
 def add_memory(rtype, scope, summary, body, confidence="1.0", source="web", redact_secrets=True,
-               status="active", protected=None, session=None):
+               status="active", protected=None, session=None, on_supersede=None,
+               priority=None, files=None, tier=None):
     """Append a fresh record; returns its id. Redacts secrets like every write path.
     status="working" makes it a scratch note: not injected at SessionStart, hidden from default
-    search/list — until promote_memory() flips it to active."""
+    search/list — until promote_memory() flips it to active.
+    A new active `status` retires the previous one for its scope (see `_supersede_prior_status`);
+    `on_supersede(done, skipped)` is called with what it did, for callers that report it."""
     if rtype not in TYPES:
         raise ValueError(f"invalid type: {rtype}")
     if status not in ("active", "working"):
@@ -458,11 +549,17 @@ def add_memory(rtype, scope, summary, body, confidence="1.0", source="web", reda
     if session is None:
         session = current_session()   # provenance: stamp the session that produced this memory
     rec = render_record(rid, rtype, scope, summary, body, confidence, source, now_ts(), now_ts(), status,
-                        protected=protected, session=session)
+                        priority=priority, files=files, protected=protected, session=session,
+                        tier=tier)
     with _locked():
         ensure_header(path, scope)
         with open(path, "a", encoding="utf-8") as f:
             f.write("\n" + rec)
+        # Under the same (reentrant) lock, so no concurrent writer can leave two live statuses.
+        if rtype == "status" and status == "active":
+            done, skipped, older = _supersede_prior_status(scope, rid)
+            if on_supersede and (done or skipped or older):
+                on_supersede(done, skipped, older)
     return rid
 
 
@@ -662,20 +759,35 @@ def cmd_add(a):
     if not a.no_dup_check and os.environ.get("MEM_DUP_CHECK", "1") != "0":
         dup_warn = find_duplicates(a.type, summary, body, files)
     inj = redact.scan_injection(summary + "\n" + body)
-    rid = gen_id()
     status = "working" if getattr(a, "working", False) else "active"
-    rec = render_record(rid, a.type, a.scope, summary, body,
-                        a.confidence, a.source, now_ts(), now_ts(), status,
-                        priority="critical" if a.critical and status == "active" else None, files=files,
-                        protected="true" if getattr(a, "protected", False) else None,
-                        session=(getattr(a, "session", None) or current_session()))
-    with _locked():
-        ensure_header(path, a.scope)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write("\n" + rec)
+    retired = []
+    # One write path for every caller (CLI, MCP, web): store invariants such as "at most one live
+    # status per scope" live inside add_memory, so no surface can forget to apply them.
+    rid = add_memory(
+        a.type, a.scope, summary, body, a.confidence, a.source,
+        redact_secrets=False,   # cmd_add already redacted above, and reported what it removed
+        status=status,
+        priority="critical" if a.critical and status == "active" else None,
+        files=files,
+        protected="true" if getattr(a, "protected", False) else None,
+        tier=getattr(a, "tier", None),
+        session=(getattr(a, "session", None) or current_session()),
+        on_supersede=lambda done, skipped, older: retired.extend(
+            [("retired", i) for i in done] + [("protected", i) for i in skipped]
+            + ([("older", str(older))] if older else [])))
     tag = "  [working]" if status == "working" else ("  [CRITICAL]" if a.critical else "")
     print(f"added {rid}  [{a.type} · {a.scope}]{tag}  -> {os.path.relpath(path, DATA)}")
-    sys.stdout.flush()   # so the stdout 'added' line lands before the stderr warning below
+    sys.stdout.flush()   # so the stdout 'added' line lands before any stderr warning below
+    for kind, old in retired:
+        if kind == "retired":
+            print(f"  retired the previous status for {a.scope}: {old} (superseded by {rid})")
+        elif kind == "older":
+            print(f"  note: {old} older status{'es' if old != '1' else ''} for {a.scope} still live — "
+                  f"`mem.py list --scope {a.scope} --type status` to review", file=sys.stderr)
+        else:
+            print(f"  note: {old} is a protected status for {a.scope} and stays live — "
+                  f"two live statuses now, resolve by hand", file=sys.stderr)
+    sys.stdout.flush()
     if dup_warn:
         print("note: a very similar memory of this type already exists — supersede instead of duplicating?",
               file=sys.stderr)
@@ -726,6 +838,13 @@ def record_summary(rec):
 def cmd_list(a):
     since, until = _norm_date(a.since), _norm_date(a.until, end=True)
     recs = [r for r in all_records() if _match_filters(r, a.scope, a.type, a.status, since, until)]
+    dest = getattr(a, "dest", None) or DEST_LOCAL
+    if dest == DEST_AGENT:
+        recs = visible_for(recs, dest)   # private never leaves for a model
+    suppressed = []
+    if getattr(a, "dedup", False):
+        # Unranked list: keep the newest of each cluster — a rewrite is usually the better copy.
+        recs, suppressed = dedup_near(recs, prefer="newest")
     if getattr(a, "json", False):
         import json
         access_times = get_last_accessed()
@@ -741,9 +860,10 @@ def cmd_list(a):
             "blocked_by": r["meta"].get("blocked-by"),
             "files": r["meta"].get("files"),
             "session": r["meta"].get("session"),
+            "tier": record_tier(r),
             "invalidated": r["meta"].get("invalidated"),
             "invalid_reason": r["meta"].get("invalid-reason"),
-            "body": r["body"],
+            "body": emit_for(r, dest)[1] or "",
         } for r in recs]
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return
@@ -755,7 +875,7 @@ def cmd_list(a):
         flag = "" if st == "active" else f"  ({st})"
         print(f"{r['id']}  [{r['meta'].get('type','?')} · {r['meta'].get('scope','?')}]{flag}")
         print(f"    {r['title'] or r['body'][:80]}")
-    print(f"\n{len(recs)} memories")
+    print(f"\n{len(recs)} memories" + (f"  ({len(suppressed)} near-duplicates hidden)" if suppressed else ""))
 
 
 # ----- derived FTS5 index: ranked search, regenerable from markdown -----
@@ -876,8 +996,16 @@ def cmd_search(a):
         hits = [by_id[i] for i in ids
                 if i in by_id and by_id[i]["meta"].get("status") != "working"  # scratch notes aren't recall
                 and _match_filters(by_id[i], a.scope, a.type, "all", since, until)]
+        dropped = []
+        if getattr(a, "dedup", False):
+            hits, dropped = dedup_near(hits)   # ranked order: the most relevant of a cluster survives
         _print_mode(mode, len(hits))
         _print_hits(hits)
+        if dropped:
+            # Never silently: this is the user's own store, and a hidden hit reads as a lost memory.
+            print(f"\n({len(dropped)} near-duplicate{'s' if len(dropped) > 1 else ''} suppressed: "
+                  + ", ".join(f"{r['id']}~{tid}" for r, tid in dropped[:5])
+                  + (", ..." if len(dropped) > 5 else "") + " — drop --dedup to see them)")
         return
     # fallback: substring scan (ripgrep when available) if FTS5 is missing
     q = a.query
@@ -970,6 +1098,16 @@ def load_embeddings():
     return out
 
 
+def _float_env(key, default):
+    """float(os.environ[key]) that never raises and never returns nan/inf — a typo in
+    .mem-local.env must not take search down or poison a ranking comparison."""
+    try:
+        v = float(os.environ.get(key, default))
+        return v if v == v and v not in (float("inf"), float("-inf")) else float(default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def _cosine(a, b):
     if len(a) != len(b):
         return 0.0
@@ -1019,6 +1157,69 @@ def find_duplicates(rec_type, summary, body, files=None, k=3):
     return [(s, r["id"], r["meta"].get("scope", ""), record_summary(r)) for s, r in hits[:k]]
 
 
+def _tokens(text):
+    return set(re.findall(r"\w+", (text or "").lower(), flags=re.UNICODE))
+
+
+def _jaccard(a, b):
+    """Token-set Jaccard of two token sets, in [0,1]. Two empty sets are not similar (0.0):
+    a record with no tokens says nothing, so it must not swallow another one."""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def dedup_near(records, threshold=None, prefer=None):
+    """Suppress near-duplicate records from an ORDERED list. Returns (kept, suppressed).
+
+    OPT-IN, and deliberately NOT on the recall or injection path. Measured on a real 799-record
+    store: the highest token-Jaccard between two same-(type, scope) records is 0.36, so a
+    suppression threshold high enough to be safe never fires at all; and by embedding cosine, the
+    pairs that do clear 0.79-0.90 are stale statuses ("step 2" vs "step 3", "engine chosen" vs
+    "deployed live") and adjacent-but-distinct facts — not copies. Hiding those at read time would
+    lose information, and `consolidate` already proposes the same pairs for review at a lower bar
+    (MEM_DUP_THRESHOLD 0.62). Left here for the case it does fit: a bulk import that lands genuine
+    copies, where `list --dedup` gives a clean view without touching the store.
+
+    Similarity is token Jaccard over summary + body, and only records of the SAME type and scope
+    are ever compared — a `todo` is never suppressed by a `gotcha` that happens to share wording,
+    and the comparison stays near-linear instead of O(n^2) over the whole store.
+
+    `prefer=None` keeps the first of each cluster in the order given (use it when the list is
+    ranked by relevance); `prefer='newest'` keeps the most recently created (use it for
+    unranked lists, where a rewrite is usually the better copy). Input order is preserved.
+    Threshold: MEM_RECALL_DEDUP (default 0.8); 0 disables suppression entirely."""
+    if threshold is None:
+        try:
+            threshold = float(os.environ.get("MEM_RECALL_DEDUP", "0.8"))
+        except (TypeError, ValueError):
+            threshold = 0.8
+    if threshold <= 0 or len(records) < 2:
+        return list(records), []
+
+    order = records
+    if prefer == "newest":
+        order = sorted(records, key=lambda r: (r["meta"].get("created") or ""), reverse=True)
+
+    toks = {}
+    for r in records:
+        toks[r["id"]] = _tokens(f"{record_summary(r)}\n{r.get('body', '')}")
+
+    kept_ids, suppressed = set(), []
+    kept_by_bucket = {}
+    for r in order:
+        bucket = (r["meta"].get("type"), r["meta"].get("scope"))
+        mine = toks[r["id"]]
+        twin = next((k for k in kept_by_bucket.get(bucket, [])
+                     if _jaccard(mine, toks[k["id"]]) >= threshold), None)
+        if twin is None:
+            kept_ids.add(r["id"])
+            kept_by_bucket.setdefault(bucket, []).append(r)
+        else:
+            suppressed.append((r, twin["id"]))
+    return [r for r in records if r["id"] in kept_ids], suppressed
+
+
 def hybrid_search(query, allow_semantic=True):
     """Keyword (FTS5 + recency) fused with semantic similarity via Reciprocal Rank Fusion (k=60),
     plus a light summary phrase-match rerank, when an embedder is available.
@@ -1043,6 +1244,12 @@ def hybrid_search(query, allow_semantic=True):
     # cosine — neither signal can swamp the other (the old 0.5*cosine + 0.5*linear-rank blend was
     # sensitive to cosine's compressed range). Tunable via MEM_RRF_K.
     K = float(os.environ.get("MEM_RRF_K", "60"))
+    # Per-retriever weights: the two rankings do not deserve equal votes once the embedder is good.
+    # Measured with tools/bench_recall.py (40 paraphrased queries) on bge-m3 — see the sweep in the
+    # commit that introduced this. Tunable rather than hardcoded because the right value depends on
+    # the embedder: with a weak one, weighting the dense signal up just amplifies noise.
+    W_DENSE = _float_env("MEM_RRF_W_DENSE", "1.0")
+    W_KEYWORD = _float_env("MEM_RRF_W_KEYWORD", "1.0")
     kw_rank = {i: n for n, i in enumerate(fts)}
     sem_sorted = [i for i, _ in sorted(sims.items(), key=lambda x: -x[1])]
     sem_rank = {i: n for n, i in enumerate(sem_sorted)}
@@ -1055,9 +1262,9 @@ def hybrid_search(query, allow_semantic=True):
     def score(i):
         s = 0.0
         if i in kw_rank:
-            s += 1.0 / (K + kw_rank[i] + 1)
+            s += W_KEYWORD / (K + kw_rank[i] + 1)
         if i in sem_rank:
-            s += 1.0 / (K + sem_rank[i] + 1)
+            s += W_DENSE / (K + sem_rank[i] + 1)
         # light rerank: a query hit in the SUMMARY is a strong precision signal the fusion misses.
         # Scaled to `unit` so it nudges near-ties without overriding a clearly better-ranked pair.
         r = by.get(i)
@@ -1149,6 +1356,47 @@ def _set_priority(rec_id, priority):
                 f.writelines(lines)
             return os.path.relpath(path, DATA)
     sys.exit(f"id not found: {rec_id}")
+
+
+@_locked_write
+def _set_tier(rec_id, tier):
+    """In-place meta edit: set or clear a record's egress tier. Line-level, like _set_priority, so
+    nothing else about the record is rewritten (and `protected` does not apply — classifying a
+    memory as private is exactly the kind of correction protection must never stand in the way of)."""
+    for path in store_files():
+        for r in parse_file(path):
+            if r["id"] != rec_id:
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            new_block = []
+            for k in range(r["start"], r["end"] + 1):
+                line = lines[k]
+                mm = META_RE.match(line.rstrip("\n"))
+                if mm and mm.group("k") == "tier":
+                    continue   # drop the existing tier line; re-added below unless clearing
+                if mm and mm.group("k") == "updated":
+                    line = f"- updated: {now_ts()}\n"
+                new_block.append(line)
+                if tier and tier != "open" and mm and mm.group("k") == "status":
+                    new_block.append(f"- tier: {tier}\n")
+            lines[r["start"]:r["end"] + 1] = new_block
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            return os.path.relpath(path, DATA)
+    return None
+
+
+def cmd_tier(a):
+    if a.tier not in TIERS:
+        sys.exit(f"invalid tier: {a.tier} (choose from {', '.join(TIERS)})")
+    rel = _set_tier(a.id, a.tier)
+    if rel is None:
+        sys.exit(f"id not found: {a.id}")
+    note = {"open": "reaches any agent",
+            "redacted": "summary reaches an agent, body stays local",
+            "private": "never reaches an agent; still searchable by you"}[a.tier]
+    print(f"{a.id} -> tier: {a.tier} ({note})  in {rel}")
 
 
 def cmd_pin(a):
@@ -1686,6 +1934,9 @@ def main():
     pa.add_argument("--working", action="store_true",
                     help="scratch note: status=working — NOT injected, hidden from default search/list "
                          "until `mem.py promote <id>`")
+    pa.add_argument("--tier", choices=TIERS,
+                    help="egress class: open (default) | redacted (summary only reaches an agent) "
+                         "| private (never reaches an agent; still yours to search and read)")
     pa.add_argument("--protected", action="store_true",
                     help="protect this memory from being modified or deleted by agents")
     pa.add_argument("--session", help="session id provenance (default: auto-stamped from the current session)")
@@ -1698,6 +1949,11 @@ def main():
     pl.add_argument("--since", help="created on/after (YYYY-MM-DD or 'YYYY-MM-DD HH:MM')")
     pl.add_argument("--until", help="created on/before (YYYY-MM-DD or 'YYYY-MM-DD HH:MM')")
     pl.add_argument("--json", action="store_true", help="JSON output (for tooling/tests)")
+    pl.add_argument("--dest", choices=(DEST_LOCAL, DEST_AGENT), default=DEST_LOCAL,
+                    help="agent: apply the egress tiers (drop private, summary-only for redacted) "
+                         "— what any surface feeding a model must pass")
+    pl.add_argument("--dedup", action="store_true",
+                    help="drop near-duplicates (same type+scope), keeping the newest of each cluster")
     pl.set_defaults(func=cmd_list)
 
     ps = sub.add_parser("search", help="search memories (FTS5 ranked)")
@@ -1708,6 +1964,8 @@ def main():
     ps.add_argument("--until", help="created on/before (YYYY-MM-DD or 'YYYY-MM-DD HH:MM')")
     ps.add_argument("--no-semantic", action="store_true",
                     help="keyword-only (skip the semantic embedder even if it is available)")
+    ps.add_argument("--dedup", action="store_true",
+                    help="suppress near-duplicate hits (opt-in: see `dedup_near` for why not by default)")
     ps.set_defaults(func=cmd_search)
 
     pp = sub.add_parser("supersede", help="mark a memory as superseded (records when + why; never deletes)")
@@ -1737,6 +1995,11 @@ def main():
     pu = sub.add_parser("audit", help="report secret-like or injection-like patterns in the store (read-only)")
     pu.add_argument("--scope")
     pu.set_defaults(func=cmd_audit)
+
+    pt = sub.add_parser("tier", help="set a memory's egress class (what may reach a model)")
+    pt.add_argument("id")
+    pt.add_argument("tier", choices=TIERS)
+    pt.set_defaults(func=cmd_tier)
 
     pn = sub.add_parser("pin", help="mark a memory as a critical rule (always injected, first)")
     pn.add_argument("id")
