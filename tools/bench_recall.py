@@ -14,8 +14,10 @@ where the intended record lands.
 The shape of this — an in-repo fixture, Recall@k, and deliberately no LLM judge — follows mnema's
 recall benchmarks (https://github.com/MerlijnW70/mnema).
 
-Reported: Recall@1/@5/@10 and MRR over every query. No LLM judge anywhere — the expected id is
-written down in the fixture, so the number cannot drift with a model's mood.
+Reported: Recall@1, Recall@5, Recall@10 and MRR over every query. No LLM judge anywhere — the
+expected id is written down in the fixture, so the number cannot drift with a model's mood.
+(Spelled out on purpose: the compact "@1/@5/@10" form turns into @mentions of unrelated GitHub
+users the moment it lands in a release note or an issue.)
 
 CAVEAT, learned the hard way: the in-repo fixture holds 14 memories, so every target is already in
 the candidate set and the benchmark measures ORDERING, not discrimination. Sweeping the dense
