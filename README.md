@@ -3,6 +3,7 @@
 [![License: GPL-2.0-or-later](https://img.shields.io/badge/license-GPL--2.0--or--later-blue.svg)](https://github.com/cremenescu/mem0ry4ai/blob/main/LICENSE)
 [![Latest release](https://img.shields.io/github/v/release/cremenescu/mem0ry4ai?label=release)](https://github.com/cremenescu/mem0ry4ai/releases/latest)
 [![MCP: any agent](https://img.shields.io/badge/MCP-any%20agent-brightgreen.svg)](#use-from-any-agent-mcp)
+[![Indexed on TensorBlock MCP Index](https://mcp-index.tensorblock.co/v1/servers/github-cremenescu-mem0ry4ai-053d1f06/badge.svg)](https://tensorblock.co/mcp/servers/github-cremenescu-mem0ry4ai-053d1f06)
 
 Persistent, local-first memory for coding agents — built for [Claude Code](https://claude.com/claude-code), usable from **any MCP client** (Gemini CLI, Cursor, OpenCode…).
 
