@@ -593,6 +593,18 @@ def add_memory(rtype, scope, summary, body, confidence="1.0", source="web", reda
         with open(path, "a", encoding="utf-8") as f:
             f.write("\n" + rec)
         if supersedes:
+            # Carry the graph forward. A revision continues the memory's role, so its relations are
+            # about the successor too — and dropping them is silent: the edge stays visible on the
+            # retired record, which reads as "still linked" while the live one has no link at all.
+            # Caught the first time this argument was used in anger: a todo was revised minutes
+            # after being linked to the gotcha that corrected it, and the new todo came out isolated.
+            # Inherited rather than moved, because the old record's history should stay readable.
+            inherited = []
+            for key in ("related-to", "blocked-by"):
+                vals = _list_meta(target, key)
+                if vals:
+                    _edit_list_meta(rid, key, add=vals)
+                    inherited += vals
             # Same lock as the append: the revision and the retirement land together or not at all.
             supersede_memory(supersedes, by=rid, reason=f"revised by {rid}")
         # Under the same (reentrant) lock, so no concurrent writer can leave two live statuses.
@@ -839,6 +851,10 @@ def cmd_add(a):
     print(f"added {rid}  [{a.type} · {a.scope}]{tag}  -> {os.path.relpath(path, DATA)}")
     if getattr(a, "supersedes", None):
         print(f"  retired {a.supersedes} (revised by {rid}; superseded, not deleted)")
+        new = get_record(rid)
+        carried = (_list_meta(new, "related-to") + _list_meta(new, "blocked-by")) if new else []
+        if carried:
+            print(f"  carried its relations forward: {', '.join(carried)}")
     sys.stdout.flush()   # so the stdout 'added' line lands before any stderr warning below
     for kind, old in retired:
         if kind == "retired":

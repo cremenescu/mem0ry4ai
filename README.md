@@ -509,6 +509,11 @@ mem.py anchor <id> -                                           # it was never ab
 mem.py supersede <id> --reason "..."                           # the lesson died with the code
 ```
 
+Revising a memory rather than retiring it — `mem.py add ... --supersedes <id>`, or `supersedes` on
+the `memory_add` tool — carries its `related-to` and `blocked-by` edges to the successor. Without
+that the graph degrades on every revision, and it degrades *invisibly*: the edge stays on the
+retired record, so a link looks intact while the live memory has none.
+
 **Read the caveat before you tune anything with it.** A 14-memory fixture measures *ordering* — the
 answer is already in the candidate set — not *discrimination*. Sweeping the dense retriever's weight
 (`MEM_RRF_W_DENSE`) on it showed a clean monotone win, `R@1 0.785 → 0.896`, that **did not exist**
