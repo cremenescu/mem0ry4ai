@@ -571,6 +571,8 @@ def add_memory(rtype, scope, summary, body, confidence="1.0", source="web", reda
         summary = redact.redact(summary)[0]
     rid = gen_id()
     path = scope_file(scope)
+    if files is None:
+        files = derive_files(scope, summary, body) or None
     if session is None:
         session = current_session()   # provenance: stamp the session that produced this memory
     rec = render_record(rid, rtype, scope, summary, body, confidence, source, now_ts(), now_ts(), status,
@@ -880,6 +882,28 @@ def cmd_add(a):
               "written deliberately (mute: MEM_SCAN_INJECTION=0).", file=sys.stderr)
 
 
+def _match_anchor(rec, path):
+    """Whether a record's `files:` anchor covers `path`.
+
+    Matching is on whole path components, never raw substrings: 'session_start.py' finds
+    'hooks/session_start.py' but not 'not_session_start.py'. A trailing slash means directory --
+    'hooks/' finds everything anchored under it. That is the one place a prefix is honoured, and it
+    is honoured only because the trailing slash makes the intent unambiguous; a bare 'hooks' still
+    means the file named hooks, not the folder."""
+    if not path:
+        return True
+    raw = path.strip()
+    anchors = [x.strip() for x in (rec["meta"].get("files") or "").split(",") if x.strip()]
+    if raw.endswith("/"):
+        pref = raw.strip("/") + "/"
+        return any(f == pref[:-1] or f.startswith(pref) for f in anchors)
+    want = raw.strip("/")
+    for f in anchors:
+        if f == want or f.endswith("/" + want) or want.endswith("/" + f):
+            return True
+    return False
+
+
 def _match_filters(rec, scope, rtype, status, since=None, until=None):
     if scope and rec["meta"].get("scope") != scope:
         return False
@@ -915,7 +939,8 @@ def record_summary(rec):
 
 def cmd_list(a):
     since, until = _norm_date(a.since), _norm_date(a.until, end=True)
-    recs = [r for r in all_records() if _match_filters(r, a.scope, a.type, a.status, since, until)]
+    recs = [r for r in all_records() if _match_filters(r, a.scope, a.type, a.status, since, until)
+            and _match_anchor(r, getattr(a, "files", None))]
     dest = getattr(a, "dest", None) or DEST_LOCAL
     if dest == DEST_AGENT:
         recs = visible_for(recs, dest)   # private never leaves for a model
@@ -1073,7 +1098,8 @@ def cmd_search(a):
         by_id = {r["id"]: r for r in all_records()}
         hits = [by_id[i] for i in ids
                 if i in by_id and by_id[i]["meta"].get("status") != "working"  # scratch notes aren't recall
-                and _match_filters(by_id[i], a.scope, a.type, "all", since, until)]
+                and _match_filters(by_id[i], a.scope, a.type, "all", since, until)
+                and _match_anchor(by_id[i], getattr(a, "files", None))]
         dropped = []
         if getattr(a, "dedup", False):
             hits, dropped = dedup_near(hits)   # ranked order: the most relevant of a cluster survives
@@ -1322,6 +1348,34 @@ def _project_dir(scope):
     return d if os.path.isdir(d) else None
 
 
+_PATHISH = re.compile(r"\b(?:[\w.-]+/)*[\w.-]+\.(?:py|js|ts|tsx|jsx|php|swift|sh|css|html|json|md|yml|yaml|toml|sql|rs|go|rb|c|h|cpp|java|kt)\b")
+
+
+def derive_files(scope, summary, body, limit=6):
+    """Paths mentioned in a memory that actually EXIST in its project, as a comma-separated string.
+
+    The `files:` anchor is what makes `drift` useful, and it was on 5 of 865 records — because it
+    could only be filled by hand, and optional metadata that must be typed does not get typed. So
+    it is derived instead: pull path-shaped tokens out of the text and keep only the ones that
+    resolve to a real file in the project. Existence is the whole filter, and it is a strict one —
+    prose about "the config file" yields nothing, while "fixed in hooks/session_start.py" yields
+    exactly that. Returns "" when nothing resolves, which is the common and correct outcome."""
+    proj = _project_dir(scope)
+    if not proj:
+        return ""
+    seen, out = set(), []
+    for m in _PATHISH.finditer(f"{summary}\n{body}"):
+        rel = m.group(0).strip("/")
+        if rel in seen:
+            continue
+        seen.add(rel)
+        if os.path.isfile(os.path.join(proj, rel)):
+            out.append(rel)
+            if len(out) >= limit:
+                break
+    return ", ".join(out)
+
+
 def check_drift(records=None, since_commits=None):
     """Which memories may have gone stale because the code they describe moved on.
 
@@ -1332,8 +1386,8 @@ def check_drift(records=None, since_commits=None):
     why the threshold is tunable and the output is a report, never an edit.
 
     Returns [(record, [(path, verdict, detail), ...])] for records with at least one finding.
-    Verdicts: 'missing' (the file is gone), 'churn' (>= threshold commits since), 'moved' (the path
-    is gone but a file with that basename exists elsewhere in the project).
+    Verdicts: 'missing' (the file is gone), 'churn' (>= threshold commits since the record was last
+    touched), 'moved' (the path is gone but a file with that basename exists elsewhere).
     Only records carrying `files:` can be checked at all — see `mem.py drift` for the coverage line.
     """
     if since_commits is None:
@@ -1343,7 +1397,13 @@ def check_drift(records=None, since_commits=None):
             since_commits = 10
     if records is None:
         records = [r for r in all_records() if r["meta"].get("status", "active") == "active"]
-    out = []
+
+    # Group by project FIRST, so history is walked once per repository rather than once per anchored
+    # path. The per-path spelling (`git log -- <path>` inside the loop) is the obvious one and is
+    # what shipped, and it was fine at five anchored memories; at two hundred it became ~400
+    # subprocess spawns and four seconds on every dashboard load. The work is identical, only the
+    # batching changed.
+    todo = []
     for r in records:
         raw = (r["meta"].get("files") or "").strip()
         if not raw:
@@ -1351,35 +1411,106 @@ def check_drift(records=None, since_commits=None):
         proj = _project_dir(r["meta"].get("scope", ""))
         if not proj:
             continue
-        created = (r["meta"].get("created") or "")[:19]
-        findings = []
-        for rel in [x.strip() for x in raw.split(",") if x.strip()]:
-            full = os.path.join(proj, rel)
-            if not os.path.exists(full):
-                base = os.path.basename(rel)
-                alt = None
-                for dirpath, dirnames, filenames in os.walk(proj):
-                    dirnames[:] = [d for d in dirnames if d not in (".git", "node_modules", "__pycache__")]
-                    if base in filenames:
-                        alt = os.path.relpath(os.path.join(dirpath, base), proj)
-                        break
-                if alt and alt != rel:
-                    findings.append((rel, "moved", f"now at {alt}"))
-                else:
-                    findings.append((rel, "missing", "no such file in the project"))
-                continue
-            if not created:
-                continue
-            res = subprocess.run(["git", "-C", proj, "log", "--since", created, "--oneline", "--", rel],
-                                 capture_output=True, text=True, creationflags=_NO_WINDOW)
-            if res.returncode != 0:
-                continue          # not a git repo, or path outside it — no churn signal available
-            n = len([ln for ln in res.stdout.splitlines() if ln.strip()])
-            if n >= since_commits:
-                findings.append((rel, "churn", f"{n} commits since {created[:10]}"))
-        if findings:
-            out.append((r, findings))
+        # Churn is counted since the record was last TOUCHED, not since it was written. Counting
+        # from `created` makes the signal unresolvable: an old memory about an active file is
+        # reported forever, because commits only accumulate and nothing the reader does can reduce
+        # them. Measuring from `updated` gives the reader an action — re-anchor it (`mem.py anchor
+        # <id> <same paths>`) or edit it, which is exactly the "I checked, it still holds" gesture
+        # the report otherwise has no way to accept.
+        created = ((r["meta"].get("updated") or r["meta"].get("created")) or "")[:19]
+        paths = [x.strip() for x in raw.split(",") if x.strip()]
+        todo.append((proj, r, created, paths))
+
+    out_by_id, order = {}, []
+    for proj in dict.fromkeys(t[0] for t in todo):
+        group = [t for t in todo if t[0] == proj]
+        dates = [t[2] for t in group if t[2]]
+        # Only paths that still exist can reach the churn branch below — the rest are reported
+        # missing or moved. Keeping them out of the pathspec is not just cheaper: one anchor
+        # pointing outside the repo would make the whole batched call fail, and with it the churn
+        # signal for every other memory in the project.
+        wanted = sorted({p for _, _, _, paths in group for p in paths
+                         if os.path.exists(os.path.join(proj, p))})
+        commits = _churn_index(proj, min(dates), wanted) if dates and wanted else {}
+        basenames = None                       # built only if some anchored path has gone missing
+        for _, r, created, paths in group:
+            findings = []
+            for rel in paths:
+                if not os.path.exists(os.path.join(proj, rel)):
+                    if basenames is None:
+                        basenames = _basename_index(proj)
+                    alt = basenames.get(os.path.basename(rel))
+                    if alt and alt != rel:
+                        findings.append((rel, "moved", f"now at {alt}"))
+                    else:
+                        findings.append((rel, "missing", "no such file in the project"))
+                    continue
+                if not created or commits is None:
+                    continue               # not a git repo, or no date — no churn signal available
+                n = sum(1 for stamp in commits.get(rel, ()) if stamp >= created)
+                if n >= since_commits:
+                    findings.append((rel, "churn", f"{n} commits since {created[:10]}"))
+            if findings:
+                out_by_id[r["id"]] = (r, findings)
+    # Callers render this list; keep it in the order they passed records in, which the grouping above
+    # would otherwise scramble into project order.
+    for r in records:
+        if r["id"] in out_by_id and r["id"] not in order:
+            order.append(r["id"])
+    return [out_by_id[i] for i in order]
+
+
+def _churn_index(proj, since, paths=()):
+    """{path relative to `proj`: [commit timestamps]} for one repository, in a single git call.
+
+    `paths` is a pathspec, and passing it is what makes this cheap: without it git walks every
+    commit since `since` and prints every file each one touched, which on a repo whose history is
+    dominated by unrelated files (this store auto-commits its own markdown) is most of the cost.
+
+    Timestamps are forced to the local timezone (`format-local`) because record timestamps are
+    written in local time by `now_ts()`, and comparing those against a commit's own recorded offset
+    would silently miscount around a timezone change. Paths come out of git relative to the
+    REPOSITORY root, which is not always the project directory — a project nested inside a larger
+    repo would otherwise match nothing at all — so the repo-relative prefix is stripped back off.
+    """
+    if os.path.isdir(os.path.join(proj, ".git")):
+        prefix = ""                        # the project IS the repo root: no prefix, no extra call
+    else:
+        res = subprocess.run(["git", "-C", proj, "rev-parse", "--show-prefix"],
+                             capture_output=True, text=True, creationflags=_NO_WINDOW)
+        if res.returncode != 0:
+            return None                    # not a git repo
+        prefix = res.stdout.strip()
+    cmd = ["git", "-C", proj, "log", "--since", since, "--name-only",
+           "--format=%x01%cd", "--date=format-local:%Y-%m-%d %H:%M:%S"]
+    if paths:
+        # `:(literal)` so a path containing a glob character is matched as itself, not as a pattern.
+        cmd += ["--"] + [":(literal)" + p for p in paths]
+    res = subprocess.run(cmd, capture_output=True, text=True, creationflags=_NO_WINDOW)
+    if res.returncode != 0:
+        return None
+    out, stamp = {}, None
+    for line in res.stdout.splitlines():
+        if line.startswith("\x01"):
+            stamp = line[1:].strip()
+        elif line.strip() and stamp:
+            path = line.strip()
+            if prefix:
+                if not path.startswith(prefix):
+                    continue               # touched a file outside this project directory
+                path = path[len(prefix):]
+            out.setdefault(path, []).append(stamp)
     return out
+
+
+def _basename_index(proj):
+    """{basename: first relative path found} — one walk, so N missing anchors cost one traversal."""
+    found = {}
+    for dirpath, dirnames, filenames in os.walk(proj):
+        dirnames[:] = [d for d in dirnames if d not in (".git", "node_modules", "__pycache__")]
+        for name in filenames:
+            found.setdefault(name, os.path.relpath(os.path.join(dirpath, name), proj))
+    return found
 
 
 @_locked_write
@@ -1433,6 +1564,36 @@ def cmd_anchor(a):
         # that never resolves makes `drift` cry wolf forever.
         print(f"  warning: not present in {os.path.basename(proj)}: {', '.join(missing)}"
               f" — drift will keep reporting this memory", file=sys.stderr)
+
+
+def cmd_backfill_anchors(a):
+    """Derive `files:` for records that have none. Report-only unless --write.
+
+    Exists because the anchor was introduced late and 860 records predate it. Deriving on write
+    only helps future memories; without this, drift stays a feature that works on 1% of the store."""
+    recs = [r for r in all_records()
+            if r["meta"].get("status", "active") == "active" and not (r["meta"].get("files") or "").strip()]
+    if a.scope:
+        recs = [r for r in recs if r["meta"].get("scope") == a.scope]
+    found = []
+    for r in recs:
+        f = derive_files(r["meta"].get("scope", ""), record_summary(r), r.get("body", ""))
+        if f:
+            found.append((r, f))
+    print(f"# {len(recs)} active memories have no anchor; {len(found)} mention a file that exists")
+    for r, f in found[:200]:
+        print(f"  {r['id']}  [{r['meta'].get('scope')}]  -> {f}")
+        print(f"      {record_summary(r)[:92]}")
+    if not found:
+        return
+    if not a.write:
+        print("\nReport only. Re-run with --write to set these anchors.")
+        return
+    n = 0
+    for r, f in found:
+        if _set_files(r["id"], f):
+            n += 1
+    print(f"\nanchored {n} memories. `mem.py drift` now covers them.")
 
 
 def cmd_drift(a):
@@ -1963,10 +2124,14 @@ def find_all_clusters(allow_semantic=True):
     recs = all_records()
     active_recs = [r for r in recs if r["meta"].get("status", "active") == "active"]
     
-    # Group by type
-    by_type = {}
+    # Group by (type, scope), not type alone. Scope was missing from the key, so consolidation
+    # proposed merging memories from DIFFERENT PROJECTS whenever they read alike — a deploy gotcha
+    # from one project folded into the identically-worded one from another, and the merged record
+    # would then carry one scope and both projects' facts. Cross-scope look-alikes are still worth
+    # knowing about, so they are collected separately and reported rather than merged.
+    by_key = {}
     for r in active_recs:
-        by_type.setdefault(r["meta"].get("type"), []).append(r)
+        by_key.setdefault((r["meta"].get("type"), r["meta"].get("scope")), []).append(r)
         
     # Similarity logic
     emb = load_embeddings() if allow_semantic else {}
@@ -1979,7 +2144,7 @@ def find_all_clusters(allow_semantic=True):
     # Build adjacency graph
     clusters = []
     
-    for rtype, type_recs in by_type.items():
+    for (rtype, rscope), type_recs in by_key.items():
         if len(type_recs) < 2:
             continue
             
@@ -2070,6 +2235,52 @@ def llm_merge(records):
     return None
 
 
+def find_cross_scope(allow_semantic=True, k=20):
+    """Same-type memories that look alike but live in DIFFERENT scopes: (score, rec_a, rec_b).
+
+    These are deliberately NOT merged — merging them would fold one project's fact into another's
+    and leave the result carrying a single scope. But they are worth seeing: usually one of the two
+    is mis-scoped, and the only way to notice is to be shown the pair."""
+    active = [r for r in all_records() if r["meta"].get("status", "active") == "active"]
+    emb = load_embeddings() if allow_semantic else {}
+    thresh = float(os.environ.get("MEM_DUP_THRESHOLD", "0.62"))
+    by_type = {}
+    for r in active:
+        by_type.setdefault(r["meta"].get("type"), []).append(r)
+    out = []
+    for rs in by_type.values():
+        for i in range(len(rs)):
+            for j in range(i + 1, len(rs)):
+                a_, b_ = rs[i], rs[j]
+                if a_["meta"].get("scope") == b_["meta"].get("scope"):
+                    continue
+                va, vb = emb.get(a_["id"]), emb.get(b_["id"])
+                if va and vb:
+                    sc = _cosine(va, vb)
+                    if sc >= thresh:
+                        out.append((sc, a_, b_))
+    out.sort(key=lambda x: -x[0])
+    return out[:k]
+
+
+def _print_cross_scope(allow_semantic):
+    """Say what was deliberately left alone, so 'nothing to consolidate' is not mistaken for
+    'nothing looks duplicated'."""
+    try:
+        pairs = find_cross_scope(allow_semantic=allow_semantic)
+    except Exception:
+        return
+    if not pairs:
+        return
+    print(f"\n{len(pairs)} look-alike pair(s) in DIFFERENT scopes — reported, never merged:")
+    for sc, a_, b_ in pairs:
+        print(f"  {round(sc * 100):>3}%  {a_['id']} [{a_['meta'].get('scope')}]"
+              f"  <->  {b_['id']} [{b_['meta'].get('scope')}]")
+        print(f"        {record_summary(a_)[:88]}")
+    print("  Merging these would fold one project's fact into another. If one is mis-scoped,")
+    print("  re-scope it by hand (web UI, or edit the record) and it will cluster normally.")
+
+
 def cmd_consolidate(a):
     # Check if git tree is clean
     res = subprocess.run(["git", "status", "--porcelain"], cwd=DATA, capture_output=True, text=True, creationflags=_NO_WINDOW)
@@ -2079,11 +2290,14 @@ def cmd_consolidate(a):
         sys.exit("error: Git working tree has uncommitted changes. Please commit or stash them first.")
         
     clusters = find_all_clusters(allow_semantic=not getattr(a, "no_semantic", False))
+    semantic = not getattr(a, "no_semantic", False)
     if not clusters:
-        print("No duplicate memories found. Memory store is clean!")
+        print("No duplicate memories found within a scope.")
+        _print_cross_scope(semantic)
         return
         
     print(f"Found {len(clusters)} duplicate cluster(s) to consolidate.")
+    _print_cross_scope(semantic)
     
     # Save original branch
     res = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=DATA, capture_output=True, text=True, creationflags=_NO_WINDOW)
@@ -2205,6 +2419,8 @@ def main():
     pl.add_argument("--since", help="created on/after (YYYY-MM-DD or 'YYYY-MM-DD HH:MM')")
     pl.add_argument("--until", help="created on/before (YYYY-MM-DD or 'YYYY-MM-DD HH:MM')")
     pl.add_argument("--json", action="store_true", help="JSON output (for tooling/tests)")
+    pl.add_argument("--files", metavar="PATH",
+                    help="only memories ANCHORED to this path (the files: field)")
     pl.add_argument("--dest", choices=(DEST_LOCAL, DEST_AGENT), default=DEST_LOCAL,
                     help="agent: apply the egress tiers (drop private, summary-only for redacted) "
                          "— what any surface feeding a model must pass")
@@ -2220,6 +2436,8 @@ def main():
     ps.add_argument("--until", help="created on/before (YYYY-MM-DD or 'YYYY-MM-DD HH:MM')")
     ps.add_argument("--no-semantic", action="store_true",
                     help="keyword-only (skip the semantic embedder even if it is available)")
+    ps.add_argument("--files", metavar="PATH",
+                    help="only memories ANCHORED to this path (the files: field, not a text match); trailing slash = directory")
     ps.add_argument("--dedup", action="store_true",
                     help="suppress near-duplicate hits (opt-in: see `dedup_near` for why not by default)")
     ps.set_defaults(func=cmd_search)
@@ -2256,6 +2474,11 @@ def main():
     pan.add_argument("id")
     pan.add_argument("files", help="comma-separated paths relative to the project, or '-' to clear")
     pan.set_defaults(func=cmd_anchor)
+
+    pb = sub.add_parser("backfill-anchors", help="derive files: for memories that have none (report-only by default)")
+    pb.add_argument("--scope")
+    pb.add_argument("--write", action="store_true", help="actually set the anchors")
+    pb.set_defaults(func=cmd_backfill_anchors)
 
     pd = sub.add_parser("drift", help="memories whose anchored files moved on (report only, changes nothing)")
     pd.add_argument("--scope")

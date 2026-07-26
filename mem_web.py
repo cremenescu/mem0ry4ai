@@ -124,6 +124,7 @@ RO = {
     "Review queue (health)": "Coada de review", "empty": "goala",
     "Code drift": "Drift fata de cod", "anchored": "ancorate", "The cards": "Cardurile",
     "adjusted to the allowed range": "ajustat la intervalul permis",
+    "without a vector — run mem.py embed": "fara vector — ruleaza mem.py embed",
     "Open a row to read it, then pick one: the lesson still holds and only the path "
     "moved, so re-point it with <code>mem.py anchor &lt;id&gt; &lt;paths&gt;</code>; the "
     "lesson is dead with the code it described, so supersede it from Actions; or it was "
@@ -165,7 +166,9 @@ RO = {
     "What Claude sees here": "Ce vede Claude aici", "No active memories for": "Nicio memorie activa pentru",
     "To do": "De facut", "ready": "gata", "blocked": "blocate", "blocked by": "blocat de",
     "Edit / bulk:": "Editare / bulk:", "see the main list": "vezi lista principala",
-    "files": "fisiere", "invalidated": "invalidat", "Project page": "Pagina de proiect", "Actions": "Actiuni",
+    "files": "fisiere", "Anchored to a file": "Ancorat la un fisier",
+    "Showing only memories anchored to": "Doar memoriile ancorate la",
+    "A trailing slash matches a whole directory.": "Slash la final = tot directorul.", "invalidated": "invalidat", "Project page": "Pagina de proiect", "Actions": "Actiuni",
     # inject (What Claude sees)
     "What Claude sees at SessionStart": "Ce vede Claude la SessionStart",
     "monorepo root (all projects)": "radacina monorepo (toate proiectele)",
@@ -424,6 +427,38 @@ def embed_count():
         return 0
 
 
+_DRIFT_CACHE = {"key": None, "at": 0.0, "val": None}
+
+
+def drift_findings(records):
+    """`mem.check_drift`, memoised for a few seconds — WEB ONLY; the CLI stays exact.
+
+    Drift depends on the working tree, so it is deliberately not persisted. But it is asked for
+    three times on a page load (the health row, the pill count, the filtered list) and it costs one
+    git call per project, and a dashboard that spends a third of a second recomputing the same
+    answer for every visitor is paying that tax constantly. A few seconds of staleness cannot
+    mislead anyone here: the output is a suggestion to RE-READ a memory, never an edit, and nobody
+    commits ten times and reloads inside the window expecting the number to have moved.
+
+    The key includes each record's id and last-touched stamp, so editing or re-anchoring a memory
+    invalidates the cache immediately — which is exactly the interaction where a stale answer would
+    be noticed and would look like the fix had not worked.
+    """
+    key = tuple(sorted((r["id"], r["meta"].get("updated") or r["meta"].get("created") or "",
+                        r["meta"].get("files") or "") for r in records))
+    now = time.time()
+    try:
+        ttl = float(os.environ.get("MEM_WEB_DRIFT_TTL", "5"))
+    except (TypeError, ValueError):
+        ttl = 5.0
+    c = _DRIFT_CACHE
+    if c["key"] == key and (now - c["at"]) < ttl:
+        return c["val"]
+    val = mem.check_drift(records)
+    c.update(key=key, at=now, val=val)
+    return val
+
+
 def health_checks():
     out = []
     store = mem.STORE
@@ -446,12 +481,24 @@ def health_checks():
     # embedder (optional semantic layer) — informative, never an error
     vec = embed_count()
     emodel = os.environ.get("MEM_EMBED_MODEL", "bge-m3")
+    # Coverage, not just a count. "864 vectors" next to a green light says nothing about whether
+    # every memory HAS one — and a record without a vector is invisible to semantic search, silently.
+    try:
+        emb = mem.load_embeddings()
+        n_missing = sum(1 for r in mem.all_records()
+                        if r["meta"].get("status", "active") == "active" and r["id"] not in emb)
+    except Exception:
+        n_missing = 0
+    gap = f" · {n_missing} {t('without a vector — run mem.py embed')}" if n_missing else ""
     if vec == 0:
         out.append([t("Embedder (semantic)"), None, t("no vectors — optional, run mem.py embed")])
     elif _ollama_up():
-        out.append([t("Embedder (semantic)"), True, f"{emodel} · {vec} {t('vectors')}"])
+        # Amber, not green, when some memories are missing: a partial index that reports success is
+        # how you end up trusting a search that cannot see part of the store.
+        out.append([t("Embedder (semantic)"), not n_missing, f"{emodel} · {vec} {t('vectors')}{gap}"])
     else:
-        out.append([t("Embedder (semantic)"), None, f"{vec} {t('vectors')} · {t('Ollama offline (keyword search)')}"])
+        out.append([t("Embedder (semantic)"), None,
+                    f"{vec} {t('vectors')}{gap} · {t('Ollama offline (keyword search)')}"])
     nq = len(queue_pending())
     out.append([t("Review queue (health)"), nq == 0, t("empty") if nq == 0 else f"{nq} {t('candidates to review')}"])
     # Anchored memories whose files moved on. Unknown-state (grey) rather than red when nothing is
@@ -463,7 +510,7 @@ def health_checks():
         if not anchored:
             out.append([t("Code drift"), None, t("no memory is anchored to files yet")])
         else:
-            nd = len(mem.check_drift(anchored))
+            nd = len(drift_findings(anchored))
             out.append([t("Code drift"), nd == 0,
                         f"{len(anchored)} {t('anchored')} · "
                         + (t("all files present and quiet") if nd == 0
@@ -567,8 +614,12 @@ def rec_extras_html(r):
         out += f'<div class="rec-files"><code>{h(tier)}</code> {h(label)}</div>'
     files = rec_ids(r, "files")
     if files:
+        # Each anchor links to everything else anchored to the same file. That is the question an
+        # anchor invites -- "what else did I learn about this file?" -- and leaving it as inert
+        # text means the field is only ever readable, never usable.
         out += ('<div class="rec-files">' + h(t("files")) + ": "
-                + " ".join(f"<code>{h(f)}</code>" for f in files) + "</div>")
+                + " ".join('<a href="/memories?files={}"><code>{}</code></a>'.format(
+                    h(urllib.parse.quote(f)), h(f)) for f in files) + "</div>")
     sess = (r["meta"].get("session") or "").strip()
     if sess:   # provenance: which conversation produced this memory (search it via `mem.py sessions`)
         out += ('<div class="rec-files" title="' + h(t("Session that produced this memory")) + '">session: '
@@ -2374,13 +2425,14 @@ def page_memories(qs=None):
     fstat = (qs.get("status", ["active"])[0] or "active").strip()
     fid = (qs.get("id", [""])[0] or "").strip()
     fdrift = (qs.get("drift", [""])[0] or "").strip() == "1"
+    ffiles = (qs.get("files", [""])[0] or "").strip()
     records = mem.all_records()
     drift_ids, drift_why = set(), {}
     if fdrift:
         # Computed here, not cached: the answer depends on the working tree right now, and a stale
         # "this memory is fine" is worse than a slow page.
         try:
-            for r, findings in mem.check_drift([x for x in records
+            for r, findings in drift_findings([x for x in records
                                                 if x["meta"].get("status", "active") == "active"
                                                 and (x["meta"].get("files") or "").strip()]):
                 drift_ids.add(r["id"])
@@ -2412,6 +2464,8 @@ def page_memories(qs=None):
             return r["id"] in chain_ids
         if fdrift and r["id"] not in drift_ids:
             return False
+        if ffiles and not mem._match_anchor(r, ffiles):
+            return False
         if fscope and m.get("scope", "") != fscope:
             return False
         if ftype and m.get("type", "") != ftype:
@@ -2442,13 +2496,27 @@ def page_memories(qs=None):
     def mkqs(over):
         # Every filter in effect must survive a click on any other filter, or the page silently
         # drops state the user set on purpose — `drift` was doing exactly that, so arriving from
-        # the dashboard and then touching anything sent you back to square one.
-        p = {"q": q, "scope": fscope, "type": ftype, "status": fstat}
-        if fdrift:
-            p["drift"] = "1"
+        # the dashboard and then touching anything sent you back to square one. The carry set is
+        # read off the query string that actually arrived instead of a hardcoded list of filters:
+        # a hardcoded list is what caused that bug, and it grows a fresh hole every time a filter
+        # is added. Only the three keys the page rewrites are restated -- `status` because its
+        # default is not the empty string, `q`/`id` because pasting an id into the search box moves
+        # the value from one to the other.
+        p = {k: v[0] for k, v in qs.items() if v and v[0] != ""}
+        p.update({"q": q, "status": fstat})
+        if fid:
+            p["id"] = fid
         p.update(over)
         p = {k: v for k, v in p.items() if v != ""}
         return "/memories?" + urllib.parse.urlencode(p)
+
+    # The form posts, so anything carried in the URL that is not one of its named controls has to
+    # ride along as a hidden input or submitting the form drops it -- same failure as above, other
+    # mechanism.
+    _named = ("q", "type", "scope")
+    hidden = "".join(f'<input type="hidden" name="{h(k)}" value="{h(v)}">'
+                     for k, v in sorted(urllib.parse.parse_qsl(mkqs({}).split("?", 1)[1]))
+                     if k not in _named)
 
     # ----- header + chain + toolbar -----
     parts = [f'  <div class="crumb"><a href="/">{t("Dashboard")}</a> / {t("Memories")}</div>',
@@ -2482,7 +2550,7 @@ def page_memories(qs=None):
         pills += f'<a class="active" href="{h(mkqs({"drift": ""}))}">{t("drift")}</a>'
     else:
         try:
-            n_drift = len(mem.check_drift([r for r in records
+            n_drift = len(drift_findings([r for r in records
                                            if r["meta"].get("status", "active") == "active"
                                            and (r["meta"].get("files") or "").strip()]))
         except Exception:
@@ -2494,18 +2562,23 @@ def page_memories(qs=None):
         f'<input type="search" name="q" value="{h(q)}" placeholder="{h(t("search (FTS ranked)..."))}" id="live">'
         f'<select name="type" onchange="this.form.submit()">{type_opts}</select>'
         f'<select name="scope" onchange="this.form.submit()">{scope_opts}</select>'
-        f'<input type="hidden" name="status" value="{h(fstat)}">'
-        + ('<input type="hidden" name="drift" value="1">' if fdrift else '')
+        + hidden
         + f'<button class="btn" type="submit">{t("Search")}</button>'
         f'<span class="search-light {lcls}" title="{h(ltip)}">{h(llbl)}</span></form>'
         f'<div class="pills">{pills}</div></div>')
 
     # An active filter that is invisible is a trap: you cannot tell why rows are missing, and you
     # cannot turn it off without knowing the URL. Say it is on, say what it means, offer the exit.
+    if ffiles:
+        parts.append(
+            '  <div class="notice notice-drift">'
+            + '<div><b>{}</b> — {} <code>{}</code>. {}</div>'.format(
+                t("Anchored to a file"), t("Showing only memories anchored to"), h(ffiles),
+                t("A trailing slash matches a whole directory."))
+            + f'<a class="btn btn-sm" href="{h(mkqs({"files": ""}))}">{t("Show all memories")}</a></div>')
+
     if fdrift:
-        clear = {"q": q, "scope": fscope, "type": ftype, "status": fstat}
-        clear = {k: v for k, v in clear.items() if v != ""}
-        clear_url = "/memories" + ("?" + urllib.parse.urlencode(clear) if clear else "")
+        clear_url = mkqs({"drift": ""})
         explain = t("Showing only memories anchored to files that have since gone missing, moved, or "
                     "been committed to many times. They are not proven wrong — they are worth re-reading.")
         # What to DO, not only what happened. Each row shows its own reason above; the three

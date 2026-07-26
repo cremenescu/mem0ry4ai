@@ -121,7 +121,10 @@ UI-ul apare la `http://127.0.0.1:8841/`.
   determinist — niciodata harness-ul, orb.
 - Tipurile **`todo`** si **`status`** raspund la „unde am ramas?" cand revii la un proiect; tipul
   **`procedural`** tine runbook-uri reutilizabile (pasi de release, o procedura de recuperare).
-  Campul optional **`files`** leaga o memorie de fisierele pe care le priveste (indexat + chips in UI).
+  Campul optional **`files`** leaga o memorie de fisierele pe care le priveste. Se completeaza singur
+  din textul memoriei (doar cai care exista chiar in proiect) si se poate interoga invers, cu
+  `--files` sau cu parametrul `files` al uneltei `memory_search`: ce stiu deja despre fisierul pe
+  care sunt pe cale sa-l editez.
 - **Relatii intre memorii**: `mem.py link` (related-to, bidirectional in UI) si `mem.py block` +
   `mem.py ready` pentru todo-uri (ce poti ataca acum, fara blocaj deschis). Legate deliberat, nu automat.
   Pagina **Legaturi** arata **sugestii semantice** (cele mai apropiate perechi nelegate, confirmate

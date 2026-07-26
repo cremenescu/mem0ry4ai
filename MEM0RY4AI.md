@@ -4,9 +4,12 @@ You have a **persistent memory** of this user's durable, hard-won knowledge — 
 infrastructure facts, reusable commands, and the user's preferences — kept across sessions in a
 markdown+git store. Reach it through these MCP tools:
 
-- **`memory_search(query, scope?, type?, limit?)`** — hybrid keyword+semantic search. **Call this
-  BEFORE answering** anything where past context could matter (a tool/host/decision/convention you
-  might have seen before). Recalling beats guessing.
+- **`memory_search(query?, files?, scope?, type?, limit?)`** — hybrid keyword+semantic search. **Call
+  this BEFORE answering** anything where past context could matter (a tool/host/decision/convention
+  you might have seen before). Recalling beats guessing. `files` asks a different question — *what do
+  I already know about this file?* — and is worth a call **before editing a file you have not touched
+  this session**: `memory_search(files="hooks/session_start.py")`, or `files="hooks/"` for everything
+  under a directory. Either argument works alone.
 - **`memory_get(id, lines?)`** — load one record; its body is shown with 1-based line numbers. Cite a
   precise line with a **fragment ref**: `memory_get("<id>:5")` or `"<id>:5-9"` returns just those lines.
 - **`memory_list(scope?, type?, status?)`** — browse, newest first.

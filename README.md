@@ -308,9 +308,12 @@ knowledge); with no scope, a one-line-per-project overview.
 
 A few optional fields make records sharper and history honest:
 
-- **`files`** — the paths a memory is about (`--files "src/auth/jwt.ts, src/auth/middleware.ts"`).
-  They are indexed for search and shown as chips, so a gotcha surfaces when you grep — or work in —
-  the file it concerns.
+- **`files`** — the paths a memory is about. Derived from the memory's own text on write, keeping
+  only paths that resolve to a real file in that project, because optional metadata that has to be
+  typed by hand does not get typed (`mem.py backfill-anchors --write` fills in records written
+  before). Ask it the other way round with `--files` on `search`/`list`, or `files` on the
+  `memory_search` tool — *what do I already know about the file I am about to edit?* Matching is on
+  whole path components, never substrings; a trailing slash matches a whole directory.
 - **`tier`** — `open` (default), `redacted` or `private`: what this memory is allowed to tell a
   model. See [Egress tiers](#egress-tiers--what-a-memory-may-tell-a-model).
 - **`protected`** — refuse in-place edit, delete and supersede, for the handful of standing rules
@@ -500,6 +503,12 @@ whose files have since gone missing, moved, or been committed to many times are 
 re-reading. It reads no code and judges no memory — it produces a reason to look, never an edit.
 The web dashboard surfaces the count and links to the list, and each row there says which file
 moved and how, because the answer depends on it.
+
+Churn is counted from when the memory was last *touched*, not when it was written. That is what
+makes the report clearable: commits only accumulate, so counting from the creation date would
+report an old memory about an active file forever, with nothing the reader could do to clear it.
+Re-anchoring is therefore the "I checked, it still holds" gesture the report would otherwise have
+no way to accept.
 
 There are only three outcomes, and `mem.py anchor` covers two of them:
 

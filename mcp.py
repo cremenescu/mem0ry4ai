@@ -126,22 +126,29 @@ def _fmt(r, full=False):
 # ---------- tools (return text; strings starting 'error:' map to isError) ----------
 def t_search(a):
     q = (a.get("query") or "").strip()
-    if not q:
-        return "error: query required"
-    ids, mode = mem.hybrid_search(q)
+    files = (a.get("files") or "").strip()
     by = {r["id"]: r for r in _records()}
-    if ids is None:   # FTS5 unavailable -> simple substring scan
-        ql = q.lower()
-        ids = [r["id"] for r in by.values() if ql in (mem.record_summary(r) + " " + _body(r)).lower()]
-        mode = "substring"
+    if not q and not files:
+        return "error: query or files required"
+    if q:
+        ids, mode = mem.hybrid_search(q)
+        if ids is None:   # FTS5 unavailable -> simple substring scan
+            ql = q.lower()
+            ids = [r["id"] for r in by.values() if ql in (mem.record_summary(r) + " " + _body(r)).lower()]
+            mode = "substring"
+    else:
+        # `files` alone is a legitimate question -- "what do I know about the file I am editing?" --
+        # and it has no text to rank, so keep store order rather than inventing a relevance signal.
+        ids, mode = list(by), "anchor"
     scope, typ, limit = a.get("scope"), a.get("type"), int(a.get("limit") or 10)
     matched = [by[i] for i in ids
                if i in by and by[i]["meta"].get("status", "active") != "working"  # scratch notes aren't recall
                and (not scope or by[i]["meta"].get("scope") == scope)
-               and (not typ or by[i]["meta"].get("type") == typ)]
+               and (not typ or by[i]["meta"].get("type") == typ)
+               and mem._match_anchor(by[i], files)]
     hits = matched[:limit]
     if not hits:
-        return f"(no matches for {q!r})"
+        return f"(no matches for {q or files!r})"
     
     # Log access for search hits
     for r in hits:
@@ -315,10 +322,14 @@ def t_session_search(a):
 TOOLS = [
     {"name": "memory_search", "fn": t_search,
      "description": "Search durable memory (hybrid keyword+semantic). Call BEFORE answering to recall "
-                    "gotchas, decisions, infra facts, commands, and the user's preferences.",
+                    "gotchas, decisions, infra facts, commands, and the user's preferences. Pass "
+                    "`files` to ask what is known about a specific file you are about to edit; it "
+                    "works with or without `query`. One of the two is required.",
      "inputSchema": {"type": "object", "properties": {
          "query": {"type": "string"}, "scope": {"type": "string", "description": "global or project:<slug>"},
-         "type": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["query"]}},
+         "type": {"type": "string"}, "limit": {"type": "integer"},
+         "files": {"type": "string", "description": "only memories ANCHORED to this path (the files: "
+                                                    "field, not a text match); trailing slash = directory"}}}},
     {"name": "memory_get", "fn": t_get,
      "description": "Get one memory by id, body shown with 1-based line numbers. Fragment refs: pass id "
                     "as '<id>', '<id>:5' or '<id>:5-9' (or a separate `lines` arg like '5-9') to get only "

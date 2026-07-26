@@ -189,6 +189,143 @@ def test_egress(mem, store):
 
 
 # --------------------------------------------------------------------------- web UI state
+def test_anchors(mem, store):
+    """`files:` anchors match on whole path components, and are derived only from files that exist.
+
+    Both halves are load-bearing. A substring match would make an anchor to `mem.py` also claim
+    `not_mem.py`, quietly widening every filter and every drift report. And derivation that trusted
+    any path-shaped string in the prose would anchor memories to files that were never real —
+    inventing drift signals about code that does not exist, which is worse than no signal at all,
+    because it costs attention and cannot be resolved.
+    """
+    def rec(files):
+        return {"meta": {"files": files}}
+
+    cases = [
+        ("mem.py",            "mem.py",              True,  "exact"),
+        ("hooks/session_start.py", "session_start.py", True, "basename finds the full path"),
+        ("session_start.py",  "hooks/session_start.py", True, "full path finds the basename"),
+        ("not_mem.py",        "mem.py",              False, "substring is not a match"),
+        ("mem_web.py",        "mem.py",              False, "substring is not a match"),
+        ("hooks/session_start.py", "hooks/",         True,  "trailing slash matches the directory"),
+        ("hooks/session_start.py", "hooks",          False, "no slash means the FILE named hooks"),
+        ("hooksy/x.py",       "hooks/",              False, "directory match respects the boundary"),
+        ("a.py, b.py",        "b.py",                True,  "any anchor in the list counts"),
+    ]
+    for anchored, query, want, why in cases:
+        check(f"anchor {anchored!r} vs {query!r} -> {want} ({why})",
+              mem._match_anchor(rec(anchored), query) is want)
+
+    # An empty query must not filter anything out, or `list --files ""` would silently return zero.
+    check("an empty anchor query matches everything", mem._match_anchor(rec("a.py"), "") is True)
+
+    # Derivation: real file in, invented file out.
+    proj = os.path.join(os.path.dirname(store), "guard")
+    os.makedirs(proj, exist_ok=True)
+    real = os.path.join(proj, "real_file.py")
+    with open(real, "w") as f:
+        f.write("x = 1\n")
+    try:
+        got = mem.derive_files("project:guard", "about real_file.py", "and also imaginary_file.py")
+        check("derivation keeps a path that exists", "real_file.py" in got, got)
+        check("derivation drops a path that does not", "imaginary_file.py" not in got, got)
+        check("derivation of an unknown scope yields nothing",
+              mem.derive_files("project:no-such-project-xyz", "real_file.py", "") == "")
+    finally:
+        os.remove(real)
+
+
+def test_drift(mem, store):
+    """The three drift verdicts, against a real git repository.
+
+    check_drift was rewritten from one `git log` per anchored path to one per project (400
+    subprocesses and four seconds became ~35 and a third of a second). The batched form has two
+    failure modes the per-path form could not have: git prints paths relative to the REPOSITORY
+    root, not the project directory, and a pathspec entry containing a glob character would match
+    something else. Both would show up as "no drift, everything is quiet" — a silent all-clear,
+    which is the worst possible way for this to break.
+    """
+    proj = os.path.join(os.path.dirname(store), "guard")
+    os.makedirs(proj, exist_ok=True)
+    git = ["git", "-C", proj, "-c", "commit.gpgsign=false",
+           "-c", "user.email=t@t", "-c", "user.name=t"]
+
+    def run(*args):
+        return subprocess.run(git + list(args), capture_output=True, text=True)
+
+    def write(rel, text):
+        full = os.path.join(proj, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w") as f:
+            f.write(text)
+
+    def rec(files, when):
+        return {"id": "x" + files, "body": "", "title": "",
+                "meta": {"scope": "project:guard", "files": files, "status": "active",
+                         "created": when, "updated": when}}
+
+    if subprocess.run(["git", "-C", proj, "init", "-q"], capture_output=True).returncode != 0:
+        check("git is available for the drift test", False, "git init failed")
+        return
+    try:
+        for i in range(4):
+            write("src/app.py", f"v{i}\n")
+            run("add", "-A")
+            run("commit", "-q", "-m", f"c{i}")
+        write("kept/helper.py", "h\n")
+        run("add", "-A")
+        run("commit", "-q", "-m", "helper")
+
+        old = "2000-01-01 00:00:00"
+        found = dict((r["id"], f) for r, f in
+                     mem.check_drift([rec("src/app.py", old)], since_commits=3))
+        verdicts = [v for _, v, _ in found.get("xsrc/app.py", [])]
+        check("churn is counted for a file committed many times", verdicts == ["churn"],
+              f"got {verdicts!r} — repo-root-relative paths are the likely cause")
+
+        check("a quiet file below the threshold is not reported",
+              mem.check_drift([rec("src/app.py", old)], since_commits=99) == [],
+              "reported drift for a file with fewer commits than the threshold")
+
+        # A memory written AFTER the commits has nothing to re-read: this is the property that makes
+        # the report clearable, so it is asserted, not assumed.
+        check("commits before the memory was last touched do not count",
+              mem.check_drift([rec("src/app.py", "2099-01-01 00:00:00")], since_commits=1) == [],
+              "counted commits that predate the memory")
+
+        found = dict((r["id"], f) for r, f in mem.check_drift([rec("nope/gone.py", old)]))
+        verdicts = [v for _, v, _ in found.get("xnope/gone.py", [])]
+        check("a deleted file is reported missing", verdicts == ["missing"], f"got {verdicts!r}")
+
+        found = dict((r["id"], f) for r, f in mem.check_drift([rec("helper.py", old)]))
+        got = found.get("xhelper.py", [])
+        check("a file that exists elsewhere is reported moved",
+              [v for _, v, _ in got] == ["moved"] and "kept/helper.py" in got[0][2],
+              f"got {got!r}")
+
+        # A project that is NOT its repository's root. git reports paths from the repo root, so
+        # without stripping the prefix every lookup misses and the whole project silently reports
+        # "quiet". Exercised directly on _churn_index because _project_dir always resolves a
+        # project to a sibling of the store, which cannot be nested.
+        outer = os.path.join(proj, "outer")
+        inner = os.path.join(outer, "sub")
+        os.makedirs(inner, exist_ok=True)
+        og = ["git", "-C", outer, "-c", "commit.gpgsign=false",
+              "-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run(["git", "-C", outer, "init", "-q"], capture_output=True)
+        for i in range(2):
+            with open(os.path.join(inner, "x.py"), "w") as f:
+                f.write(f"v{i}\n")
+            subprocess.run(og + ["add", "-A"], capture_output=True)
+            subprocess.run(og + ["commit", "-q", "-m", f"n{i}"], capture_output=True)
+        idx = mem._churn_index(inner, old, ["x.py"])
+        check("paths are made relative to the project, not the repo root",
+              bool(idx) and len(idx.get("x.py", [])) == 2,
+              f"got {idx!r} — expected the 'sub/' prefix to be stripped")
+    finally:
+        shutil.rmtree(proj, ignore_errors=True)
+
+
 def test_url_state(mem, store):
     """No link may silently drop the filters the user is looking at.
 
@@ -226,6 +363,8 @@ def test_url_state(mem, store):
             ("/memories?scope=global&type=gotcha&status=all",
              {"scope": "global", "type": "gotcha", "status": "all"}),
             ("/memories?q=pool&drift=1", {"q": "pool", "drift": "1"}),
+            ("/memories?files=mem.py", {"files": "mem.py"}),
+            ("/memories?files=hooks%2F&type=gotcha", {"files": "hooks/", "type": "gotcha"}),
             ("/project?slug=guard", {"slug": "guard"}),
         ]
         for url, must in cases:
@@ -250,25 +389,36 @@ def test_url_state(mem, store):
                     break
             check(f"language switch keeps state on {url}", ok, why)
 
-        # The drift filter must survive the page's own filter links too. Stated as behaviour, not as
-        # DOM shape: for each status the user can switch to, a link that keeps drift must EXIST.
+        # A filter must survive the page's own filter links too. Stated as behaviour, not as DOM
+        # shape: for each status the user can switch to, a link that keeps the filter must EXIST.
         # Counting every status-bearing link instead would be wrong — two of them are the deliberate
         # "leave this filter" controls, and a test that demanded they keep it would be demanding a bug.
-        try:
-            html = urllib.request.urlopen(base + "/memories?drift=1", timeout=10).read().decode("utf-8", "replace")
-            links = {u.replace("&amp;", "&") for u in re.findall(r'href="(/memories\?[^"]*)"', html)}
-            for st in ("active", "superseded", "all"):
-                want = {f"/memories?status={st}&drift=1", f"/memories?drift=1&status={st}"}
-                check(f"switching to status={st} keeps drift", bool(want & links),
-                      f"no link preserves it; saw {sorted(l for l in links if st in l)[:2]}")
-            # ...and the way out must exist, or the filter becomes a trap.
-            check("there is a link that clears the drift filter",
-                  any("drift" not in u for u in links),
-                  "every link keeps drift — no way back to the full list")
-            check("an active filter is announced on the page", 'notice-drift' in html,
-                  "no notice — invisible filters read as missing data")
-        except Exception as e:
-            check("drift filter links", False, str(e))
+        # Every filter the page understands is checked, not just the one that broke: the bug was a
+        # hardcoded carry list, so a test naming one filter would rot the same way the code did.
+        for key, val, qval in (("drift", "1", "1"), ("files", "mem.py", "mem.py")):
+            try:
+                html = urllib.request.urlopen(base + f"/memories?{key}={qval}", timeout=10).read().decode("utf-8", "replace")
+                links = {u.replace("&amp;", "&") for u in re.findall(r'href="(/memories\?[^"]*)"', html)}
+                for st in ("active", "superseded", "all"):
+                    keeps = [u for u in links
+                             if urllib.parse.parse_qs(urllib.parse.urlparse(u).query).get("status", [None])[0] == st
+                             and urllib.parse.parse_qs(urllib.parse.urlparse(u).query).get(key, [None])[0] == val]
+                    check(f"switching to status={st} keeps {key}", bool(keeps),
+                          f"no link preserves it; saw {sorted(l for l in links if st in l)[:2]}")
+                # ...and the way out must exist, or the filter becomes a trap.
+                check(f"there is a link that clears the {key} filter",
+                      any(key not in u for u in links),
+                      f"every link keeps {key} — no way back to the full list")
+                check(f"the {key} filter is announced on the page", "notice-drift" in html,
+                      "no notice — invisible filters read as missing data")
+                # The search form submits by POST-less GET; a carried filter absent from it is
+                # dropped the moment the user types anything.
+                check(f"the search form carries {key}",
+                      re.search(r'<input type="hidden" name="%s" value="%s">' % (re.escape(key), re.escape(val)), html)
+                      is not None,
+                      "no hidden input — submitting the form drops the filter")
+            except Exception as e:
+                check(f"{key} filter links", False, str(e))
     finally:
         srv.terminate()
         try:
@@ -298,6 +448,21 @@ MUTATIONS = [
     ("links preserve the filters in the URL", "mem_web.py",
      'out += f\'<a{cls} href="{h(self_url(lang=l))}">{l.upper()}</a>\'',
      'out += f\'<a{cls} href="?lang={l}">{l.upper()}</a>\''),
+    # Anchors matched as raw substrings: 'mem.py' would then also claim 'not_mem.py'.
+    ("anchor matching respects path boundaries", "mem.py",
+     'if f == want or f.endswith("/" + want) or want.endswith("/" + f):',
+     "if want in f or f in want:"),
+    # Derivation that trusts any path-shaped string, inventing anchors to files that never existed.
+    ("derivation only keeps files that exist", "mem.py",
+     "        if os.path.isfile(os.path.join(proj, rel)):", "        if True:"),
+    # The carry list goes back to being hardcoded — the original bug, which dropped whichever
+    # filter was added last.
+    # Without the strip, a project nested in a larger repo reports "quiet" for everything.
+    ("git paths are made relative to the project directory", "mem.py",
+     "                path = path[len(prefix):]", "                pass"),
+    ("filter carry is read off the actual query string", "mem_web.py",
+     "        p = {k: v[0] for k, v in qs.items() if v and v[0] != \"\"}",
+     '        p = {"q": q, "scope": fscope, "type": ftype, "status": fstat}'),
 ]
 
 
@@ -353,6 +518,8 @@ def main():
         test_status_invariant(mem)
         test_protected(mem)
         test_egress(mem, store)
+        test_anchors(mem, store)
+        test_drift(mem, store)
         test_url_state(mem, store)
     finally:
         shutil.rmtree(store, ignore_errors=True)
