@@ -54,12 +54,18 @@ def _write_session_marker(session_id, cwd):
 
 
 def _load_local_env():
-    """Ingest .mem-local.env (KEY=VALUE, next to the code) into os.environ via setdefault, so settings
+    """Ingest .mem-local.env (KEY=VALUE) into os.environ via setdefault, so settings
     saved in the web UI — e.g. MEM_INJECT_BUDGET and the injection knobs below — are honored by THIS
     hook too, not just the web server. Self-contained on purpose: the hook never imports mem, so it
     stays bulletproof. setdefault => a real shell export still wins."""
+    # Same resolution as mem.py: MEM_DATA_DIR wins, code dir is the fallback. Kept in step by hand
+    # because this hook deliberately imports nothing — but it must agree, or the settings the web UI
+    # saves and the settings the injection honours drift apart.
+    d = os.environ.get("MEM_DATA_DIR")
+    envfile = (os.path.join(os.path.abspath(os.path.expanduser(d)), ".mem-local.env") if d
+               else os.path.join(PROJ, ".mem-local.env"))
     try:
-        with open(os.path.join(PROJ, ".mem-local.env"), encoding="utf-8") as f:
+        with open(envfile, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line.startswith("export "):

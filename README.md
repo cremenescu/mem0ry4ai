@@ -574,7 +574,7 @@ Everything is overridable via environment variables — no config file needed:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MEM_DATA_DIR` | next to the code; `~/.mem0ry4ai` in plugin installs | where `store/` + `staging/` live (own git repo) |
+| `MEM_DATA_DIR` | next to the code; `~/.mem0ry4ai` in plugin installs | where `store/`, `staging/` and `.mem-local.env` live — point it at a scratch dir and both data and settings are isolated |
 | `MEM_REDACT` | `1` | set `0` to disable secret redaction on write paths |
 | `MEM_INJECT_BUDGET` | `8000` | max bytes injected at SessionStart (critical rules always fit; cuts are announced) |
 | `MEM_WEB_PORT` | `8841` | web UI port (`mem.py serve`) |

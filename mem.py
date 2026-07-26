@@ -31,7 +31,24 @@ import time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
-LOCAL_ENV = os.path.join(ROOT, ".mem-local.env")
+
+
+def _local_env_path():
+    """Where per-machine settings live. Follows MEM_DATA_DIR when it is set, and only falls back to
+    the code directory otherwise.
+
+    It used to be pinned next to the code unconditionally, which made "point MEM_DATA_DIR at a copy
+    so you can test safely" a lie: the store was isolated but the settings were not, so any test
+    that exercised the settings page rewrote the real config. That happened here — an audit run
+    against throwaway stores silently clamped three live settings to its test values and dropped a
+    fourth entirely, and it went unnoticed until a dashboard light turned red."""
+    d = os.environ.get("MEM_DATA_DIR")
+    if d:
+        return os.path.join(os.path.abspath(os.path.expanduser(d)), ".mem-local.env")
+    return os.path.join(ROOT, ".mem-local.env")
+
+
+LOCAL_ENV = _local_env_path()
 
 
 def load_local_env():

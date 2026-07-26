@@ -53,8 +53,10 @@ python3 mem.py serve               # web UI on http://127.0.0.1:8841
 python3 mem.py mcp                 # MCP server (stdio)
 ```
 
-Point `MEM_DATA_DIR` at a scratch directory while developing so you never test against your real
-store:
+Point `MEM_DATA_DIR` at a scratch directory while developing so you never touch your real store —
+**or your real settings**: `.mem-local.env` follows `MEM_DATA_DIR` too, so exercising the settings
+page in a test cannot rewrite the config you actually use. (It used to live next to the code
+unconditionally, which made this instruction only half true and cost the author a working config.)
 
 ```bash
 export MEM_DATA_DIR=/tmp/mem0ry4ai-dev

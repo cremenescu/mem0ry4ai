@@ -488,8 +488,11 @@ def health_checks():
     # the injection must fit its own budget (below the harness persist/truncation threshold)
     isz, ibud, ncrit = injection_stats()
     if isz is not None:
+        # Links to what is actually being injected. A red light with no way to see what is in it,
+        # or where the budget is set, is a complaint rather than a diagnostic.
         out.append([t("SessionStart injection"), isz <= ibud,
-                    f"{round(isz / 1024, 1)} KB / {t('budget')} {round(ibud / 1024, 1)} KB · {ncrit} {t('critical rules')}"])
+                    f"{round(isz / 1024, 1)} KB / {t('budget')} {round(ibud / 1024, 1)} KB · {ncrit} {t('critical rules')}",
+                    "/inject"])
     # git store: real dirty state (dirty is informative, not an error — auto-checkpoint at session end)
     if os.path.isdir(os.path.join(mem.DATA, ".git")):
         out.append([t("Git store"), None, t("uncommitted — auto-checkpoint at session end")]
@@ -2642,7 +2645,9 @@ def page_index(qs=None):
             'ale caror fisiere lipsesc, s-au mutat sau au primit multe commit-uri de cand a fost '
             'scrisa memoria; nu inseamna ca memoria e gresita, ci ca merita recitita. '
             '<b>Hooks</b> — daca injectarea automata e inregistrata. '
-            '<b>Injectare SessionStart</b> — cat ocupa acum fata de buget. '
+            '<b>Injectare SessionStart</b> — cat ocupa acum fata de buget; rosu inseamna ca trece de el. '
+            'Click pe cifra arata exact ce se injecteaza; bugetul se schimba in '
+            '<a href="/settings">Setari</a>, la <code>MEM_INJECT_BUDGET</code>. '
             '<b>Git store</b> — daca sunt memorii necomise.')
         dots_help = ('<b>Verde</b> = in regula. <b>Rosu</b> = cere atentie. '
                      '<b>Gri</b> = nu se stie / nu se aplica — de exemplu drift-ul cand nicio memorie '
@@ -2668,7 +2673,9 @@ def page_index(qs=None):
             'files are now missing, moved, or heavily committed to since the memory was written. It '
             'does not mean the memory is wrong, only that it is worth re-reading. '
             '<b>Hooks</b> — whether automatic injection is registered. '
-            '<b>SessionStart injection</b> — how much it currently uses of its budget. '
+            '<b>SessionStart injection</b> — how much of its budget it uses now; red means it is over. '
+            'Click the figure to see exactly what gets injected; the budget itself lives in '
+            '<a href="/settings">Settings</a>, as <code>MEM_INJECT_BUDGET</code>. '
             '<b>Git store</b> — whether any memories are uncommitted.')
         dots_help = ('<b>Green</b> = fine. <b>Red</b> = wants attention. '
                      '<b>Grey</b> = unknown or not applicable — for instance drift when nothing is '
