@@ -326,6 +326,93 @@ def test_drift(mem, store):
         shutil.rmtree(proj, ignore_errors=True)
 
 
+def test_store_repo(mem, store):
+    """The store becomes a git repository on first write -- and never a NESTED one.
+
+    Both halves matter, in opposite directions. Without the first, an install that never runs the
+    SessionEnd hook (a container, a VM, anyone using only the CLI or only the web UI) keeps its
+    memories as plain markdown with no history at all, while the project's first claim is that
+    markdown plus git IS the source of truth. Nothing reports it, because every commit path
+    captures its output.
+
+    Without the second, a git-clone install -- where the store lives INSIDE the project's own clone
+    -- would get a nested repository, silently detaching the store from the history it already had.
+    That turns a missing feature into data loss, so it is the more dangerous of the two.
+    """
+    env = dict(os.environ)
+    env.pop("MEM_DATA_DIR", None)
+
+    def add_into(data_dir):
+        return subprocess.run(
+            [sys.executable, os.path.join(PROJ, "mem.py"), "add", "--type", "fact",
+             "--scope", "global", "--summary", "s", "--body", "b"],
+            env=dict(env, MEM_DATA_DIR=data_dir), capture_output=True, text=True)
+
+    fresh = tempfile.mkdtemp(prefix="mem-repo-")
+    outer = tempfile.mkdtemp(prefix="mem-outer-")
+    try:
+        r = add_into(fresh)
+        check("a write into a fresh data dir succeeds", r.returncode == 0, r.stderr[-200:])
+        check("the store becomes a git repo on first write",
+              os.path.isdir(os.path.join(fresh, ".git")),
+              "no .git -- the store has no history and nothing says so")
+        check("the derived databases are git-ignored",
+              os.path.exists(os.path.join(fresh, ".gitignore")),
+              "no .gitignore -- regenerable indexes would churn every commit")
+
+        subprocess.run(["git", "-C", outer, "init", "-q"], capture_output=True)
+        nested = os.path.join(outer, "sub")
+        os.makedirs(nested, exist_ok=True)
+        r = add_into(nested)
+        check("a write inside an existing repo succeeds", r.returncode == 0, r.stderr[-200:])
+        check("no nested repo is created inside an existing one",
+              not os.path.isdir(os.path.join(nested, ".git")),
+              "nested .git -- this DETACHES the store from the history it already had")
+    finally:
+        shutil.rmtree(fresh, ignore_errors=True)
+        shutil.rmtree(outer, ignore_errors=True)
+
+    # Identity is passed inline on every commit path so that a machine which cannot DERIVE one
+    # still records history. Asserted by actually committing, not by looking for "user.name=" in
+    # the argument list -- that would pass for any hardcoded junk, which an earlier version of this
+    # test did, and the canary caught it.
+    #
+    # `user.useConfigOnly` is what makes this deterministic. Given no configured identity, git
+    # normally guesses one from the account and hostname and commits anyway, which is why this test
+    # passed on macOS even with the guard removed. It is exactly what does NOT happen in a
+    # container, where the hostname resolves to "(none)" and git refuses with "Author identity
+    # unknown" -- verified in the real container this was found in. Setting useConfigOnly
+    # reproduces that refusal on any host, so the test measures the property rather than the
+    # machine it happens to run on.
+    repo = tempfile.mkdtemp(prefix="mem-ident-")
+    try:
+        bare_env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull,
+                        GIT_CONFIG_SYSTEM=os.devnull, HOME=repo)
+        no_guess = ["-c", "user.useConfigOnly=true"]
+        subprocess.run(["git", "-C", repo, "init", "-q"], env=bare_env, capture_output=True)
+        with open(os.path.join(repo, "f.txt"), "w") as f:
+            f.write("x\n")
+        subprocess.run(["git", "-C", repo, "add", "f.txt"], env=bare_env, capture_output=True)
+
+        # Control: without an identity this MUST fail, or the test below proves nothing.
+        ctl = subprocess.run(["git", "-C", repo] + no_guess + ["commit", "-m", "t"],
+                             env=bare_env, capture_output=True, text=True)
+        check("the test can actually observe a missing identity", ctl.returncode != 0,
+              "git committed with no identity — this test cannot detect the bug it exists for")
+
+        r = subprocess.run(["git", "-C", repo] + no_guess + list(mem.git_identity("test"))
+                           + ["commit", "-m", "t"],
+                           env=bare_env, capture_output=True, text=True)
+        check("a commit succeeds where git cannot derive an identity (container, VM)",
+              r.returncode == 0,
+              "git refused: " + (r.stderr or r.stdout).strip().replace("\n", " ")[:160])
+    finally:
+        shutil.rmtree(repo, ignore_errors=True)
+
+    check("signing is force-disabled for unattended commits",
+          "commit.gpgsign=false" in " ".join(mem.git_identity("web")))
+
+
 def test_url_state(mem, store):
     """No link may silently drop the filters the user is looking at.
 
@@ -457,6 +544,17 @@ MUTATIONS = [
      "        if os.path.isfile(os.path.join(proj, rel)):", "        if True:"),
     # The carry list goes back to being hardcoded — the original bug, which dropped whichever
     # filter was added last.
+    # Removing the init leaves a store with no history, and nothing anywhere says so.
+    ("the store is made a git repo on first write", "mem.py",
+     '    ensure_store_repo()\n    if os.path.exists(path):', '    if os.path.exists(path):'),
+    # Removing the enclosing-repo check creates a NESTED repo in a git-clone install,
+    # detaching the store from history it already had.
+    ("an enclosing repo is detected before initialising", "mem.py",
+     '        if r.returncode == 0 and r.stdout.strip() == "true":', '        if False:'),
+    # Without an inline identity, a machine with no global git config commits nothing, silently.
+    ("commits carry an inline identity", "mem.py",
+     '    return ["-c", "commit.gpgsign=false",\n            "-c", f"user.name=mem0ry4ai {who}",\n            "-c", f"user.email={who}@mem0ry4ai.local"]',
+     '    return ["-c", "commit.gpgsign=false"]'),
     # Without the strip, a project nested in a larger repo reports "quiet" for everything.
     ("git paths are made relative to the project directory", "mem.py",
      "                path = path[len(prefix):]", "                pass"),
@@ -520,6 +618,7 @@ def main():
         test_egress(mem, store)
         test_anchors(mem, store)
         test_drift(mem, store)
+        test_store_repo(mem, store)
         test_url_state(mem, store)
     finally:
         shutil.rmtree(store, ignore_errors=True)

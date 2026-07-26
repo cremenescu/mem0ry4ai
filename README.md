@@ -199,8 +199,18 @@ The SessionStart hook also auto-starts the web server, so the UI is always up wh
 
 ### Windows (native — no WSL, no PHP)
 
-Everything is pure-Python stdlib, so mem0ry4ai runs natively on Windows. Use the git-clone path
-with `py` (or `python`):
+Everything is pure-Python stdlib, so mem0ry4ai runs natively on Windows. There is a graphical
+installer that does the whole thing — it installs Python and git through winget if they are
+missing (per-user, never as administrator), clones, puts the store outside the clone, registers
+the hooks, and sets `CLAUDE_CODE_GIT_BASH_PATH`, without which the hooks register and then
+silently never fire:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install-windows.ps1
+```
+
+It echoes every command into its log before running it, and its second tab uninstalls. Or do it
+by hand with `py` (or `python`):
 
 ```powershell
 git clone https://github.com/cremenescu/mem0ry4ai.git
@@ -270,21 +280,45 @@ up at `http://127.0.0.1:8841/`.
 
 </details>
 
-### Teach your agent to write memories
+### Server install (Docker)
 
-Add an instruction like this to your `CLAUDE.md` (this is the behavioral half of the system —
-hooks handle recall, the agent handles capture):
+For a NAS, a home server, a VM — anything always-on that you want to reach from a browser. It is
+**not** the right way to use mem0ry4ai on the machine where you run Claude Code: there the hooks
+run inside the Claude Code process, and containerising would turn every SessionStart into a
+`docker exec`, adding a daemon to a tool whose whole claim is that it needs none.
 
-> When you discover something durable (a gotcha with a non-obvious cause, an architecture
-> decision, an infrastructure fact, a reusable command, a user preference/correction, a change
-> of project status), proactively save it without asking:
-> `echo "body" | <path>/mem.py add --type <T> --scope <global|project:slug> --summary "..." --source claude:live`
-> Check `mem.py search` first to avoid duplicates. Never save ephemeral tasks.
+```bash
+cd docker && docker compose up -d      # http://localhost:8841/
+```
 
-`mem.py add` also **warns (never blocks)** when a near-duplicate memory of the same type already
-exists — printing the closest matches and a ready-to-run `supersede` command — so overlapping
-memories get merged instead of piling up. New memories are **auto-embedded at session end**, so
-search and the Links suggestions stay current without running `mem.py embed` by hand.
+The store is a mounted volume, never inside the code clone, so updating the image cannot touch
+memories and `docker rm` is not a data-loss event. The clone's git remote is removed rather than
+left unused — a clone of the public repo sitting next to a store full of private memories is one
+`git push` away from publishing them.
+
+Two settings are load-bearing rather than stylistic. `MEM_WEB_HOST=0.0.0.0` is required inside the
+container: the server binds loopback by default, and publishing a port to a loopback-bound server
+gives you a container that looks healthy and answers nothing. And the compose file publishes to
+`127.0.0.1` only — **the web UI has no authentication**, so exposing it beyond the host is a
+decision to make on purpose, with a reverse proxy in front. Never expose it to the internet.
+
+### Uninstalling
+
+```bash
+python3 uninstall.py          # show exactly what would be removed, change nothing
+python3 uninstall.py --yes    # remove the hooks, the scheduled job, the running web server
+```
+
+**It does not delete your memories.** That is deliberate: the store is what you spent months
+building, the code is a `git clone` away, and an uninstaller that quietly takes the data with it
+is a data-loss bug wearing a helpful face. Removing the store needs `--delete-memories` *and*
+typing the word DELETE at the prompt.
+
+If your store lives inside the code folder (the git-clone install), the preview says so before you
+delete anything — that is the one arrangement where "just remove the directory" also removes every
+memory you have.
+
+On Windows the same operations are the second tab of `install-windows.ps1`.
 
 ## Memory types
 
@@ -303,6 +337,23 @@ search and the Links suggestions stay current without running `mem.py embed` by 
 "where was I?" when you return to a project after weeks. The CLI mirrors this: `mem.py resume
 --scope project:<slug>` prints a one-screen briefing (latest status + ready/blocked todos + recent
 knowledge); with no scope, a one-line-per-project overview.
+
+### Teach your agent to write memories
+
+Add an instruction like this to your `CLAUDE.md` (this is the behavioral half of the system —
+hooks handle recall, the agent handles capture):
+
+> When you discover something durable (a gotcha with a non-obvious cause, an architecture
+> decision, an infrastructure fact, a reusable command, a user preference/correction, a change
+> of project status), proactively save it without asking:
+> `echo "body" | <path>/mem.py add --type <T> --scope <global|project:slug> --summary "..." --source claude:live`
+> Check `mem.py search` first to avoid duplicates. Never save ephemeral tasks.
+
+`mem.py add` also **warns (never blocks)** when a near-duplicate memory of the same type already
+exists — printing the closest matches and a ready-to-run `supersede` command — so overlapping
+memories get merged instead of piling up. New memories are **auto-embedded at session end**, so
+search and the Links suggestions stay current without running `mem.py embed` by hand.
+
 
 ### Record fields beyond the basics
 

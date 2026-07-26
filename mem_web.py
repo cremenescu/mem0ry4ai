@@ -936,9 +936,9 @@ def git_commit_store(msg):
         return (False, "git add failed: " + " ".join((r or {}).get("lines", [])))
     root = mem.DATA
     try:
+        mem.ensure_store_repo()
         rc = subprocess.run(["git", "-C", root, "-c", f"safe.directory={root}",
-                             "-c", "commit.gpgsign=false", "-c", "user.name=mem0ry4ai web",
-                             "-c", "user.email=web@mem0ry4ai.local", "commit", "-m", msg, "--", "store"],
+                             *mem.git_identity("web"), "commit", "-m", msg, "--", "store"],
                             capture_output=True, text=True, timeout=15, creationflags=_NO_WINDOW)
         lines = (rc.stdout + rc.stderr).rstrip("\n").split("\n")
         if rc.returncode != 0:
@@ -3409,15 +3409,21 @@ def _reload_watcher(interval=2.0):
     threading.Thread(target=loop, daemon=True).start()
 
 
-def serve(host="127.0.0.1", port=None):
+def serve(host=None, port=None):
     _load_local_env()
+    # Loopback by default: the UI has no authentication, so binding it to the network is a decision
+    # the operator makes on purpose, never one they inherit.
+    host = host or os.environ.get("MEM_WEB_HOST", "127.0.0.1")
     port = int(port or os.environ.get("MEM_WEB_PORT", "8841"))
     httpd = Server((host, port), Handler)
     reload_on = os.environ.get("MEM_NO_RELOAD", "").strip().lower() not in ("1", "true", "yes")
     if reload_on:
         _reload_watcher()
+    # flush: stdout is block-buffered when it is not a terminal, so under a service manager --
+    # `docker logs`, launchd, systemd -- this line otherwise never appears and there is no way to
+    # tell a server that started from one that hung.
     print(f"mem0ry4ai web UI on http://{host}:{port}/  (data: {mem.DATA})"
-          + ("  · auto-reload on" if reload_on else ""))
+          + ("  · auto-reload on" if reload_on else ""), flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

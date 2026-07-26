@@ -1,0 +1,30 @@
+# mem0ry4ai — headless server install. See Dockerfile for when this is and is not the right choice.
+#
+#   docker compose up -d          # build + run
+#   docker compose logs -f        # the startup line appears here; if it does not, it did not start
+#
+# Then open http://<host>:8841/
+
+services:
+  mem0ry4ai:
+    build:
+      context: .
+      args:
+        # Pin a release rather than tracking main: this container commits to your store, and an
+        # unattended rebuild should never be the first time new code touches it.
+        VERSION: v0.19.0
+    image: mem0ry4ai:v0.19.0
+    container_name: mem0ry4ai
+    restart: unless-stopped
+    ports:
+      # 127.0.0.1 on the left: reachable from the host only. The UI has no authentication, so
+      # exposing it to the LAN is a decision to make deliberately -- drop the prefix, or put a
+      # reverse proxy with auth in front. Never expose it to the internet.
+      - "127.0.0.1:8841:8841"
+    volumes:
+      # The store. Everything else in the container is disposable; this is not.
+      - ./data:/data
+    environment:
+      # Inside the container the server must bind all interfaces, or the published port reaches
+      # nothing. The container's own network namespace is the boundary, not this setting.
+      MEM_WEB_HOST: "0.0.0.0"

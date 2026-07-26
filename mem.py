@@ -196,8 +196,71 @@ def scope_label(scope):
     return "global" if scope == "global" else scope.split(":", 1)[1]
 
 
+def git_identity(who):
+    """Commit identity passed inline, never taken from the machine's global git config.
+
+    Every store commit in this project captures its output, so a machine with no `user.email` --
+    any fresh container, VM or CI runner -- does not fail loudly. It fails silently, and the store
+    quietly stops accumulating history while everything else keeps working perfectly. Two of the
+    four commit paths shipped without an inline identity and it was only found by installing into
+    a clean container.
+
+    Signing is force-disabled for the same class of reason: `commit.gpgsign=true` with no local
+    override hangs an unattended commit on a passphrase prompt that nobody is there to answer.
+    """
+    return ["-c", "commit.gpgsign=false",
+            "-c", f"user.name=mem0ry4ai {who}",
+            "-c", f"user.email={who}@mem0ry4ai.local"]
+
+
+_STORE_REPO = None
+
+
+def ensure_store_repo():
+    """Make DATA a git repository, unless it already is one or already lives inside one.
+
+    git is not decoration here: the project's first claim is that markdown plus git IS the source
+    of truth, and supersede-never-delete only means something if the history exists to look back
+    at. But `git init` lived solely in the SessionEnd hook, so any install that never runs that
+    hook -- a container, a VM, a server, anyone using only the CLI or only the web UI -- had no
+    repository at all. Nothing reported it, because every commit path swallows its output; the
+    store simply had no history and looked fine.
+
+    The `rev-parse` check is the part that must not be skipped. In a git-clone install the store
+    sits INSIDE the project's own clone, and initialising a nested repository there would detach
+    the store from the history it already had -- turning a doc bug into data loss.
+    """
+    global _STORE_REPO
+    if _STORE_REPO is not None:
+        return _STORE_REPO
+    try:
+        if os.path.isdir(os.path.join(DATA, ".git")):
+            _STORE_REPO = True
+            return True
+        r = subprocess.run(["git", "-C", DATA, "rev-parse", "--is-inside-work-tree"],
+                           capture_output=True, text=True, creationflags=_NO_WINDOW)
+        if r.returncode == 0 and r.stdout.strip() == "true":
+            _STORE_REPO = True             # already tracked by an enclosing repo; leave it alone
+            return True
+        subprocess.run(["git", "init", "-q", DATA], capture_output=True, timeout=10,
+                       creationflags=_NO_WINDOW)
+        gi = os.path.join(DATA, ".gitignore")
+        if not os.path.exists(gi):
+            with open(gi, "w", encoding="utf-8") as f:
+                # derived dbs (FTS index + embeddings) are regenerable and churn on every write
+                f.write("staging/\nstore/.index.db*\nstore/.embed.db*\nstore/.sessions.db*\n"
+                        ".web-server.pid\n.web-server.log\n")
+        _STORE_REPO = os.path.isdir(os.path.join(DATA, ".git"))
+    except Exception:
+        _STORE_REPO = False                # no git on this box: everything else still works
+    return _STORE_REPO
+
+
 def ensure_header(path, scope):
     """Create the scope file with a header if it does not exist yet."""
+    # Every write goes through here, which makes it the one place that can guarantee the store is
+    # version-controlled before anything lands in it.
+    ensure_store_repo()
     if os.path.exists(path):
         return
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -2364,10 +2427,17 @@ def cmd_consolidate(a):
             consolidated_count += 1
             print(f"Consolidated: {master['id']} (kept) <- " + ", ".join(r["id"] for r in duplicates) + " (superseded)")
             
-        # Commit changes. -c commit.gpgsign=false: consolidate runs git non-interactively (no TTY), so if
-        # the user has commit.gpgsign=true globally and no local override, a signing commit would hang
-        # forever waiting for a GPG passphrase — force-skip signing for this internal checkpoint commit.
-        subprocess.run(["git", "-c", "commit.gpgsign=false", "commit", "-am", f"Propose memory consolidation ({consolidated_count} clusters)"], cwd=DATA, capture_output=True, text=True, creationflags=_NO_WINDOW)
+        # Commit changes. The identity is passed inline (see git_identity): consolidate rewrites
+        # records, and on a machine with no global user.email this commit used to fail silently,
+        # leaving the store rewritten but unrecorded — the one state from which there is no way
+        # back. Report the failure rather than swallowing it.
+        ensure_store_repo()
+        r = subprocess.run(["git", *git_identity("consolidate"), "commit", "-am",
+                            f"Propose memory consolidation ({consolidated_count} clusters)"],
+                           cwd=DATA, capture_output=True, text=True, creationflags=_NO_WINDOW)
+        if r.returncode != 0 and "nothing to commit" not in (r.stdout + r.stderr):
+            print(f"warning: could not commit the consolidation ({(r.stderr or r.stdout).strip().splitlines()[:1]}); "
+                  "the store changed but the change is not in git history")
         
     finally:
         # Restore original branch
@@ -2529,7 +2599,11 @@ def main():
 
     psv = sub.add_parser("serve", help="start the web UI (pure Python, no PHP)")
     psv.add_argument("--port", type=int, help="port (default: MEM_WEB_PORT or 8841)")
-    psv.add_argument("--host", default="127.0.0.1")
+    psv.add_argument("--host", default=os.environ.get("MEM_WEB_HOST", "127.0.0.1"),
+                     help="address to bind (default: MEM_WEB_HOST or 127.0.0.1 = this machine only). "
+                          "Use 0.0.0.0 to accept connections from the network — required in a "
+                          "container, where publishing a port to a loopback-bound server produces "
+                          "one that looks up and answers nothing")
     psv.set_defaults(func=cmd_serve)
 
     pmc = sub.add_parser("mcp", help="start the MCP server (stdio) — pull memory from any MCP runtime (Claude/Gemini/Cursor/OpenCode)")

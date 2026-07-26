@@ -49,10 +49,17 @@ def _log(msg):
 
 
 def _git(*args, check=False):
-    """Run git in the store repo, non-interactively. Signing is force-disabled on commits so a machine
-    with commit.gpgsign=true (and no local override) can't hang the unattended job on a GPG passphrase."""
-    return subprocess.run(["git", "-C", mem.DATA, *args], capture_output=True, text=True,
-                          creationflags=_NO_WINDOW)
+    """Run git in the store repo, non-interactively.
+
+    The commit identity is passed inline for every call (see mem.git_identity): this job runs
+    unattended from launchd, where the environment is not the user's shell and a machine with no
+    global `user.email` would fail every commit — silently, because the output is captured. Signing
+    is force-disabled for the same reason: a signing commit with no TTY hangs on a passphrase
+    prompt nobody will answer.
+    """
+    mem.ensure_store_repo()
+    return subprocess.run(["git", "-C", mem.DATA, *mem.git_identity("maintenance"), *args],
+                          capture_output=True, text=True, creationflags=_NO_WINDOW)
 
 
 def step_reindex():
@@ -131,7 +138,7 @@ def step_commit_store():
     if not st.stdout.strip():
         return
     _git("add", "store")
-    _git("-c", "commit.gpgsign=false", "commit", "-m", "maintenance: automated store hygiene")
+    _git("commit", "-m", "maintenance: automated store hygiene")
     _log("commit: store changes committed")
 
 
