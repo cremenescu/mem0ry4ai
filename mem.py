@@ -312,6 +312,8 @@ def render_record(rid, rtype, scope, summary, body, confidence, source, created,
 # what to emit HERE, so "a private memory never reaches an agent" is a property of one function
 # that can be read in full, not a convention repeated across four files and eventually forgotten.
 
+MAX_BODY = 65536        # one record's body, on every write path
+
 TIERS = ("open", "redacted", "private")
 
 # Where the text is going. LOCAL is the user: the CLI in their terminal, the web UI on their
@@ -526,12 +528,18 @@ def _supersede_prior_status(scope, new_id):
 
 def add_memory(rtype, scope, summary, body, confidence="1.0", source="web", redact_secrets=True,
                status="active", protected=None, session=None, on_supersede=None,
-               priority=None, files=None, tier=None):
+               priority=None, files=None, tier=None, supersedes=None):
     """Append a fresh record; returns its id. Redacts secrets like every write path.
     status="working" makes it a scratch note: not injected at SessionStart, hidden from default
     search/list — until promote_memory() flips it to active.
     A new active `status` retires the previous one for its scope (see `_supersede_prior_status`);
-    `on_supersede(done, skipped)` is called with what it did, for callers that report it."""
+    `on_supersede(done, skipped)` is called with what it did, for callers that report it.
+
+    `supersedes` is the id this memory REVISES: it is retired in the same locked section, with the
+    usual trail (never a delete). This exists because the agent that just got corrected knows what
+    it is correcting; asking it beats inferring the link later from similarity. Raises if the id
+    does not exist or is protected — a revision that silently fails to retire the old record leaves
+    two contradictory memories live, which is the exact failure it is meant to prevent."""
     if rtype not in TYPES:
         raise ValueError(f"invalid type: {rtype}")
     if status not in ("active", "working"):
@@ -539,7 +547,7 @@ def add_memory(rtype, scope, summary, body, confidence="1.0", source="web", reda
     body = (body or "").strip()
     if not body:
         raise ValueError("empty body")
-    if len(body) > 65536:   # sanity cap (defense against an agent writing an unbounded body via MCP)
+    if len(body) > MAX_BODY:   # sanity cap (defense against an agent writing an unbounded body via MCP)
         raise ValueError("body too large (max 64 KiB)")
     if redact_secrets and redact.enabled():
         body = redact.redact(body)[0]
@@ -552,9 +560,24 @@ def add_memory(rtype, scope, summary, body, confidence="1.0", source="web", reda
                         priority=priority, files=files, protected=protected, session=session,
                         tier=tier)
     with _locked():
+        # Validate BEFORE the append, under the lock: a bad `supersedes` must abort the whole write.
+        # Appending first and failing after leaves the new record live AND the old one un-retired --
+        # two contradictory memories, which is precisely what the argument exists to prevent.
+        if supersedes:
+            target = get_record(supersedes)
+            if not target:
+                raise ValueError(f"supersedes: no record {supersedes}")
+            if target["meta"].get("status", "active") != "active":
+                raise ValueError(f"supersedes: {supersedes} is already "
+                                 f"{target['meta'].get('status')}")
+            if target["meta"].get("protected", "").strip().lower() in ("true", "yes", "1"):
+                raise ValueError(f"supersedes: {supersedes} is protected")
         ensure_header(path, scope)
         with open(path, "a", encoding="utf-8") as f:
             f.write("\n" + rec)
+        if supersedes:
+            # Same lock as the append: the revision and the retirement land together or not at all.
+            supersede_memory(supersedes, by=rid, reason=f"revised by {rid}")
         # Under the same (reentrant) lock, so no concurrent writer can leave two live statuses.
         if rtype == "status" and status == "active":
             done, skipped, older = _supersede_prior_status(scope, rid)
@@ -585,6 +608,11 @@ def update_memory(rec_id, rtype=None, scope=None, summary=None, body=None, confi
         m["confidence"] = confidence
     summ = summary if summary is not None else record_summary(r)
     bod = body if body is not None else r["body"]
+    # The same cap add_memory enforces. It lives here rather than in a route handler so the two
+    # write paths agree by construction: a profile edited through the web UI was unbounded while
+    # the identical body was refused on create, and the profile is injected in FULL every session.
+    if body is not None and len(bod) > MAX_BODY:
+        raise ValueError("body too large (max 64 KiB)")
     if redact_secrets and redact.enabled():   # only the fields the caller is changing
         if body is not None:
             bod = redact.redact(bod)[0]
@@ -620,6 +648,19 @@ def delete_memory(rec_id, bypass_protected=False):
     if not bypass_protected:
         if r["meta"].get("protected", "").strip().lower() in ("true", "yes", "1"):
             raise ValueError(f"cannot delete protected memory: {rec_id}")
+    # Drop the edges pointing at it first. A relation chip that resolves to nothing looks exactly
+    # like a live one in the UI, and no amount of staring at the surviving record explains it.
+    # Supersede deliberately does NOT do this: a superseded record still exists and its links are
+    # still meaningful history. A deleted one is gone, so pointing at it is just wrong.
+    for other in all_records():
+        if other["id"] == rec_id:
+            continue
+        for key in ("related-to", "blocked-by"):
+            if rec_id in _list_meta(other, key):
+                try:
+                    _edit_list_meta(other["id"], key, remove=[rec_id])
+                except ValueError:
+                    pass
     return _rewrite_block(rec_id, None)
 
 
@@ -756,7 +797,8 @@ def cmd_add(a):
     # so we supersede instead of silently piling up near-duplicates. Computed before the write so it
     # never matches the new record against itself.
     dup_warn = []
-    if not a.no_dup_check and os.environ.get("MEM_DUP_CHECK", "1") != "0":
+    if (not a.no_dup_check and os.environ.get("MEM_DUP_CHECK", "1") != "0"
+            and not getattr(a, "supersedes", None)):   # already told us what it revises
         dup_warn = find_duplicates(a.type, summary, body, files)
     inj = redact.scan_injection(summary + "\n" + body)
     status = "working" if getattr(a, "working", False) else "active"
@@ -771,12 +813,15 @@ def cmd_add(a):
         files=files,
         protected="true" if getattr(a, "protected", False) else None,
         tier=getattr(a, "tier", None),
+        supersedes=getattr(a, "supersedes", None),
         session=(getattr(a, "session", None) or current_session()),
         on_supersede=lambda done, skipped, older: retired.extend(
             [("retired", i) for i in done] + [("protected", i) for i in skipped]
             + ([("older", str(older))] if older else [])))
     tag = "  [working]" if status == "working" else ("  [CRITICAL]" if a.critical else "")
     print(f"added {rid}  [{a.type} · {a.scope}]{tag}  -> {os.path.relpath(path, DATA)}")
+    if getattr(a, "supersedes", None):
+        print(f"  retired {a.supersedes} (revised by {rid}; superseded, not deleted)")
     sys.stdout.flush()   # so the stdout 'added' line lands before any stderr warning below
     for kind, old in retired:
         if kind == "retired":
@@ -1116,12 +1161,17 @@ def _cosine(a, b):
     return sum(x * y for x, y in zip(a, b)) / (na * nb) if na and nb else 0.0
 
 
-def find_duplicates(rec_type, summary, body, files=None, k=3):
+def find_duplicates(rec_type, summary, body, files=None, k=3, embed_timeout=None):
     """Existing ACTIVE memories of the SAME type most similar to a candidate, as
     (score, id, scope, summary) sorted high-first. Semantic (cosine over .embed.db) when an
     embedder is up; otherwise a lexical Jaccard fallback on the summary. Empty if nothing crosses
     the bar. A guard against silently duplicating a memory — it warns at write time, never blocks.
-    Tunable: MEM_DUP_THRESHOLD (cosine, default 0.62), MEM_DUP_JACCARD (lexical, default 0.5)."""
+    Tunable: MEM_DUP_THRESHOLD (cosine, default 0.62), MEM_DUP_JACCARD (lexical, default 0.5).
+
+    `embed_timeout` bounds the embedder call, for callers on a latency-sensitive write path (the
+    MCP tool): a slow Ollama must not make saving a memory feel broken, because an agent that
+    finds writing slow simply stops writing. On timeout this degrades to the lexical fallback
+    rather than failing — a weaker warning beats no warning."""
     cands = [r for r in all_records()
              if r["meta"].get("status", "active") == "active"
              and r["meta"].get("type") == rec_type]
@@ -1133,7 +1183,10 @@ def find_duplicates(rec_type, summary, body, files=None, k=3):
     qv = None
     if emb:
         import llm
-        qv = llm.embed(text)
+        try:
+            qv = llm.embed(text, timeout=embed_timeout) if embed_timeout else llm.embed(text)
+        except Exception:
+            qv = None   # any embedder trouble -> lexical fallback below, never a failed write
     if qv is not None:
         thresh = float(os.environ.get("MEM_DUP_THRESHOLD", "0.62"))
         for r in cands:
@@ -1218,6 +1271,106 @@ def dedup_near(records, threshold=None, prefer=None):
         else:
             suppressed.append((r, twin["id"]))
     return [r for r in records if r["id"] in kept_ids], suppressed
+
+
+def _project_dir(scope):
+    """Where a scope's code lives: <repo-root>/<slug> for project:<slug>. None for global.
+
+    The store sits inside the monorepo (or beside it), so a sibling directory named after the slug
+    is the convention every memory in this store already follows. Returns None rather than guessing
+    when that directory does not exist — a wrong root would report drift for every memory at once."""
+    if not scope or not scope.startswith("project:"):
+        return None
+    slug = scope.split(":", 1)[1].strip()
+    if not slug:
+        return None
+    root = os.path.dirname(os.path.abspath(DATA))
+    d = os.path.join(root, slug)
+    return d if os.path.isdir(d) else None
+
+
+def check_drift(records=None, since_commits=None):
+    """Which memories may have gone stale because the code they describe moved on.
+
+    This is the honest, cheap half of a hard problem. It does NOT read the code or judge whether a
+    memory is still true — nothing here understands the change. It reports a *reason to re-read*:
+    a memory anchored to files (`files:`) whose files have since been deleted, or committed to many
+    times since the memory was written. Deletion is a strong signal; churn is a weak one, which is
+    why the threshold is tunable and the output is a report, never an edit.
+
+    Returns [(record, [(path, verdict, detail), ...])] for records with at least one finding.
+    Verdicts: 'missing' (the file is gone), 'churn' (>= threshold commits since), 'moved' (the path
+    is gone but a file with that basename exists elsewhere in the project).
+    Only records carrying `files:` can be checked at all — see `mem.py drift` for the coverage line.
+    """
+    if since_commits is None:
+        try:
+            since_commits = int(os.environ.get("MEM_DRIFT_COMMITS", "10"))
+        except (TypeError, ValueError):
+            since_commits = 10
+    if records is None:
+        records = [r for r in all_records() if r["meta"].get("status", "active") == "active"]
+    out = []
+    for r in records:
+        raw = (r["meta"].get("files") or "").strip()
+        if not raw:
+            continue
+        proj = _project_dir(r["meta"].get("scope", ""))
+        if not proj:
+            continue
+        created = (r["meta"].get("created") or "")[:19]
+        findings = []
+        for rel in [x.strip() for x in raw.split(",") if x.strip()]:
+            full = os.path.join(proj, rel)
+            if not os.path.exists(full):
+                base = os.path.basename(rel)
+                alt = None
+                for dirpath, dirnames, filenames in os.walk(proj):
+                    dirnames[:] = [d for d in dirnames if d not in (".git", "node_modules", "__pycache__")]
+                    if base in filenames:
+                        alt = os.path.relpath(os.path.join(dirpath, base), proj)
+                        break
+                if alt and alt != rel:
+                    findings.append((rel, "moved", f"now at {alt}"))
+                else:
+                    findings.append((rel, "missing", "no such file in the project"))
+                continue
+            if not created:
+                continue
+            res = subprocess.run(["git", "-C", proj, "log", "--since", created, "--oneline", "--", rel],
+                                 capture_output=True, text=True, creationflags=_NO_WINDOW)
+            if res.returncode != 0:
+                continue          # not a git repo, or path outside it — no churn signal available
+            n = len([ln for ln in res.stdout.splitlines() if ln.strip()])
+            if n >= since_commits:
+                findings.append((rel, "churn", f"{n} commits since {created[:10]}"))
+        if findings:
+            out.append((r, findings))
+    return out
+
+
+def cmd_drift(a):
+    recs = [r for r in all_records() if r["meta"].get("status", "active") == "active"]
+    if a.scope:
+        recs = [r for r in recs if r["meta"].get("scope") == a.scope]
+    anchored = [r for r in recs if (r["meta"].get("files") or "").strip()]
+    hits = check_drift(anchored, since_commits=a.commits)
+    print(f"# {len(anchored)} of {len(recs)} active memories are anchored to files "
+          f"({round(100 * len(anchored) / max(len(recs), 1))}%)"
+          + ("" if anchored else " — nothing to check; add `files:` when a memory is about code"))
+    if not hits:
+        if anchored:
+            print("no drift signals: every anchored file is present and quiet")
+        return
+    print(f"{len(hits)} memor{'y' if len(hits) == 1 else 'ies'} worth re-reading:\n")
+    for r, findings in hits:
+        print(f"{r['id']}  [{r['meta'].get('type')} · {r['meta'].get('scope')}]")
+        print(f"    {record_summary(r)[:100]}")
+        for rel, verdict, detail in findings:
+            print(f"    {verdict:8} {rel} — {detail}")
+        print()
+    print("Nothing was changed. These are files that moved on, not memories proven wrong —")
+    print("read them, then supersede the ones that no longer hold.")
 
 
 def hybrid_search(query, allow_semantic=True):
@@ -1446,7 +1599,10 @@ def _edit_list_meta(rec_id, key, add=(), remove=()):
             with open(path, "w", encoding="utf-8") as f:
                 f.writelines(lines)
             return os.path.relpath(path, DATA), cur
-    sys.exit(f"id not found: {rec_id}")
+    # ValueError, not sys.exit: this is library code. SystemExit derives from BaseException, so it
+    # sails past `except Exception` in the web server and kills the thread serving the request —
+    # the client sees a dropped connection instead of an error. The CLI turns it into an exit below.
+    raise ValueError(f"id not found: {rec_id}")
 
 
 def _warn_unknown(ids):
@@ -1458,18 +1614,27 @@ def _warn_unknown(ids):
 
 def cmd_link(a):
     _warn_unknown(a.others)
-    rel, cur = _edit_list_meta(a.id, "related-to", add=a.others)
+    try:
+        rel, cur = _edit_list_meta(a.id, "related-to", add=a.others)
+    except ValueError as e:
+        sys.exit(str(e))
     print(f"linked {a.id} related-to: {', '.join(cur) or '(none)'}  in {rel}")
 
 
 def cmd_unlink(a):
-    rel, cur = _edit_list_meta(a.id, "related-to", remove=a.others)
+    try:
+        rel, cur = _edit_list_meta(a.id, "related-to", remove=a.others)
+    except ValueError as e:
+        sys.exit(str(e))
     print(f"unlinked {a.id} related-to: {', '.join(cur) or '(none)'}  in {rel}")
 
 
 def cmd_block(a):
     _warn_unknown(a.blockers)
-    rel, cur = _edit_list_meta(a.todo, "blocked-by", add=a.blockers)
+    try:
+        rel, cur = _edit_list_meta(a.todo, "blocked-by", add=a.blockers)
+    except ValueError as e:
+        sys.exit(str(e))
     print(f"{a.todo} blocked-by: {', '.join(cur) or '(none)'}  in {rel}")
 
 
@@ -1478,7 +1643,10 @@ def cmd_unblock(a):
     if not remove:  # no ids given -> clear all blockers
         cur0 = next((_list_meta(r, "blocked-by") for r in all_records() if r["id"] == a.todo), [])
         remove = cur0
-    rel, cur = _edit_list_meta(a.todo, "blocked-by", remove=remove)
+    try:
+        rel, cur = _edit_list_meta(a.todo, "blocked-by", remove=remove)
+    except ValueError as e:
+        sys.exit(str(e))
     print(f"{a.todo} blocked-by: {', '.join(cur) or '(none)'}  in {rel}")
 
 
@@ -1934,6 +2102,8 @@ def main():
     pa.add_argument("--working", action="store_true",
                     help="scratch note: status=working — NOT injected, hidden from default search/list "
                          "until `mem.py promote <id>`")
+    pa.add_argument("--supersedes", metavar="ID",
+                    help="id of the memory this one revises — retired in the same write (never deleted)")
     pa.add_argument("--tier", choices=TIERS,
                     help="egress class: open (default) | redacted (summary only reaches an agent) "
                          "| private (never reaches an agent; still yours to search and read)")
@@ -1995,6 +2165,12 @@ def main():
     pu = sub.add_parser("audit", help="report secret-like or injection-like patterns in the store (read-only)")
     pu.add_argument("--scope")
     pu.set_defaults(func=cmd_audit)
+
+    pd = sub.add_parser("drift", help="memories whose anchored files moved on (report only, changes nothing)")
+    pd.add_argument("--scope")
+    pd.add_argument("--commits", type=int, default=None,
+                    help="commits since the memory was written that count as churn (default 10, MEM_DRIFT_COMMITS)")
+    pd.set_defaults(func=cmd_drift)
 
     pt = sub.add_parser("tier", help="set a memory's egress class (what may reach a model)")
     pt.add_argument("id")

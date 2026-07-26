@@ -188,6 +188,95 @@ def test_egress(mem, store):
                   f"answered with the wrong guard: {blob[:120]}")
 
 
+# --------------------------------------------------------------------------- web UI state
+def test_url_state(mem, store):
+    """No link may silently drop the filters the user is looking at.
+
+    This is a CLASS of bug, not one bug: any 'same page, one thing different' link that rebuilds
+    the query from a hand-listed set of parameters forgets whichever one was added last. It shipped
+    three times here — the drift filter fell off the status pills, off the search form, and off the
+    language switcher, and the switcher additionally discarded ?slug on the project page, which
+    silently changed WHICH PROJECT you were looking at. So the check is generic: render pages that
+    carry state and assert every parameter survives the links that are supposed to preserve it.
+    """
+    import re
+    import urllib.parse
+    import urllib.request
+
+    port = 8879
+    env = dict(os.environ, MEM_DATA_DIR=store, MEM_WEB_PORT=str(port))
+    srv = subprocess.Popen([sys.executable, os.path.join(PROJ, "mem.py"), "serve"],
+                           env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        base = f"http://127.0.0.1:{port}"
+        for _ in range(60):                       # wait for the port, no fixed sleep
+            try:
+                urllib.request.urlopen(base + "/", timeout=1).read()
+                break
+            except Exception:
+                import time
+                time.sleep(0.25)
+        else:
+            check("web UI starts for the URL-state test", False, "server never answered")
+            return
+
+        # (url, params that MUST survive a language switch)
+        cases = [
+            ("/memories?drift=1", {"drift": "1"}),
+            ("/memories?scope=global&type=gotcha&status=all",
+             {"scope": "global", "type": "gotcha", "status": "all"}),
+            ("/memories?q=pool&drift=1", {"q": "pool", "drift": "1"}),
+            ("/project?slug=guard", {"slug": "guard"}),
+        ]
+        for url, must in cases:
+            try:
+                html = urllib.request.urlopen(base + url, timeout=10).read().decode("utf-8", "replace")
+            except Exception as e:
+                check(f"renders {url}", False, str(e))
+                continue
+            m = re.search(r'<span class="lang-switch">(.*?)</span>', html, re.S)
+            if not m:
+                check(f"language switcher present on {url}", False, "not rendered")
+                continue
+            hrefs = re.findall(r'href="([^"]+)"', m.group(1))
+            ok, why = True, ""
+            for href in hrefs:
+                got = urllib.parse.parse_qs(urllib.parse.urlparse(href.replace("&amp;", "&")).query)
+                for k, v in must.items():
+                    if got.get(k, [None])[0] != v:
+                        ok, why = False, f"{href} lost {k}={v}"
+                        break
+                if not ok:
+                    break
+            check(f"language switch keeps state on {url}", ok, why)
+
+        # The drift filter must survive the page's own filter links too. Stated as behaviour, not as
+        # DOM shape: for each status the user can switch to, a link that keeps drift must EXIST.
+        # Counting every status-bearing link instead would be wrong — two of them are the deliberate
+        # "leave this filter" controls, and a test that demanded they keep it would be demanding a bug.
+        try:
+            html = urllib.request.urlopen(base + "/memories?drift=1", timeout=10).read().decode("utf-8", "replace")
+            links = {u.replace("&amp;", "&") for u in re.findall(r'href="(/memories\?[^"]*)"', html)}
+            for st in ("active", "superseded", "all"):
+                want = {f"/memories?status={st}&drift=1", f"/memories?drift=1&status={st}"}
+                check(f"switching to status={st} keeps drift", bool(want & links),
+                      f"no link preserves it; saw {sorted(l for l in links if st in l)[:2]}")
+            # ...and the way out must exist, or the filter becomes a trap.
+            check("there is a link that clears the drift filter",
+                  any("drift" not in u for u in links),
+                  "every link keeps drift — no way back to the full list")
+            check("an active filter is announced on the page", 'notice-drift' in html,
+                  "no notice — invisible filters read as missing data")
+        except Exception as e:
+            check("drift filter links", False, str(e))
+    finally:
+        srv.terminate()
+        try:
+            srv.wait(timeout=10)
+        except Exception:
+            srv.kill()
+
+
 # --------------------------------------------------------------------------- the meta-test
 # Each entry: (description, file, code that implements a guard, what removing it looks like).
 # Running the suite against each mutant must FAIL. A mutation that still passes means the test
@@ -205,6 +294,10 @@ MUTATIONS = [
      'if rtype == "status" and status == "active":', "if False:"),
     ("protected blocks an automatic rewrite", "mem.py",
      "if not bypass_protected:", "if False:"),
+    # The exact regression that shipped: a switcher that replaces the query instead of overriding it.
+    ("links preserve the filters in the URL", "mem_web.py",
+     'out += f\'<a{cls} href="{h(self_url(lang=l))}">{l.upper()}</a>\'',
+     'out += f\'<a{cls} href="?lang={l}">{l.upper()}</a>\''),
 ]
 
 
@@ -215,9 +308,17 @@ def run_mutations():
     ok = True
     try:
         os.makedirs(os.path.join(src, "tests"), exist_ok=True)
-        for f in ("mem.py", "mcp.py", "redact.py", "llm.py", "sessions.py", "MEM0RY4AI.md"):
+        # Everything a mutated copy needs to actually RUN — including the web UI and its assets,
+        # since a guard about links can only be tested by serving pages. A missing file here shows
+        # up as a crash rather than a failed mutation, so keep it in step with MUTATIONS.
+        for f in ("mem.py", "mcp.py", "mem_web.py", "redact.py", "llm.py", "sessions.py",
+                  "consolidate.py", "MEM0RY4AI.md"):
             if os.path.exists(os.path.join(PROJ, f)):
                 shutil.copy(os.path.join(PROJ, f), src)
+        for d in ("web", "hooks"):
+            if os.path.isdir(os.path.join(PROJ, d)):
+                shutil.copytree(os.path.join(PROJ, d), os.path.join(src, d),
+                                ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copy(os.path.join(HERE, "test_guards.py"), os.path.join(src, "tests"))
         for desc, fname, guard, mutant in MUTATIONS:
             path = os.path.join(src, fname)
@@ -252,6 +353,7 @@ def main():
         test_status_invariant(mem)
         test_protected(mem)
         test_egress(mem, store)
+        test_url_state(mem, store)
     finally:
         shutil.rmtree(store, ignore_errors=True)
 

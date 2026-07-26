@@ -85,7 +85,8 @@ Desktop** — **pulls** it on demand from a built-in **MCP server**:
 python3 mem.py mcp        # stdio JSON-RPC server (Windows: py mem.py mcp)
 ```
 
-It exposes eight tools — `memory_search`, `memory_get`, `memory_list`, `memory_resume`, `memory_add`,
+It exposes eight tools — `memory_search`, `memory_get`, `memory_list`, `memory_resume`, `memory_add`
+(which takes `supersedes` to retire the memory it revises, and `files` to anchor it to code),
 `memory_note` / `memory_promote` (working memory, below), and `session_search` (past-conversation
 search, below). It's a hand-rolled stdio server — still **pure stdlib, no SDK, no `pip install`**.
 Register it:
@@ -462,13 +463,15 @@ to a model along with everything else.
 ## Tests
 
 ```bash
-python3 tests/test_guards.py             # 34 checks, isolated store, stdlib only
+python3 tests/test_guards.py             # 43 checks, isolated store, stdlib only
 python3 tests/test_guards.py --canary    # remove each guard in turn; the suite must notice
+tools/crawl_ui.py http://127.0.0.1:8841  # reachability, broken links, URL state — no LLM needed
 ```
 
 The suite covers the rules that must not quietly break: secret redaction (each pattern is fed
 something it *must* catch), the injection scan, record-delimiter forgery, the one-live-`status`
-invariant, `protected`, and egress across every surface.
+invariant, `protected`, egress across every surface, and — after that class of bug shipped three
+times — that no link in the web UI drops the filters you are looking at.
 
 `--canary` is the part worth stealing. It deletes each guard from a scratch copy and requires the
 suite to go red — because a check that passes while the thing it checks is gone reports green and
@@ -491,6 +494,11 @@ tools/bench_recall.py --fixture mine.json --store ~/.mem0ry4ai --min-mrr 0.7
 
 On the bundled fixture (14 memories, 48 queries, English + Romanian): keyword `R@1 0.500 / MRR
 0.641`, hybrid with bge-m3 `R@1 0.750 / R@5 0.958 / R@10 1.000 / MRR 0.848`.
+
+`mem.py drift` is the companion for the other direction: memories anchored to files (`files:`)
+whose files have since gone missing, moved, or been committed to many times are reported as worth
+re-reading. It reads no code and judges no memory — it produces a reason to look, never an edit.
+The web dashboard surfaces the count and links to the list.
 
 **Read the caveat before you tune anything with it.** A 14-memory fixture measures *ordering* — the
 answer is already in the candidate set — not *discrimination*. Sweeping the dense retriever's weight

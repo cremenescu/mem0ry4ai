@@ -22,6 +22,12 @@ PROTOCOL_VERSION = "2025-06-18"
 # Protocol revisions we understand; on initialize we echo the client's only if it's one of these.
 SUPPORTED_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18"}
 WRITE_ENABLED = os.environ.get("MEM_MCP_WRITE", "1").strip().lower() not in ("0", "false", "no", "off")
+# Bounds the duplicate check's embedder call on the write path (seconds). Short on purpose: the
+# warning is a nicety, saving the memory is not.
+try:
+    _DUP_TIMEOUT = float(os.environ.get("MEM_DUP_TIMEOUT", "4"))
+except ValueError:
+    _DUP_TIMEOUT = 4.0
 
 
 def _log(msg):
@@ -206,19 +212,52 @@ def t_resume(a):
     return "\n\n".join(parts) or "(nothing to resume)"
 
 
+def _dup_note(rtype, summary, body, rid):
+    """The near-duplicate warning, for the MCP write path.
+
+    The CLI has warned on every add since the duplicate guard was written; this path did not, so
+    memories written by an agent piled up unchecked (138 of them, before this). The agent is the
+    one caller that can actually act on the warning — it knows whether it is revising something —
+    so it gets the ids and how to link them. Bounded embedder call: a slow Ollama must not make
+    saving feel broken. Never raises; a missing warning is better than a failed write."""
+    if os.environ.get("MEM_DUP_CHECK", "1") == "0":
+        return ""
+    try:
+        dups = mem.find_duplicates(rtype, summary, body, k=3, embed_timeout=_DUP_TIMEOUT)
+    except Exception:
+        return ""
+    if not dups:
+        return ""
+    lines = [f"   {round(s * 100):>3}%  {did}  [{rtype}·{dscope}]  {dsum[:90]}"
+             for s, did, dscope, dsum in dups]
+    return ("\nnote: similar memories already exist —\n" + "\n".join(lines)
+            + f"\nIf this REVISES one of them, call memory_add again with supersedes=<that id> "
+              f"(and supersede {rid} yourself, or leave it — it is already saved). "
+              f"If it is genuinely distinct, ignore this.")
+
+
 def t_add(a):
     if not WRITE_ENABLED:
         return "error: writing is disabled (set MEM_MCP_WRITE=1 to enable)"
     try:
         summary, body = (a.get("summary") or "").strip(), a.get("body") or ""
-        rid = mem.add_memory((a.get("type") or "").strip(), (a.get("scope") or "").strip(),
-                             summary, body, (a.get("confidence") or "0.85"), "mcp")
+        rtype = (a.get("type") or "").strip()
+        supersedes = (a.get("supersedes") or "").strip() or None
+        files = ", ".join(x.strip() for x in (a.get("files") or "").split(",") if x.strip()) or None
+        rid = mem.add_memory(rtype, (a.get("scope") or "").strip(),
+                             summary, body, (a.get("confidence") or "0.85"), "mcp",
+                             supersedes=supersedes, files=files)
+        out = f"saved {rid}"
+        if supersedes:
+            out += f" — retired {supersedes} (superseded, not deleted; history kept)"
         inj = mem.redact.scan_injection(summary + "\n" + body)
         if inj:   # this memory will be re-injected into context every session — flag it back to the caller
-            return (f"saved {rid} — WARNING: it contains prompt-injection-like phrasing ({', '.join(inj)}). "
+            return (f"{out} — WARNING: it contains prompt-injection-like phrasing ({', '.join(inj)}). "
                     "Since memories are injected into context every session, double-check it is legitimate; "
                     "supersede it if not.")
-        return f"saved {rid}"
+        if not supersedes:   # already linked -> the duplicate warning would be noise
+            out += _dup_note(rtype, summary, body, rid)
+        return out
     except Exception as e:
         return f"error: {e}"
 
@@ -302,11 +341,21 @@ TOOLS = [
      "description": "Save a durable memory (secrets are redacted). type: gotcha|fact|decision|command|"
                     "preference|procedural|todo|status. scope: global or project:<slug>. Write "
                     "AGENT-NEUTRAL (2nd person, not tied to one model) — the store is shared across "
-                    "agents. To REVISE a memory there is no update/delete tool: supersede the old + add "
-                    "a new one (CLI/web). With several agents writing, memory_search first to avoid dupes.",
+                    "agents. To REVISE an existing memory, write the new one and pass supersedes=<old id>: "
+                    "the old one is retired with a trail, never deleted. If the user just corrected you, "
+                    "that IS the case — you know what you were wrong about, so say so. With several agents "
+                    "writing, memory_search first to avoid dupes.",
      "inputSchema": {"type": "object", "properties": {
          "type": {"type": "string"}, "scope": {"type": "string"}, "summary": {"type": "string"},
-         "body": {"type": "string"}, "confidence": {"type": "string"}},
+         "body": {"type": "string"}, "confidence": {"type": "string"},
+         "supersedes": {"type": "string",
+                        "description": "id of the memory this one revises; it is retired in the same write"},
+         "files": {"type": "string",
+                   "description": "comma-separated paths this memory is ABOUT, relative to the project "
+                                  "(e.g. 'src/auth/jwt.ts, src/auth/middleware.ts'). Anchors the memory to "
+                                  "code: it surfaces when you work in those files, and `mem.py drift` can "
+                                  "tell you the memory may be stale once they change. Set it whenever the "
+                                  "memory is about specific code."}},
          "required": ["type", "scope", "summary", "body"]}},
     {"name": "memory_note", "fn": t_note,
      "description": "Jot a WORKING (scratch) note for the current task — saved with status=working: NOT "
@@ -371,7 +420,7 @@ def resources_list():
 def resource_templates_list():
     return {"resourceTemplates": [
         {"uriTemplate": "mem0ry4ai://resume/{scope}", "name": "Where was I (one scope)",
-         "description": "Briefing for a single scope, e.g. mem0ry4ai://resume/project:my-app "
+         "description": "Briefing for a single scope, e.g. mem0ry4ai://resume/project:vyos-webui "
                         "or mem0ry4ai://resume/global.",
          "mimeType": "text/markdown"},
     ]}
@@ -394,11 +443,11 @@ PROMPTS = [
     {"name": "recall",
      "description": "Pull the memories relevant to a question into the conversation before answering.",
      "arguments": [{"name": "query", "description": "what to recall about", "required": True},
-                   {"name": "scope", "description": "limit to one scope, e.g. project:my-app",
+                   {"name": "scope", "description": "limit to one scope, e.g. project:vyos-webui",
                     "required": False}]},
     {"name": "resume",
      "description": "Load the 'where was I' briefing for a project: status, open todos, recent knowledge.",
-     "arguments": [{"name": "scope", "description": "e.g. project:my-app (default: all)",
+     "arguments": [{"name": "scope", "description": "e.g. project:vyos-webui (default: all)",
                     "required": False}]},
 ]
 

@@ -248,10 +248,21 @@ def main():
     ]
 
     # --- About me: the user profile, first of all, with body, outside the budget ---
+    # Outside the budget, but not unbounded: this is the one section that was capped by nothing at
+    # all, so an oversized profile silently blew past the whole budgeting system the settings page
+    # exists to enforce. Its own generous cap (MEM_INJECT_PROFILE_CAP, 4000 chars — several times
+    # the per-record cap, because the profile earns the room) keeps it first and full in practice
+    # while making "it can never dominate the context" true rather than merely likely.
     if profile:
+        PROFILE_CAP = _int_env("MEM_INJECT_PROFILE_CAP", "4000")
         lines.append("## About me")
         for r in profile:
-            lines.extend(_body_lines((r.get("body") or "").strip()))
+            body_str = (r.get("body") or "").strip()
+            if len(body_str) > PROFILE_CAP:
+                body_str = (body_str[:PROFILE_CAP]
+                            + f"\n(profile truncated at {PROFILE_CAP} chars — shorten it, or raise "
+                              f"MEM_INJECT_PROFILE_CAP)")
+            lines.extend(_body_lines(body_str))
         lines.append("")
 
     # --- Critical rules: ALWAYS first, with bodies, outside the budget ---

@@ -71,6 +71,9 @@ def _int_env(key, default):
 
 # ---------- per-request context (thread-safe language) ----------
 _ctx = threading.local()
+# A record id as the store mints it: YYYYMMDD + '-' + a short suffix. Used to tell "go to this
+# record" apart from "search for this text" when something is typed into the search box.
+_ID_RE = re.compile(r"^\d{8}-[A-Za-z0-9]{4,12}$")
 
 
 def lang():
@@ -119,6 +122,28 @@ RO = {
     "no vectors — optional, run mem.py embed": "fara vectori — optional, ruleaza mem.py embed",
     "Ollama offline (keyword search)": "Ollama oprit (cautare keyword)",
     "Review queue (health)": "Coada de review", "empty": "goala",
+    "Code drift": "Drift fata de cod", "anchored": "ancorate", "The cards": "Cardurile",
+    "adjusted to the allowed range": "ajustat la intervalul permis",
+    "No such project": "Proiectul nu exista", "Did you mean": "Ai vrut sa spui",
+    "All projects": "Toate proiectele",
+    "No memory has ever been written for this scope. If you expected memories here, "
+    "check the spelling — a project only appears once something is saved to it.":
+        "Nicio memorie nu a fost scrisa vreodata pentru acest scope. Daca te asteptai sa gasesti ceva, "
+        "verifica scrierea — un proiect apare abia dupa ce se salveaza ceva in el.",
+    "already reviewed, or no such candidate": "deja revizuit, sau candidatul nu exista",
+    "not found": "negasit", "not a working note": "nu e nota de lucru",
+    "could not write .mem-local.env (permissions? disk full?) — nothing was saved":
+        "nu s-a putut scrie .mem-local.env (permisiuni? disc plin?) — nu s-a salvat nimic",
+    "could not write .mem-local.env (permissions? disk full?) — nothing was reset":
+        "nu s-a putut scrie .mem-local.env (permisiuni? disc plin?) — nu s-a resetat nimic",
+    "drift": "drift", "Show all memories": "Arata toate memoriile",
+    "Showing only memories anchored to files that have since gone missing, moved, or "
+    "been committed to many times. They are not proven wrong — they are worth re-reading.":
+        "Se afiseaza doar memoriile ancorate la fisiere care intre timp au disparut, s-au mutat sau "
+        "au primit multe commit-uri. Nu sunt dovedite gresite — merita recitite.",
+    "no memory is anchored to files yet": "nicio memorie nu e ancorata la fisiere inca",
+    "all files present and quiet": "toate fisierele exista si sunt linistite",
+    "worth re-reading": "de recitit",
     "candidates to review": "candidati de revizuit",
     "Claude Code hooks": "Hooks Claude Code", "registered in settings.json": "inregistrate in settings.json",
     "NOT in settings.json": "NU in settings.json", "SessionStart injection": "Injectare SessionStart",
@@ -295,7 +320,15 @@ def queue_get(qid):
 
 
 def queue_remove(qid):
-    queue_save([r for r in queue_load() if r.get("qid", "") != qid])
+    """Drop a candidate. Returns whether one was actually there — callers report success on the
+    strength of it, and "rejected" on an id that no longer exists means the user believes they
+    turned down something that was in fact already approved and is now a live memory."""
+    rows = queue_load()
+    keep = [r for r in rows if r.get("qid", "") != qid]
+    if len(keep) == len(rows):
+        return False
+    queue_save(keep)
+    return True
 
 
 def queue_approve(qid, over):
@@ -411,6 +444,23 @@ def health_checks():
         out.append([t("Embedder (semantic)"), None, f"{vec} {t('vectors')} · {t('Ollama offline (keyword search)')}"])
     nq = len(queue_pending())
     out.append([t("Review queue (health)"), nq == 0, t("empty") if nq == 0 else f"{nq} {t('candidates to review')}"])
+    # Anchored memories whose files moved on. Unknown-state (grey) rather than red when nothing is
+    # anchored: no signal is not the same as a clean bill of health, and saying "OK" there would be
+    # the dashboard lying by omission — the check simply had nothing to look at.
+    try:
+        anchored = [r for r in mem.all_records()
+                    if r["meta"].get("status", "active") == "active" and (r["meta"].get("files") or "").strip()]
+        if not anchored:
+            out.append([t("Code drift"), None, t("no memory is anchored to files yet")])
+        else:
+            nd = len(mem.check_drift(anchored))
+            out.append([t("Code drift"), nd == 0,
+                        f"{len(anchored)} {t('anchored')} · "
+                        + (t("all files present and quiet") if nd == 0
+                           else f"{nd} {t('worth re-reading')}"),
+                        None if nd == 0 else "/memories?drift=1"])
+    except Exception:
+        pass
     # hooks installed: settings.json authoritative; else empirical staged captures.
     # Parse the JSON (not raw text) so Windows backslashes — which json escapes to
     # "\\" in the file — un-escape to real separators before we compare; then
@@ -890,12 +940,29 @@ FAVICON = ("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='
            "text-anchor='middle' fill='white' font-family='sans-serif' font-weight='bold'>m</text></svg>")
 
 
+def self_url(**over):
+    """The URL of the page being rendered, with some parameters overridden (None removes one).
+
+    Exists so 'same page, one thing different' links stop dropping state. A bare `?lang=ro` keeps
+    the path and replaces the entire query, which silently discards every filter the user set —
+    the language switcher did that on every page, and on /project it discarded the ?slug too."""
+    path = getattr(_ctx, "path", "/") or "/"
+    p = {k: list(v) for k, v in (getattr(_ctx, "qs", None) or {}).items()}
+    for k, v in over.items():
+        if v is None:
+            p.pop(k, None)
+        else:
+            p[k] = [str(v)]
+    qs = urllib.parse.urlencode([(k, vv) for k, vs in p.items() for vv in vs])
+    return path + ("?" + qs if qs else "")
+
+
 def lang_switch():
     cur = lang()
     out = '<span class="lang-switch">'
     for l in ("en", "ro"):
         cls = ' class="on"' if l == cur else ""
-        out += f'<a{cls} href="?lang={l}">{l.upper()}</a>'
+        out += f'<a{cls} href="{h(self_url(lang=l))}">{l.upper()}</a>'
     return out + "</span>"
 
 
@@ -988,6 +1055,25 @@ def page_project(qs=None):
         return None  # -> redirect home
     scope = f"project:{slug}"
     allr = [r for r in mem.all_records() if r["meta"].get("scope", "") == scope]
+    if not allr:
+        _ctx.status = 404      # a wrong URL should say so, not render a normal-looking empty page
+        # A project that has never held a memory is a wrong URL, not an empty one. Rendering the
+        # normal page with a zero count invites the reading "this project exists and I lost
+        # everything in it" — a typo should look like a typo.
+        known = sorted(s.split(":", 1)[1] for s in known_scopes() if s.startswith("project:"))
+        near = [k for k in known if k.startswith(slug[:3])][:5] if len(slug) >= 3 else []
+        hint = (("<p>" + t("Did you mean") + ": "
+                 + ", ".join(f'<a href="/project?slug={h(k)}">{h(k)}</a>' for k in near) + "?</p>")
+                if near else "")
+        return layout(
+            f"{slug} — mem0ry4ai", "projects",
+            f'  <div class="crumb"><a href="/">{t("Dashboard")}</a> / '
+            f'<a href="/projects">{t("Projects")}</a> / {h(slug)}</div>\n'
+            f'  <h2>{h(slug)}</h2>\n'
+            f'  <div class="empty"><b>{t("No such project")}</b><p>'
+            + t("No memory has ever been written for this scope. If you expected memories here, "
+                "check the spelling — a project only appears once something is saved to it.")
+            + f'</p>{hint}<p><a href="/projects">{t("All projects")}</a></p></div>')
     active = sorted([r for r in allr if r["meta"].get("status", "active") == "active"],
                     key=lambda r: r["meta"].get("created", ""), reverse=True)
     statuses = [r for r in active if r["meta"].get("type") == "status"]
@@ -1291,7 +1377,8 @@ def page_about(qs=None):
     placeholder = t("Who you are, your role and expertise, the environment you work in, what you build, and "
                     "how you like to work. Plain text or markdown.")
     location = (f'{t("Stored in")} <code>{h(path)}</code>'
-                + (f' · id <code>{h(rec["id"])}</code>' if rec else f' — {t("created on first save")}'))
+                + (f' · id <a href="/memories?id={h(rec["id"])}"><code>{h(rec["id"])}</code></a>'
+                   if rec else f' — {t("created on first save")}'))
     style = ("<style>.about-edit{width:100%;min-height:300px;box-sizing:border-box;resize:vertical;"
              "font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;line-height:1.6;padding:12px;"
              "border:1px solid var(--border,#e2e8f0);border-radius:8px;background:#fff;}"
@@ -2269,12 +2356,35 @@ def page_memories(qs=None):
     ftype = (qs.get("type", [""])[0] or "").strip()
     fstat = (qs.get("status", ["active"])[0] or "active").strip()
     fid = (qs.get("id", [""])[0] or "").strip()
+    fdrift = (qs.get("drift", [""])[0] or "").strip() == "1"
     records = mem.all_records()
+    drift_ids, drift_why = set(), {}
+    if fdrift:
+        # Computed here, not cached: the answer depends on the working tree right now, and a stale
+        # "this memory is fine" is worse than a slow page.
+        try:
+            for r, findings in mem.check_drift([x for x in records
+                                                if x["meta"].get("status", "active") == "active"
+                                                and (x["meta"].get("files") or "").strip()]):
+                drift_ids.add(r["id"])
+                drift_why[r["id"]] = "; ".join(f"{rel}: {verdict} ({detail})" for rel, verdict, detail in findings)
+        except Exception:
+            pass
     by_id, rel_in = records_by_id(), related_in_index()
     chain_ids = []
     if fid:
         chain_ids = supersede_chain(fid)
         fstat = "all"
+    # Typing (or pasting) a record id into the search box means "take me to that record", not
+    # "rank the store against this string" — which is what a hybrid search does with an id, and it
+    # returns dozens of unrelated rows because the id itself matches nothing. Ids are recognisable
+    # (YYYYMMDD-xxxxxx), so treat one as the id filter; anything not an existing id still searches.
+    if q and not fid and _ID_RE.match(q.strip().lstrip("@")):
+        maybe = q.strip().lstrip("@")
+        if mem.get_record(maybe):
+            fid, q = maybe, ""
+            chain_ids = supersede_chain(fid)
+            fstat = "all"
     fts_ids, mode = None, ""
     if q and not fid:
         fts_ids, mode = mem.hybrid_search(q)   # ids None -> substring fallback
@@ -2283,6 +2393,8 @@ def page_memories(qs=None):
         m = r["meta"]
         if fid:
             return r["id"] in chain_ids
+        if fdrift and r["id"] not in drift_ids:
+            return False
         if fscope and m.get("scope", "") != fscope:
             return False
         if ftype and m.get("type", "") != ftype:
@@ -2311,7 +2423,12 @@ def page_memories(qs=None):
     scopes = known_scopes()
 
     def mkqs(over):
+        # Every filter in effect must survive a click on any other filter, or the page silently
+        # drops state the user set on purpose — `drift` was doing exactly that, so arriving from
+        # the dashboard and then touching anything sent you back to square one.
         p = {"q": q, "scope": fscope, "type": ftype, "status": fstat}
+        if fdrift:
+            p["drift"] = "1"
         p.update(over)
         p = {k: v for k, v in p.items() if v != ""}
         return "/memories?" + urllib.parse.urlencode(p)
@@ -2342,15 +2459,42 @@ def page_memories(qs=None):
     for st_key in ("active", "superseded", "all"):
         cls = "active" if fstat == st_key else ""
         pills += f'<a class="{cls}" href="{h(mkqs({"status": st_key}))}">{t(st_key)}</a>'
+    # The drift view was reachable only from the dashboard, so once you were here you could not get
+    # back to it. Shown only when there is something to show — a pill that always reads 0 is furniture.
+    if fdrift:
+        pills += f'<a class="active" href="{h(mkqs({"drift": ""}))}">{t("drift")}</a>'
+    else:
+        try:
+            n_drift = len(mem.check_drift([r for r in records
+                                           if r["meta"].get("status", "active") == "active"
+                                           and (r["meta"].get("files") or "").strip()]))
+        except Exception:
+            n_drift = 0
+        if n_drift:
+            pills += f'<a href="{h(mkqs({"drift": "1"}))}">{t("drift")} ({n_drift})</a>'
     parts.append(
         '  <div class="toolbar"><form class="filters" method="get">'
         f'<input type="search" name="q" value="{h(q)}" placeholder="{h(t("search (FTS ranked)..."))}" id="live">'
         f'<select name="type" onchange="this.form.submit()">{type_opts}</select>'
         f'<select name="scope" onchange="this.form.submit()">{scope_opts}</select>'
         f'<input type="hidden" name="status" value="{h(fstat)}">'
-        f'<button class="btn" type="submit">{t("Search")}</button>'
+        + ('<input type="hidden" name="drift" value="1">' if fdrift else '')
+        + f'<button class="btn" type="submit">{t("Search")}</button>'
         f'<span class="search-light {lcls}" title="{h(ltip)}">{h(llbl)}</span></form>'
         f'<div class="pills">{pills}</div></div>')
+
+    # An active filter that is invisible is a trap: you cannot tell why rows are missing, and you
+    # cannot turn it off without knowing the URL. Say it is on, say what it means, offer the exit.
+    if fdrift:
+        clear = {"q": q, "scope": fscope, "type": ftype, "status": fstat}
+        clear = {k: v for k, v in clear.items() if v != ""}
+        clear_url = "/memories" + ("?" + urllib.parse.urlencode(clear) if clear else "")
+        explain = t("Showing only memories anchored to files that have since gone missing, moved, or "
+                    "been committed to many times. They are not proven wrong — they are worth re-reading.")
+        parts.append(
+            '  <div class="notice notice-drift">'
+            f'<b>{t("Code drift")}</b> — {h(explain)} '
+            f'<a class="btn btn-sm" href="{h(clear_url)}">{t("Show all memories")}</a></div>')
 
     # ----- table -----
     if not rows:
@@ -2455,10 +2599,16 @@ def page_index(qs=None):
     intro = (t("help.intro") if lang() == "ro" else
              "A memory is one short fact you want to keep between sessions. The source of truth is "
              "markdown + git; the web UI and <code>mem.py</code> are two windows onto the same store.")
-    health_html = "\n        ".join(
-        f'<li><span class="dot {"dot-unk" if ok is None else ("dot-ok" if ok else "dot-err")}"></span> '
-        f'{h(lbl)} <span class="hd">{h(det)}</span></li>'
-        for lbl, ok, det in health)
+    def health_li(row):
+        lbl, ok, det = row[0], row[1], row[2]
+        href = row[3] if len(row) > 3 else None
+        dot = "dot-unk" if ok is None else ("dot-ok" if ok else "dot-err")
+        # det stays escaped; only the wrapper is markup, so a check can link without becoming a
+        # hole through which any future detail string could inject HTML.
+        body = f'<a href="{h(href)}">{h(det)}</a>' if href else h(det)
+        return f'<li><span class="dot {dot}"></span> {h(lbl)} <span class="hd">{body}</span></li>'
+
+    health_html = "\n        ".join(health_li(row) for row in health)
     content = f'''  <h2>{t("System status")}</h2>
   <div class="dash" id="dash-cards">{dash_cards(stats)}</div>
   <div class="dash-row">
@@ -2474,9 +2624,68 @@ def page_index(qs=None):
     </div>
   </div>
   <p class="foot">{t("Source of truth:")} <code>store/*.md</code> {t("(markdown + git). CLI:")} <code>./mem.py</code>.</p>'''
+    if lang() == "ro":
+        cards_help = (
+            'Fiecare card e un filtru: <b>Memorii</b> = tot ce s-a scris vreodata, '
+            '<b>active</b> = ce se injecteaza si se cauta, <b>superseded</b> = ce a fost inlocuit '
+            '(pastrat, niciodata sters — de acolo afli <i>ce credeai si cand ai incetat</i>). '
+            '<b>todo deschise</b> se coloreaza cand exista. Restul cardurilor sunt tipurile tale '
+            'cele mai numeroase.')
+        health_help = (
+            '<b>Store / Staging writable</b> — se poate scrie pe disc. '
+            '<b>Index FTS</b> — indexul de cautare e la zi cu fisierele markdown; e derivat, '
+            'se poate sterge si reface oricand. '
+            '<b>Embedder</b> — cati vectori exista si daca Ollama raspunde; oprit inseamna doar '
+            'ca se cauta pe cuvinte cheie, nu ca s-a stricat ceva. '
+            '<b>Coada de review</b> — candidati propusi de LLM-ul local, care asteapta decizia ta. '
+            '<b>Drift fata de cod</b> — memorii ancorate la fisiere (campul <code>files:</code>) '
+            'ale caror fisiere lipsesc, s-au mutat sau au primit multe commit-uri de cand a fost '
+            'scrisa memoria; nu inseamna ca memoria e gresita, ci ca merita recitita. '
+            '<b>Hooks</b> — daca injectarea automata e inregistrata. '
+            '<b>Injectare SessionStart</b> — cat ocupa acum fata de buget. '
+            '<b>Git store</b> — daca sunt memorii necomise.')
+        dots_help = ('<b>Verde</b> = in regula. <b>Rosu</b> = cere atentie. '
+                     '<b>Gri</b> = nu se stie / nu se aplica — de exemplu drift-ul cand nicio memorie '
+                     'nu e ancorata inca: lipsa semnalului nu e acelasi lucru cu „e bine".')
+        recent_help = ('Ultimele memorii scrise, cu sursa lor: <code>claude:live</code> = scrise de '
+                       'agent in conversatie, <code>mcp</code> = prin tool-ul MCP, '
+                       '<code>web</code> = de aici, de mana.')
+    else:
+        cards_help = (
+            'Each card is a filter: <b>Memories</b> = everything ever written, '
+            '<b>active</b> = what gets injected and searched, <b>superseded</b> = what was replaced '
+            '(kept, never deleted — this is where you read <i>what you believed and when you '
+            'stopped</i>). <b>open todos</b> turns amber when there are any. The remaining cards are '
+            'your most common types.')
+        health_help = (
+            '<b>Store / Staging writable</b> — the disk accepts writes. '
+            '<b>FTS index</b> — the search index is current with the markdown; it is derived, so '
+            'deleting and rebuilding it is always safe. '
+            '<b>Embedder</b> — how many vectors exist and whether Ollama answers; offline only means '
+            'search falls back to keywords, nothing is broken. '
+            '<b>Review queue</b> — candidates the local LLM proposed, waiting on your decision. '
+            '<b>Code drift</b> — memories anchored to files (the <code>files:</code> field) whose '
+            'files are now missing, moved, or heavily committed to since the memory was written. It '
+            'does not mean the memory is wrong, only that it is worth re-reading. '
+            '<b>Hooks</b> — whether automatic injection is registered. '
+            '<b>SessionStart injection</b> — how much it currently uses of its budget. '
+            '<b>Git store</b> — whether any memories are uncommitted.')
+        dots_help = ('<b>Green</b> = fine. <b>Red</b> = wants attention. '
+                     '<b>Grey</b> = unknown or not applicable — for instance drift when nothing is '
+                     'anchored yet: no signal is not the same as a clean bill of health.')
+        recent_help = ('The most recent writes and where they came from: <code>claude:live</code> = '
+                       'written by the agent mid-conversation, <code>mcp</code> = through the MCP '
+                       'tool, <code>web</code> = by hand from here.')
     aside = f'''<aside class="help">
   <h3>{t("Quick guide")}</h3>
   <p>{intro}</p>
+  <h4>{t("The cards")}</h4>
+  <p>{cards_help}</p>
+  <h4>{t("Health")}</h4>
+  <p>{health_help}</p>
+  <p>{dots_help}</p>
+  <h4>{t("Recent activity")}</h4>
+  <p>{recent_help}</p>
   <h4>{t("Navigation")}</h4>
   <p>{nav_help}</p>
 </aside>'''
@@ -2607,6 +2816,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass  # quiet
 
+    def _remember_url(self, path, qs):
+        """Keep the current path+query on the request context so a link can override ONE parameter
+        instead of replacing the whole query string. The language switcher used a bare `?lang=xx`,
+        which wiped every filter on the page — and on /project it wiped the ?slug that identifies
+        the project. Any future 'same page, one thing different' link must use `self_url`."""
+        _ctx.path = path
+        _ctx.qs = {k: list(v) for k, v in qs.items()}
+
     def _set_lang(self, qs):
         q = (qs.get("lang", [""])[0] or "")
         if q in ("en", "ro"):
@@ -2621,6 +2838,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
+        self._remember_url(path, qs)
         self._set_lang(qs)
         self._read_flash()
         if path.startswith("/assets/"):
@@ -2632,10 +2850,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path in ROUTES_JSON:
             return self._send_json(ROUTES_JSON[path](qs))
         if path in ROUTES_HTML:
+            _ctx.status = 200                     # a page may override it (e.g. an unknown project)
             body = ROUTES_HTML[path](qs)
             if body is None:
                 return self._redirect("/")
-            return self._send_html(body)
+            return self._send_html(body, getattr(_ctx, "status", 200))
         self._send_html(f"<h1>404</h1><p>{h(path)} — not found. <a href=\"/\">Dashboard</a></p>", 404)
 
     def do_POST(self):
@@ -2699,9 +2918,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         if v != "":
                             over[k] = v.strip()
                     ok = queue_approve(qid, over)
+                    if not ok:
+                        return self._send_json({"ok": False, "qid": qid,
+                                                "error": t("already reviewed, or no such candidate"),
+                                                "remaining": len(queue_pending())})
                 elif action == "reject":
-                    queue_remove(qid)
-                    ok = True
+                    ok = queue_remove(qid)
+                    if not ok:
+                        return self._send_json({"ok": False, "qid": qid,
+                                                "error": t("already reviewed, or no such candidate"),
+                                                "remaining": len(queue_pending())})
                 else:
                     return self._send_json({"ok": False, "error": "unknown action"})
                 return self._send_json({"ok": ok, "qid": qid, "remaining": len(queue_pending())})
@@ -2760,8 +2986,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         return self._send_json({"ok": False, "error": "not a working note"})
                     return self._send_json({"ok": True})
                 if action == "dismiss":
+                    # Same guard promote has three lines up. Without it this route supersedes ANY
+                    # record whose id lands here — including one just promoted to durable — because
+                    # supersede_memory does not care what it is retiring.
+                    rec = mem.get_record(rid)
+                    if not rec:
+                        return self._send_json({"ok": False, "error": t("not found")})
+                    if rec["meta"].get("status") != "working":
+                        return self._send_json({"ok": False, "error": t("not a working note")})
                     rel = mem.supersede_memory(rid, "", "dismissed working note")
-                    return self._send_json({"ok": rel is not None})
+                    return self._send_json({"ok": rel is not None,
+                                            **({} if rel is not None else {"error": t("not found")})})
                 return self._send_json({"ok": False, "error": "unknown action"})
             except Exception as e:
                 return self._send_json({"ok": False, "error": str(e)})
@@ -2771,7 +3006,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             action = form.get("action", [""])[0]
             if action == "reset":   # clear every override -> in-code defaults govern again
                 file_keys = _local_env_keys()
-                _write_local_env({}, removes=[s["key"] for s in SETTINGS])
+                if not _write_local_env({}, removes=[s["key"] for s in SETTINGS]):
+                    return self._send_json({"ok": False, "error": t(
+                        "could not write .mem-local.env (permissions? disk full?) — nothing was reset")})
                 for s in SETTINGS:
                     if s["key"] in file_keys:        # only clear keys we actually had in the file —
                         os.environ.pop(s["key"], None)  # don't nuke a genuine shell export
@@ -2779,11 +3016,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if action != "save":
                 return self._send_json({"ok": False, "error": "unknown action"})
             # validate EVERYTHING first; write nothing if any field is bad (atomic save)
-            vals, errors, restart = {}, [], []
+            vals, errors, restart, clamped = {}, [], [], []
             for s in SETTINGS:
                 if s["key"] not in form:
                     continue
-                val, err = validate_setting(s, form.get(s["key"], [""])[0])
+                raw = form.get(s["key"], [""])[0]
+                val, err = validate_setting(s, raw)
+                # A value pulled into range is not the value the user typed. Saying nothing here is
+                # how "I set it to 99999" becomes "…and it quietly became 10".
+                if not err and val is not None and raw.strip() and val != raw.strip():
+                    clamped.append(f'{s["key"]}: {raw.strip()} -> {val}')
                 if err:
                     errors.append(f'{s["key"]}: {err}')
                 elif val != os.environ.get(s["key"], s["default"]):
@@ -2792,10 +3034,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         restart.append(s["key"])
             if errors:
                 return self._send_json({"ok": False, "error": "; ".join(errors)})
-            _write_local_env(vals)                  # one atomic, locked write for all changed keys
+            # Report the write, do not assume it. _write_local_env swallows OSError and returns
+            # False; discarding that told the user "saved" while only THIS process changed, so the
+            # CLI, the MCP server and the next restart all kept reading the old value.
+            if vals and not _write_local_env(vals):
+                return self._send_json({"ok": False, "error": t(
+                    "could not write .mem-local.env (permissions? disk full?) — nothing was saved")})
             for k, v in vals.items():
                 os.environ[k] = v                   # live for web-read knobs + the injection preview
             note = (t("restart the web server to apply") + ": " + ", ".join(restart)) if restart else ""
+            if clamped:
+                note = ((note + " · ") if note else "") + t("adjusted to the allowed range") + ": " + "; ".join(clamped)
             # echo the effective stored values so the client reflects any clamp (e.g. 999999 -> 32000)
             return self._send_json({"ok": True, "saved": len(vals), "values": vals, "note": note})
         if parsed.path == "/claude-md":

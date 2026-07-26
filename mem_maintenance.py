@@ -103,6 +103,26 @@ def step_prune_working():
     return 0
 
 
+def step_drift():
+    """Report memories whose anchored files moved on. Read-only, always — nothing here knows whether
+    a memory is still TRUE, only that the code it describes changed, which is a reason to re-read it."""
+    try:
+        hits = mem.check_drift()
+    except Exception as e:
+        _log(f"drift: ERROR {e}")
+        return 0
+    if not hits:
+        _log("drift: no anchored memory points at a file that moved")
+        return 0
+    parts = []
+    for r, findings in hits:
+        what = "; ".join(f"{rel} {verdict}" for rel, verdict, _ in findings)
+        parts.append(f"{r['id']} ({what})")
+    _log(f"drift: {len(hits)} memor{'y' if len(hits) == 1 else 'ies'} worth re-reading — "
+         + ", ".join(parts) + "  [`mem.py drift` for detail]")
+    return 0
+
+
 def step_commit_store():
     """Commit any store/*.md changes (e.g. pruned notes) so the tree is clean before consolidate."""
     if not os.path.isdir(os.path.join(mem.DATA, ".git")):
@@ -141,6 +161,7 @@ def cmd_run(_a):
     step_reindex()
     step_embed()
     step_prune_working()
+    step_drift()
     step_commit_store()
     step_consolidate()
     _log("=== maintenance pass done ===")
