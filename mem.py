@@ -1366,6 +1366,59 @@ def check_drift(records=None, since_commits=None):
     return out
 
 
+@_locked_write
+def _set_files(rec_id, files):
+    """In-place meta edit of the `files:` anchor. Line-level like _set_priority and _set_tier, so
+    nothing else about the record is rewritten."""
+    for path in store_files():
+        for r in parse_file(path):
+            if r["id"] != rec_id:
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            new_block = []
+            for k in range(r["start"], r["end"] + 1):
+                line = lines[k]
+                mm = META_RE.match(line.rstrip("\n"))
+                if mm and mm.group("k") == "files":
+                    continue   # drop the old anchor; re-added below unless clearing
+                if mm and mm.group("k") == "updated":
+                    line = f"- updated: {now_ts()}\n"
+                new_block.append(line)
+                if files and mm and mm.group("k") == "status":
+                    new_block.append(f"- files: {files}\n")
+            lines[r["start"]:r["end"] + 1] = new_block
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            return os.path.relpath(path, DATA)
+    return None
+
+
+def cmd_anchor(a):
+    """Point a memory at the files it is about, or clear the anchor.
+
+    Exists because `drift` could report a stale anchor and nothing could fix one: neither the CLI
+    nor the web edit form touched `files:`, so the only repair was hand-editing markdown. A report
+    you cannot act on is worse than no report."""
+    rec = get_record(a.id)
+    if not rec:
+        sys.exit(f"id not found: {a.id}")
+    if a.files.strip() == "-":
+        rel = _set_files(a.id, None)
+        print(f"{a.id} — anchor cleared  in {rel}")
+        return
+    paths = [x.strip() for x in a.files.split(",") if x.strip()]
+    proj = _project_dir(rec["meta"].get("scope", ""))
+    missing = [p for p in paths if proj and not os.path.exists(os.path.join(proj, p))]
+    rel = _set_files(a.id, ", ".join(paths))
+    print(f"{a.id} -> files: {', '.join(paths)}  in {rel}")
+    if missing:
+        # Not refused: a path can legitimately not exist yet. But said out loud, because an anchor
+        # that never resolves makes `drift` cry wolf forever.
+        print(f"  warning: not present in {os.path.basename(proj)}: {', '.join(missing)}"
+              f" — drift will keep reporting this memory", file=sys.stderr)
+
+
 def cmd_drift(a):
     recs = [r for r in all_records() if r["meta"].get("status", "active") == "active"]
     if a.scope:
@@ -2182,6 +2235,11 @@ def main():
     pu = sub.add_parser("audit", help="report secret-like or injection-like patterns in the store (read-only)")
     pu.add_argument("--scope")
     pu.set_defaults(func=cmd_audit)
+
+    pan = sub.add_parser("anchor", help="set or clear the files a memory is about (feeds `drift`)")
+    pan.add_argument("id")
+    pan.add_argument("files", help="comma-separated paths relative to the project, or '-' to clear")
+    pan.set_defaults(func=cmd_anchor)
 
     pd = sub.add_parser("drift", help="memories whose anchored files moved on (report only, changes nothing)")
     pd.add_argument("--scope")

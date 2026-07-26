@@ -498,7 +498,16 @@ On the bundled fixture (14 memories, 48 queries, English + Romanian): keyword `R
 `mem.py drift` is the companion for the other direction: memories anchored to files (`files:`)
 whose files have since gone missing, moved, or been committed to many times are reported as worth
 re-reading. It reads no code and judges no memory — it produces a reason to look, never an edit.
-The web dashboard surfaces the count and links to the list.
+The web dashboard surfaces the count and links to the list, and each row there says which file
+moved and how, because the answer depends on it.
+
+There are only three outcomes, and `mem.py anchor` covers two of them:
+
+```bash
+mem.py anchor <id> "src/auth/jwt.ts, src/auth/middleware.ts"   # the lesson holds, the path moved
+mem.py anchor <id> -                                           # it was never about those files
+mem.py supersede <id> --reason "..."                           # the lesson died with the code
+```
 
 **Read the caveat before you tune anything with it.** A 14-memory fixture measures *ordering* — the
 answer is already in the candidate set — not *discrimination*. Sweeping the dense retriever's weight

@@ -124,6 +124,16 @@ RO = {
     "Review queue (health)": "Coada de review", "empty": "goala",
     "Code drift": "Drift fata de cod", "anchored": "ancorate", "The cards": "Cardurile",
     "adjusted to the allowed range": "ajustat la intervalul permis",
+    "Open a row to read it, then pick one: the lesson still holds and only the path "
+    "moved, so re-point it with <code>mem.py anchor &lt;id&gt; &lt;paths&gt;</code>; the "
+    "lesson is dead with the code it described, so supersede it from Actions; or it was "
+    "never really about those files, so clear the anchor with "
+    "<code>mem.py anchor &lt;id&gt; -</code> and it stops being reported.":
+        "Deschide randul, citeste-l, apoi alege una din trei: lectia inca e valabila si doar calea "
+        "s-a mutat, deci o repointezi cu <code>mem.py anchor &lt;id&gt; &lt;cai&gt;</code>; lectia a "
+        "murit odata cu codul pe care il descria, deci o retragi din Actions (Supersede); sau n-a fost de fapt "
+        "despre acele fisiere, deci stergi ancora cu <code>mem.py anchor &lt;id&gt; -</code> si nu mai "
+        "e raportata.",
     "No such project": "Proiectul nu exista", "Did you mean": "Ai vrut sa spui",
     "All projects": "Toate proiectele",
     "No memory has ever been written for this scope. If you expected memories here, "
@@ -784,7 +794,7 @@ def relations_block(r, rel_in, by_id):
     return out
 
 
-def render_row(r, by_id, rel_in):
+def render_row(r, by_id, rel_in, drift_why=None):
     m = r["meta"]
     st = m.get("status", "active")
     summ = rec_summary(r)
@@ -809,7 +819,11 @@ def render_row(r, by_id, rel_in):
         f'<td>{type_badge(typ)}</td>'
         f'<td><a class="scope-tag" href="{scope_href}">{h(scope_label(scope))}</a></td>'
         f'<td class="summary" onclick="toggleBody(this)">{crit}<b>{h(summ)}</b>{sup}'
-        f'<div class="meta"><a href="/memories?id={h(r["id"])}">{h(r["id"])}</a> · conf {h(m.get("confidence","?"))} · {h(m.get("source",""))}</div></td>'
+        # Why this row is in a filtered view. Listing memories without saying what put them there
+        # leaves the reader with a problem and no way to judge it — the two drifted memories on the
+        # author's own store needed opposite actions, and the page gave no way to tell them apart.
+        + (f'<div class="drift-why">{h(drift_why)}</div>' if drift_why else "")
+        + f'<div class="meta"><a href="/memories?id={h(r["id"])}">{h(r["id"])}</a> · conf {h(m.get("confidence","?"))} · {h(m.get("source",""))}</div></td>'
         f'<td class="meta" style="white-space:nowrap">{h(m.get("created",""))}</td>'
         f'<td style="text-align:right"><div class="actwrap">'
         f'<button type="button" class="act-toggle" onclick="toggleAct(this)">Actions ▾</button>'
@@ -2494,9 +2508,16 @@ def page_memories(qs=None):
         clear_url = "/memories" + ("?" + urllib.parse.urlencode(clear) if clear else "")
         explain = t("Showing only memories anchored to files that have since gone missing, moved, or "
                     "been committed to many times. They are not proven wrong — they are worth re-reading.")
+        # What to DO, not only what happened. Each row shows its own reason above; the three
+        # outcomes below are the only ones there are, and which applies depends on that reason.
+        todo = t("Open a row to read it, then pick one: the lesson still holds and only the path "
+                 "moved, so re-point it with <code>mem.py anchor &lt;id&gt; &lt;paths&gt;</code>; the "
+                 "lesson is dead with the code it described, so supersede it from Actions; or it was "
+                 "never really about those files, so clear the anchor with "
+                 "<code>mem.py anchor &lt;id&gt; -</code> and it stops being reported.")
         parts.append(
             '  <div class="notice notice-drift">'
-            f'<b>{t("Code drift")}</b> — {h(explain)} '
+            f'<div><b>{t("Code drift")}</b> — {h(explain)}<div class="notice-todo">{todo}</div></div>'
             f'<a class="btn btn-sm" href="{h(clear_url)}">{t("Show all memories")}</a></div>')
 
     # ----- table -----
@@ -2521,9 +2542,9 @@ def page_memories(qs=None):
                              f'onclick="event.stopPropagation()">{t("project page →")}</a>')
                 body += (f'<tbody class="grp" data-scope="{h(sc)}"><tr class="group-head"><td colspan="6">{head} '
                          f'<span class="gcount">· {len(grs)} {t("memories")}</span>{proj_link}</td></tr>'
-                         + "".join(render_row(r, by_id, rel_in) for r in grs) + "</tbody>")
+                         + "".join(render_row(r, by_id, rel_in, drift_why.get(r["id"])) for r in grs) + "</tbody>")
         else:
-            body = "<tbody>" + "".join(render_row(r, by_id, rel_in) for r in rows) + "</tbody>"
+            body = "<tbody>" + "".join(render_row(r, by_id, rel_in, drift_why.get(r["id"])) for r in rows) + "</tbody>"
         parts.append(f'  <div id="table-wrap"><table class="mem">{thead}{body}</table></div>')
     parts.append(f'  <p class="foot">{t("Source of truth:")} <code>store/*.md</code> {t("(markdown + git). CLI:")} <code>./mem.py</code>.</p>')
 
