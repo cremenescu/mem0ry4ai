@@ -291,6 +291,19 @@ run inside the Claude Code process, and containerising would turn every SessionS
 cd docker && docker compose up -d      # http://localhost:8841/
 ```
 
+If you run it by hand instead of with compose, **`--init` is mandatory**:
+
+```bash
+docker run -d --name mem0ry4ai --restart unless-stopped --init \
+    -p 127.0.0.1:8841:8841 -v /srv/mem0ry4ai:/data mem0ry4ai
+```
+
+Without it, PID 1 in the container is the server itself, which does not reap the orphaned children
+it inherits. They accumulate as zombies until the **host** runs out of task slots — on the NAS this
+was found on, that meant nothing on the whole machine could fork any more, SSH included. `--init`
+puts tini at PID 1, which reaps whatever it inherits regardless of what the application does.
+`compose.yaml` sets `init: true` for you.
+
 The store is a mounted volume, never inside the code clone, so updating the image cannot touch
 memories and `docker rm` is not a data-loss event. The clone's git remote is removed rather than
 left unused — a clone of the public repo sitting next to a store full of private memories is one

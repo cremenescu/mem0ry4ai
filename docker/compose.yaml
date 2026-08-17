@@ -12,10 +12,15 @@ services:
       args:
         # Pin a release rather than tracking main: this container commits to your store, and an
         # unattended rebuild should never be the first time new code touches it.
-        VERSION: v0.19.0
-    image: mem0ry4ai:v0.19.0
+        VERSION: v0.20.0
+    image: mem0ry4ai:v0.20.0
     container_name: mem0ry4ai
     restart: unless-stopped
+    # tini as PID 1. The application does not reap the orphans it inherits, and a PID 1 that does
+    # not reap turns every orphan into a permanent zombie -- 28.844 of them locked up the NAS host
+    # twice before this line existed. Keep it even after the code stops creating orphans: this is
+    # the net that does not depend on the code being right.
+    init: true
     ports:
       # 127.0.0.1 on the left: reachable from the host only. The UI has no authentication, so
       # exposing it to the LAN is a decision to make deliberately -- drop the prefix, or put a

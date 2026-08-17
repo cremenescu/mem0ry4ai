@@ -383,8 +383,19 @@ def main():
 
     sys.stdout.write("\n".join(lines).rstrip() + "\n")
 
-    # Log injected memory IDs asynchronously (fire-and-forget background process)
-    if injected_ids:
+    # Log injected memory IDs asynchronously (fire-and-forget background process).
+    #
+    # Only for a REAL session. The web UI runs this same hook to measure injection size
+    # ("health") and to preview it ("preview"); nothing was injected into anything, so counting
+    # those as injections falsifies the access log — and the Docker healthcheck was calling the
+    # health path every 30 seconds, forever.
+    #
+    # Skipping them also removes an orphan source. This child outlives the hook by design, so it
+    # gets reparented to PID 1; inside the container PID 1 is `mem.py serve`, which never reaps.
+    # 28.844 zombies accumulated on the NAS that way, one per healthcheck, until nothing on the
+    # HOST could fork (2026-08-06 and 2026-08-17). The container also runs with an init now, but
+    # not creating the orphan is the half that does not depend on how anyone starts it.
+    if injected_ids and (data.get("source") or "") not in ("health", "preview"):
         try:
             subprocess.Popen(
                 [sys.executable, MEM, "log-access", "--ids", ",".join(injected_ids), "--action", "inject"],

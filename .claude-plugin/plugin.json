@@ -1,6 +1,6 @@
 {
   "name": "mem0ry4ai",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "description": "Persistent, local-first memory for Claude Code (and any MCP agent) — typed durable knowledge in a markdown+git store, scoped injection at SessionStart, an MCP server (tools, resources, prompts) for on-demand recall plus full-text search over past conversation transcripts, per-memory egress tiers, auto git checkpoints, web UI with a power-user settings page.",
   "author": {
     "name": "Razvan Cremenescu"

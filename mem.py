@@ -1450,7 +1450,9 @@ def check_drift(records=None, since_commits=None):
 
     Returns [(record, [(path, verdict, detail), ...])] for records with at least one finding.
     Verdicts: 'missing' (the file is gone), 'churn' (>= threshold commits since the record was last
-    touched), 'moved' (the path is gone but a file with that basename exists elsewhere).
+    touched), 'moved' (the path is gone but a file with that basename exists elsewhere),
+    'symbol-gone' (the memory refers to `name()` that no longer exists in the project, and git
+    history confirms it once did).
     Only records carrying `files:` can be checked at all — see `mem.py drift` for the coverage line.
     """
     if since_commits is None:
@@ -1496,6 +1498,25 @@ def check_drift(records=None, since_commits=None):
                          if os.path.exists(os.path.join(proj, p))})
         commits = _churn_index(proj, min(dates), wanted) if dates and wanted else {}
         basenames = None                       # built only if some anchored path has gone missing
+
+        # Symbols the memories in this project claim exist. Resolved once for the whole group: one
+        # filesystem walk, then a git check only for the ones that turn out to be absent.
+        #
+        # This is the precise half of drift. Churn says "mem.py had 30 commits", which is true and
+        # nearly useless -- the file is 2500 lines and the memory was about one function. A symbol
+        # that is gone says exactly what changed underneath the memory.
+        sym_gone = {}
+        if os.environ.get("MEM_DRIFT_SYMBOLS", "1").strip().lower() not in ("0", "no", "false"):
+            claimed = {}
+            for _, r, _, _ in group:
+                for s in _symbol_refs(r):
+                    claimed.setdefault(s, []).append(r["id"])
+            missing_syms = set(claimed) - _symbols_present(proj, set(claimed))
+            for s in sorted(missing_syms):
+                ever, sha = _symbol_ever_existed(proj, s)
+                if ever:
+                    for rid in claimed[s]:
+                        sym_gone.setdefault(rid, []).append((s, sha))
         for _, r, created, paths in group:
             findings = []
             for rel in paths:
@@ -1513,6 +1534,10 @@ def check_drift(records=None, since_commits=None):
                 n = sum(1 for stamp in commits.get(rel, ()) if stamp >= created)
                 if n >= since_commits:
                     findings.append((rel, "churn", f"{n} commits since {created[:10]}"))
+            for sym, sha in sym_gone.get(r["id"], ()):
+                findings.append((sym + "()", "symbol-gone",
+                                 f"no longer anywhere in the project"
+                                 + (f"; last touched in {sha}" if sha else "")))
             if findings:
                 out_by_id[r["id"]] = (r, findings)
     # Callers render this list; keep it in the order they passed records in, which the grouping above
@@ -1521,6 +1546,81 @@ def check_drift(records=None, since_commits=None):
         if r["id"] in out_by_id and r["id"] not in order:
             order.append(r["id"])
     return [out_by_id[i] for i in order]
+
+
+_SYMBOL_REF = re.compile(r"\b(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w{3,})\(\)")
+
+# CODE only -- deliberately no .md, .json, .yml, .csv. A function that survives in a changelog, a
+# README or a memory is still gone from the code, and counting prose as presence makes the check
+# unable to fire at all: the store lives INSIDE its own project, so a memory naming a deleted
+# function was proving its own claim and the verdict never appeared.
+_CODE_EXT = frozenset((".py", ".js", ".ts", ".tsx", ".jsx", ".php", ".swift", ".sh", ".css",
+                       ".html", ".sql", ".rs", ".go", ".rb", ".c", ".h", ".cpp", ".java",
+                       ".kt", ".pl", ".m", ".mm"))
+_WALK_SKIP = frozenset((".git", "node_modules", "__pycache__", ".build", "build", "vendor",
+                        "dist", ".venv", ".next", "Pods"))
+
+
+def _symbol_refs(rec):
+    """Function names a memory refers to, spelled `name()` in the prose.
+
+    Empty parens only, and that is the whole trick. Measured on the real store: `name()` yields 66
+    distinct symbols across 54 anchored memories and they are all genuine function names, while
+    `name(arg)` yields junk -- `COUNT(*)`, `background(.bar)`, `SWAT(=SWDIO)`. A pattern that
+    matched arguments too would triple the candidates and halve their quality.
+    """
+    blob = record_summary(rec) + "\n" + rec.get("body", "")
+    return set(_SYMBOL_REF.findall(blob))
+
+
+def _symbols_present(proj, wanted):
+    """Which of `wanted` appear anywhere in the project's source. One walk, early exit."""
+    present = set()
+    if not wanted:
+        return present
+    for dirpath, dirnames, filenames in os.walk(proj):
+        dirnames[:] = [d for d in dirnames if d not in _WALK_SKIP]
+        if os.path.abspath(dirpath).startswith(os.path.abspath(STORE)):
+            # Defensive, and currently unreachable: the store holds only markdown, which the
+            # extension filter already drops. Kept for the day it holds a snippet of code -- but
+            # said plainly rather than left looking load-bearing, because no test can reach it.
+            continue
+        for name in filenames:
+            if os.path.splitext(name)[1] not in _CODE_EXT:
+                continue
+            try:
+                with open(os.path.join(dirpath, name), encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+            except OSError:
+                continue
+            for sym in wanted - present:
+                if sym in text:
+                    present.add(sym)
+        if wanted <= present:
+            break
+    return present
+
+
+def _symbol_ever_existed(proj, sym):
+    """Did this symbol ever live in this project? `git log -S` over the whole history.
+
+    This check is what makes the verdict trustworthy, and it was added because the first version
+    without it was wrong on two of the three cases it produced. `date_default_timezone_get()` is a
+    PHP builtin a memory merely mentions -- absent from the project because it was never in it, not
+    because anything changed. And a memory scoped to one project can name a function that lives in
+    its sibling. "Absent" alone means nothing; "was here and is not any more" is the signal.
+
+    Only ever called for symbols already known to be absent, so the cost is a handful of git
+    invocations, not one per candidate.
+    """
+    # Excluding the store is not a detail: the store lives in this same repo, so without it
+    # `git log -S` finds the symbol inside the memory that mentions it and every claim becomes
+    # self-confirming. It fired on step_code_drift() -- a function that was only ever PROPOSED in a
+    # memory and never written -- which is the opposite of "was here and is gone".
+    r = subprocess.run(["git", "-C", proj, "log", "-S", sym, "--oneline", "-1",
+                        "--", ".", ":(exclude)store", ":(exclude)*.md"],
+                       capture_output=True, text=True, creationflags=_NO_WINDOW)
+    return r.returncode == 0 and bool(r.stdout.strip()), r.stdout.strip()[:9]
 
 
 def _churn_index(proj, since, paths=()):

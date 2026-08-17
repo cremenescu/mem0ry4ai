@@ -413,6 +413,87 @@ def test_store_repo(mem, store):
           "commit.gpgsign=false" in " ".join(mem.git_identity("web")))
 
 
+
+def test_symbol_gone(mem, store):
+    """A memory naming `foo()` that no longer exists in the code is reported -- and only then.
+
+    Three ways this verdict can be wrong, all of them producing a report nobody should trust, all
+    of them hit for real while building it:
+
+    1. The symbol was never in this project. `date_default_timezone_get()` is a PHP builtin a memory
+       merely mentions; absent because it was never here, not because anything changed. Git history
+       is what separates "was here and is gone" from "foreign".
+    2. Prose counts as presence. The store lives INSIDE its own project, so a memory naming a
+       deleted function proved its own claim and the verdict could never fire. Only code
+       extensions count, and the store directory is skipped.
+    3. Git history counts prose too. `git log -S` found step_code_drift() -- a function only ever
+       PROPOSED in a memory, never written -- because the memory itself is committed here.
+    """
+    proj = os.path.join(os.path.dirname(store), "guard")
+    os.makedirs(proj, exist_ok=True)
+    git = ["git", "-C", proj, "-c", "commit.gpgsign=false",
+           "-c", "user.email=t@t", "-c", "user.name=t"]
+
+    def rec(text, rid):
+        return {"id": rid, "body": text, "title": "",
+                "meta": {"scope": "project:guard", "files": "app.py", "status": "active",
+                         "created": "2000-01-01 00:00:00", "updated": "2000-01-01 00:00:00"}}
+
+    def verdicts(records):
+        out = {}
+        for r, findings in mem.check_drift(records, since_commits=99999):
+            out[r["id"]] = [(n, v) for n, v, _ in findings]
+        return out
+
+    if subprocess.run(["git", "-C", proj, "init", "-q"], capture_output=True).returncode != 0:
+        check("git is available for the symbol test", False, "git init failed")
+        return
+    try:
+        os.makedirs(os.path.join(proj, "store"), exist_ok=True)
+        with open(os.path.join(proj, "app.py"), "w") as f:
+            f.write("def kept_function():\n    return 1\n\ndef doomed_function():\n    return 2\n")
+        subprocess.run(git + ["add", "-A"], capture_output=True)
+        subprocess.run(git + ["commit", "-q", "-m", "both"], capture_output=True)
+
+        # remove one of them, keep the other
+        with open(os.path.join(proj, "app.py"), "w") as f:
+            f.write("def kept_function():\n    return 1\n")
+        subprocess.run(git + ["add", "-A"], capture_output=True)
+        subprocess.run(git + ["commit", "-q", "-m", "drop doomed"], capture_output=True)
+
+        got = verdicts([rec("uses doomed_function() heavily", "r-gone"),
+                        rec("uses kept_function() heavily", "r-kept"),
+                        rec("mentions date_default_timezone_get() from PHP", "r-foreign")])
+
+        check("a removed function is reported gone",
+              ("doomed_function()", "symbol-gone") in got.get("r-gone", []),
+              f"got {got.get('r-gone')!r}")
+        check("a function that still exists is not reported",
+              "r-kept" not in got, f"got {got.get('r-kept')!r}")
+        check("a symbol that was never in the project is not reported",
+              "r-foreign" not in got, f"got {got.get('r-foreign')!r}")
+
+        # Prose must not count as presence, or the verdict can never fire: write the deleted name
+        # into a markdown file and into the store, then assert it is STILL reported.
+        with open(os.path.join(proj, "CHANGELOG.md"), "w") as f:
+            f.write("removed doomed_function() in v2\n")
+        with open(os.path.join(proj, "store", "notes.md"), "w") as f:
+            f.write("doomed_function() was the old name\n")
+        subprocess.run(git + ["add", "-A"], capture_output=True)
+        subprocess.run(git + ["commit", "-q", "-m", "docs"], capture_output=True)
+        got = verdicts([rec("uses doomed_function() heavily", "r-gone")])
+        check("prose mentioning the symbol does not count as presence",
+              ("doomed_function()", "symbol-gone") in got.get("r-gone", []),
+              "a .md file naming it hid the verdict")
+
+        # ...and a symbol that only EVER appeared in prose must not be reported as gone.
+        got = verdicts([rec("plan mentions never_written_function() as an idea", "r-idea")])
+        check("a symbol that only ever existed in prose is not reported",
+              "r-idea" not in got, f"got {got.get('r-idea')!r}")
+    finally:
+        shutil.rmtree(proj, ignore_errors=True)
+
+
 def test_url_state(mem, store):
     """No link may silently drop the filters the user is looking at.
 
@@ -544,6 +625,17 @@ MUTATIONS = [
      "        if os.path.isfile(os.path.join(proj, rel)):", "        if True:"),
     # The carry list goes back to being hardcoded — the original bug, which dropped whichever
     # filter was added last.
+    # Counting prose as presence makes symbol-gone unable to fire: a deleted function named in a
+    # changelog -- or in the memory itself -- proves its own claim. The extension filter is what
+    # does that work, so that is what gets removed here.
+    ("prose does not count as symbol presence", "mem.py",
+     '                       ".kt", ".pl", ".m", ".mm"))',
+     '                       ".kt", ".pl", ".m", ".mm", ".md"))'),
+    # Without the git check, a foreign symbol (a PHP builtin, a sibling project's function) reads
+    # as "gone" the moment it is absent.
+    ("symbol-gone confirms the symbol was ever there", "mem.py",
+     '                if ever:',
+     '                if True:'),
     # Removing the init leaves a store with no history, and nothing anywhere says so.
     ("the store is made a git repo on first write", "mem.py",
      '    ensure_store_repo()\n    if os.path.exists(path):', '    if os.path.exists(path):'),
@@ -619,6 +711,7 @@ def main():
         test_anchors(mem, store)
         test_drift(mem, store)
         test_store_repo(mem, store)
+        test_symbol_gone(mem, store)
         test_url_state(mem, store)
     finally:
         shutil.rmtree(store, ignore_errors=True)

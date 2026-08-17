@@ -8,8 +8,13 @@
 # is that it needs neither.
 #
 #   docker build -t mem0ry4ai docker/
-#   docker run -d --name mem0ry4ai --restart unless-stopped \
+#   docker run -d --name mem0ry4ai --restart unless-stopped --init \
 #       -p 8841:8841 -v /srv/mem0ry4ai:/data mem0ry4ai
+#
+# --init is not optional. Without it PID 1 in the container is `mem.py serve`, which does not reap
+# the orphans it inherits; they pile up as zombies until the HOST runs out of task slots. On a
+# Synology NAS that means the whole box stops being able to fork -- SSH included. `--init` puts
+# tini at PID 1, which reaps whatever it inherits no matter what the application does.
 #
 # Or `docker compose up -d` from this directory.
 
@@ -51,7 +56,11 @@ EXPOSE 8841
 
 # The UI has no authentication. Publish it on a trusted network only, or put a reverse proxy with
 # auth in front of it. Do not expose this port to the internet.
+# `/poll`, not `/`. The dashboard runs health_checks(), which runs the SessionStart hook to
+# measure injection size -- an absurd amount of work to answer "is it up?", and it was the trigger
+# for the zombie leak that took the NAS host down twice: hook spawns a fire-and-forget child, hook
+# exits, child is reparented to PID 1, PID 1 never reaps. Every 30 seconds, for 10 days.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-    CMD python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8841/', timeout=4).status==200 else 1)"
+    CMD python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8841/poll', timeout=4).status==200 else 1)"
 
 CMD ["python3", "mem.py", "serve"]
