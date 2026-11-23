@@ -47,15 +47,22 @@ follow, and they shape everything below:
   `emit_for()`; a surface that reads records directly and skips it is a vulnerability. (One such
   path — fetching by id over MCP — was found and fixed in v0.17.0.)
 - **Redaction bypass.** Credential shapes that `redact.py` fails to catch on the write path, given
-  that the store is git-versioned and often mirrored publicly. It is keyword-driven and known to be
-  incomplete; concrete misses are useful reports.
-- **The web UI**, which binds to loopback by default: CSRF on state-changing endpoints, path
-  traversal, template injection, or anything that lets a page in the user's browser drive it.
+  that the store is git-versioned and often mirrored publicly. It knows a set of formats and judges
+  the value that follows a keyword by its shape; it is known to be incomplete — a password made
+  only of letters, after a colon or in a sentence, is left alone, because nothing in its shape
+  tells it from a word. Concrete misses beyond that are useful reports, and so is ordinary prose
+  that it masks.
+- **The web UI**, which binds to loopback by default and has no login: CSRF on state-changing
+  endpoints, path traversal, template injection, or anything that lets a page in the user's browser
+  drive it or read it. The server answers only to the names it knows (`localhost`, `127.0.0.1`,
+  `[::1]` on its own port, plus `MEM_WEB_ALLOWED_HOSTS`) and refuses a `POST` whose `Origin` is not
+  the host it was addressed to; a way around either check — DNS rebinding included — is in scope.
 - **The MCP server**: malformed or hostile JSON-RPC over stdio causing crashes, unbounded resource
   use, or writes the caller should not be able to make (note `MEM_MCP_WRITE=0` exists to make it
   read-only).
 - **`/api/propose`**, the HTTP ingestion endpoint: anything that gets content past review into the
-  store itself, rather than into the queue.
+  store itself, rather than into the queue, and anything that lets a caller without the key in
+  `staging/.propose-key` — a web page above all — queue a proposal.
 - Code execution from parsing a hostile store file, transcript, or API payload.
 
 ## Not in scope

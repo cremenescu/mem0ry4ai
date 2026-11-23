@@ -66,12 +66,12 @@ git init "$MEM_DATA_DIR"
 ## Tests
 
 ```bash
-python3 tests/test_guards.py             # 400 checks, isolated store, ~30s
+python3 tests/test_guards.py             # 534 checks, isolated store, ~30s
 python3 tests/test_guards.py --canary    # removes each guard in turn; the suite must notice
 tools/bench_recall.py                    # retrieval quality: Recall@k + MRR, no LLM judge
 ```
 
-The canary runs the whole suite once per mutation — 174 of them, so over an hour. Run one thing
+The canary runs the whole suite once per mutation — 243 of them, so about two hours. Run one thing
 at a time: two runs of the suite share a port and a folder in the temp dir, and collide into
 failures that are not there.
 
@@ -87,9 +87,10 @@ decide parameters with `--store` against a store of realistic size.
 
 - **Windows**: the code paths exist and are guarded, but they get far less real-world use than
   macOS and Linux. Bug reports from actual Windows use are valuable.
-- **Redaction patterns**: `redact.py` is keyword-driven and therefore misses formats it was not
-  told about (high-entropy tokens, credentials embedded in URLs). A format/entropy fallback is a
-  well-scoped, self-contained contribution.
+- **Redaction rules**: `redact.py` knows a set of formats and judges the value after a keyword by
+  its shape, so it still misses a format it was not told about, and a password made only of letters
+  outside an assignment. A rule comes with what it must catch *and* the prose it must leave alone
+  (`test_redaction_values`), and with its mutation in `MUTATIONS`.
 - **Client coverage**: the MCP server is hand-rolled against the spec. Reports of what does or does
   not work in a client we have not tried are useful, especially around resources and prompts.
 - **Translations**: the web UI is EN/RO. The string table is in one place.

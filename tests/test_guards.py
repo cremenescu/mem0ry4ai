@@ -70,6 +70,125 @@ def test_redaction(mem):
     check("leaves ordinary prose alone", out == clean and not flags, f"mangled to {out!r}")
 
 
+def test_redaction_values(mem):
+    import redact
+    print("\nredaction — a keyword and a value: the value is judged, the words around it stay")
+    pw = "hunter" + "2"                       # a letter next to a digit: the least a bare value needs
+    tok = "Zx9qLm4Tr8vBn2Kp6" + "abcdef12"    # long and opaque
+    wg = "Qz7" * 14 + "x="                    # 44 characters, as a WireGuard key has
+    hx = "0f3a" * 16
+    word = "correct" + "horse"                # letters only: a value by where it stands, not by its shape
+    masked = [
+        # (what it is, the text, the secret that must be gone, words that must still be there)
+        ("a Romanian keyword with a separator", "user: admin, parola: " + pw, pw, "user: admin, parola: "),
+        ("a passphrase with a separator", "passphrase = " + pw, pw, "passphrase = "),
+        ("words between the keyword and the separator", "Parola de admin: " + pw, pw, "Parola de admin: "),
+        ("a password stated in a Romanian sentence", "parola bazei de date este " + pw + ", iar userul e app",
+         pw, "iar userul e app"),
+        ("a password stated in an English sentence", "the database password is " + pw + ".", pw,
+         "the database password is "),
+        ("a quoted passphrase with spaces in it", 'parola de admin e "corect cal baterie capsa"',
+         "corect cal baterie", "parola de admin e "),
+        ("a password after 'cu parola'", "te loghezi ca operator cu parola " + pw, pw, "cu parola "),
+        ("a password after 'with the password'", "log in as admin with the password " + pw, pw,
+         "with the password "),
+        ("a password made of digits", "parola: 482913", "482913", "parola: "),
+        ("a quoted key in JSON", '{"username": "admin", "password": "' + pw + '"}', pw, '"username": "admin"'),
+        ("a quoted key in a PHP array", "'db_pass' => '" + pw + "',", pw, "'db_pass' => "),
+        ("a camelCase key", '"accessToken":"' + tok + '"', tok, '"accessToken":'),
+        ("a keyword and a quoted token", "authentication pre-shared-secret '" + pw + "'", pw,
+         "pre-shared-secret "),
+        ("a configuration keyword and a bare value", "authentication plaintext-password " + pw, pw,
+         "plaintext-password "),
+        ("a --password argument", "tool login --account someone --password " + pw + " --yes", pw, " --yes"),
+        ("a line that is only Password and a value", "# Bind Password\n   Password Xy7" + pw + "!\n# Timeout",
+         "Xy7" + pw + "!", "# Timeout"),
+        ("a WireGuard private key", "set interfaces wireguard wg0 private-key '" + wg + "'", wg, "private-key "),
+        ("a WireGuard preshared key", "PresharedKey = " + wg, wg, "PresharedKey = "),
+        ("a TOTP seed in an otpauth URI", "otpauth://totp/Label?secret=JBSWY3DPEHPK3PXP&issuer=x",
+         "JBSWY3DPEHPK3PXP", "&issuer=x"),
+        ("a token after a header name", "curl -H 'X-Auth-Token: " + tok + "' https://example.org", tok,
+         "https://example.org"),
+        ("a client secret in an env line", "CLIENT_SECRET=" + tok, tok, "CLIENT_SECRET="),
+        ("an API key with a dot in it", "X-Goog-Api-Key: AQ." + tok, tok, "X-Goog-Api-Key: "),
+        ("a long hex value under a name ending in key", "Local key: " + hx, hx, "Local key: "),
+        ("a token stated in a Romanian sentence", "tokenul este " + tok + ", valabil o ora", tok,
+         "valabil o ora"),
+        ("an API key stated in an English sentence", "the api key is " + tok, tok, "the api key is "),
+        ("a password in a URL", "postgres://admin:" + pw + "@db.example.org/app", pw, "@db.example.org/app"),
+        ("a JWT", "Set-Cookie: sid=eyJ" + "a" * 20 + ".eyJ" + "b" * 30 + "." + "c" * 30 + "; Path=/",
+         "b" * 30, "; Path=/"),
+        ("a crypt hash", "root:$6$saltsalt$" + "h" * 86 + ":19000:0:99999:7:::", "h" * 86, ":19000:0"),
+        ("a bcrypt hash", "admin:$2y$10$" + "k" * 53, "k" * 53, "admin:"),
+        ("a fine-grained GitHub token", "github_pat_" + "A1b2" * 15, "A1b2" * 15, ""),
+        ("a prefixed provider key", "sk-proj-" + "aB3_" * 12, "aB3_" * 12, ""),
+        ("a Stripe live key", "the shop charges with " + "sk_" + "live_" + "a1B2" * 6 + " in production",
+         "a1B2" * 6, " in production"),
+        ("a Google API key", "the map loads with " + "AI" + "za" + "Sy" + "a1B2-c3D4_" * 3 + "xyz from the console",
+         "a1B2-c3D4_" * 3, " from the console"),
+        ("a quoted password with an apostrophe in it", "login admin, password: \"it's me 4ever\" on the old box",
+         "me 4ever", "login admin, "),
+        ("the English keyword, which stays while its value goes", "login: admin, password: " + pw + " on the old box",
+         pw, "login: admin, password: "),
+        ("a value glued to an equals sign, whatever its shape", "DB_PASSWORD=" + word, word, "DB_PASSWORD="),
+        ("a value glued to an equals sign after the Romanian keyword", "PAROLA=" + word + " in fisierul de mediu",
+         word, " in fisierul de mediu"),
+        ("a value glued to an equals sign in a query string", "https://example.org/login?user=app&password=" + word,
+         word, "?user=app&password="),
+        ("a password in a connection string", "Server=db;User Id=app;Password=" + word + ";Encrypt=true", word,
+         "User Id=app;Password="),
+        ("a quoted value under a name that ends in pass", 'ADMIN_PASS = "' + pw + '!"', pw, "ADMIN_PASS = "),
+        ("a value glued to an equals sign under a name that ends in pass", "SMTP_PASS=" + word + " in the env file",
+         word, " in the env file"),
+        ("a --pass= argument", "mysql --user=app --pass=" + word + " shop", word, " shop"),
+    ]
+    for name, text, secret, kept in masked:
+        out, found = redact.redact(text)
+        again, more = redact.redact(out)
+        problem = ("the value survived" if secret in out else "nothing was reported" if not found
+                   else "the words around it changed" if kept not in out
+                   else "a second pass masks again" if again != out or more
+                   else "scan() does not see it" if not redact.scan(text) else "")
+        check(f"masks {name}", not problem, f"{problem}: {out[:70]!r}")
+
+    untouched = [
+        "parola se alege la prima intrare", "parola e obligatorie", "password is required at first login",
+        "parola e in 1Password", "the password is base64 encoded", "parola: aceeasi ca la mx",
+        "parola este in `config/config.local.php`", "password is $DB_PASSWORD", "parola e MEM_WEB_PASSWORD2",
+        "oricine are parola log4net poate opri procese", "password db01eu rotated last week",
+        "'password' => 'required|string|confirmed',", '"password": "Password",',
+        '--password "$DB_PASS"', "--password $DB_PASSWORD", '-Password "<password>"',
+        "encrypted-password ****************", "pre-shared-secret vezi mai jos",
+        'curl -k -u monitor:PAROLA "https://router.example/rest/interface"',
+        "token: backup-agent-token-v2", "tokenul sta in data/agent-token",
+        "the token is stored in the keychain", "ssh_public_key: " + hx, "public-key " + wg,
+        "cache key: user-profile-v2", "Crash Reporter Key: 1A2B3C4D-5E6F-7A8B-9C0D-1E2F3A4B5C6D",
+        "postgres://user:password@localhost/app", "https://example.org:8443/path@x",
+        "autocomplete='new-password'", "password VARCHAR(255) NOT NULL",
+        # a quoted prompt: the quote after the colon closes the phrase, it does not open a value
+        'the "Password:" prompt comes first, and only then "Login:"',
+        'the "Password:" prompt comes first\nand three lines below it "Login:" is asked for',
+        "the 'Password:' prompt comes first, and only then 'Login:'",
+        'scrie "parola:" si abia apoi "gata"', "promptul 'parola:' apare, apoi 'gata'",
+        # the English keyword and a separator: words, code and paths after it stay as written
+        "the item is in 1Password: Acme vault, entry web01",
+        "deploy ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart php-fpm",
+        "password: required, minimum 12 characters", "the form sets password = whatever the visitor typed",
+        # glued to an equals sign, what names a value instead of being one
+        "conn = connect(user=user, password=password)", "db.connect(password=self.db_password, timeout=5)",
+        "password=None", "userPassword=dbPass", "password=getpass.getpass()", "password=os.environ['DB_PASSWORD']",
+        "PGPASSWORD=$DB_SECRET psql -h db", "password=<your password>", "password=xxxxxxxx",
+        "PWD=/home/someone/project", "pwd=./build/output", "pwd=C:\\Users\\xxxxx",
+        "password=https://example.org/reset", "the short one (pwd=ab).",
+        # pass as a word, inside a word, and at the end of a hyphenated one
+        "second pass: done", "compass=north", "first-pass: 1200 files",
+    ]
+    for text in untouched:
+        out, found = redact.redact(text)
+        check(f"leaves alone {text[:46]!r}", out == text and not found and not redact.scan(text),
+              f"got {out[:70]!r}")
+
+
 def test_injection_scan(mem):
     import redact
     print("\ninjection scan — phrasing that must be flagged, and prose that must not be")
@@ -2706,6 +2825,310 @@ def test_duplicates_page(mem, store):
         shutil.rmtree(data, ignore_errors=True)
 
 
+# --------------------------------------------------------------------------- who is asking
+def _request(port, method, path, headers=None, body=None, host=True):
+    """One request to the server on 127.0.0.1:port, carrying exactly the headers given.
+
+    `host` is the Host header: True for the address itself, a string for any other name, None for
+    no Host header at all. `headers` is a dict, or a list of pairs when a name has to come twice.
+    Returns (status, headers, text); a server that hangs up reads as status 0, not as a crash."""
+    import http.client
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    try:
+        conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+        if host is True:
+            host = f"127.0.0.1:{port}"
+        if host is not None:
+            conn.putheader("Host", host)
+        for k, v in (headers.items() if isinstance(headers, dict) else headers or []):
+            conn.putheader(k, v)
+        data = body.encode("utf-8") if isinstance(body, str) else body
+        if data is not None:
+            conn.putheader("Content-Length", str(len(data)))
+        conn.endheaders(data)
+        r = conn.getresponse()
+        return r.status, {k.lower(): v for k, v in r.getheaders()}, r.read().decode("utf-8", "replace")
+    except Exception as e:
+        return 0, {}, f"no answer: {e}"
+    finally:
+        conn.close()
+
+
+def test_who_is_asking(mem, store):
+    """The web UI has no login: whoever reaches its port is taken for the user. A browser on the same
+    machine makes that too generous, in two ways that both worked here.
+
+    A page of any site could send a POST to /api/propose, which asked for no token and read its
+    body as JSON whatever the content type said -- so it was a "simple" request, sent without a
+    preflight. And with DNS rebinding a foreign page became same-origin: its domain is re-pointed
+    at 127.0.0.1 after it loaded, the browser then lets it read every page, the form token is in
+    each of them, and with the token every form is accepted. The server answered whatever name it
+    was called by, and never looked at which page was sending.
+
+    So it now answers only to its own names, turns away a POST that a page of another origin sent,
+    and asks a script for a key no page carries. Every refusal below was a 200 before."""
+    print("\nwho is asking — the web UI answers to its own names, and to its own pages")
+    import urllib.parse
+    data, port = new_store(), _free_port()
+    wrong = port - 1                      # some other port: the name is right, the address is not
+    env = dict(os.environ, MEM_DATA_DIR=data, MEM_WEB_PORT=str(port))
+    for k in ("MEM_WEB_ALLOWED_HOSTS", "MEM_WEB_HOST", "MEM_UI_LANG"):
+        env.pop(k, None)
+    srv = None
+
+    def start(**more):
+        return subprocess.Popen([sys.executable, os.path.join(PROJ, "mem.py"), "serve"], env=dict(env, **more),
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def stop(proc):
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            proc.kill()
+
+    def status(host, path="/poll"):
+        return _request(port, "GET", path, host=host)[0]
+
+    def holds(folder, marker):
+        """How many files under the data dir's `folder` contain `marker`."""
+        hits = 0
+        for root, _, files in os.walk(os.path.join(data, folder)):
+            for name in files:
+                try:
+                    with open(os.path.join(root, name), encoding="utf-8", errors="replace") as f:
+                        hits += marker in f.read()
+                except OSError:
+                    pass
+        return hits
+
+    def read(*parts):
+        try:
+            with open(os.path.join(data, *parts), encoding="utf-8") as f:
+                return f.read()
+        except OSError:
+            return ""
+
+    try:
+        srv = start()
+        if not _answers(port):
+            check("web UI starts for the test of who is asking", False, "server never answered")
+            return
+        token = read("staging", ".csrf").strip()
+
+        # ----- the name it is called by
+        got = {h: status(h) for h in (f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}", f"LocalHost:{port}")}
+        check("loopback is answered under its three names, on the server's port",
+              all(s == 200 for s in got.values()), str(got))
+        got = {h: status(h, "/") for h in (f"evil.example:{port}", "evil.example", f"192.0.2.10:{port}",
+                                            f"0.0.0.0:{port}", f"127.0.0.2:{port}", f"localhost.evil.example:{port}",
+                                            f"127.0.0.1.evil.example:{port}", f"localhost.:{port}")}
+        check("any other name or address is refused, the dashboard included",
+              all(s == 403 for s in got.values()), str(got))
+        got = {p: status(f"evil.example:{port}", p) for p in ("/memories", "/settings", "/poll", "/assets/style.css",
+                                                              "/record?id=20260101-abcd", "/nowhere")}
+        check("the refusal comes before any route: pages, JSON, static files, unknown paths",
+              all(s == 403 for s in got.values()) and status(True, "/assets/style.css") == 200, str(got))
+        got = {h: status(h) for h in (f"127.0.0.1:{wrong}", f"localhost:{wrong}", "localhost", "127.0.0.1")}
+        check("the right name on another port is refused, and so is the name with no port",
+              all(s == 403 for s in got.values()), str(got))
+        st, _, body = _request(port, "GET", "/", host=None)
+        check("a request that names no host is refused", st == 403 and "no Host header" in body, f"{st}: {body[:120]}")
+        st, _, body = _request(port, "GET", "/", host=None, headers=[("Host", f"127.0.0.1:{port}"),
+                                                                    ("Host", f"evil.example:{port}")])
+        check("so is one that names two", st == 403, f"{st}: {body[:120]}")
+        st, hd, body = _request(port, "GET", "/memories", host=f"nas.test:{port}")
+        check("the refusal is plain text: the name the server saw, the variable it goes into, nothing else",
+              st == 403 and hd.get("content-type", "").startswith("text/plain") and f'"nas.test:{port}"' in body
+              and "MEM_WEB_ALLOWED_HOSTS" in body and "<" not in body and len(body) < 300 and token not in body,
+              f"{st} {hd.get('content-type')}: {body[:200]}")
+        st, _, body = _request(port, "GET", "/", host="<script>alert(1)</script>")
+        check("a Host that is not a name is not written back as it came",
+              st == 403 and "<" not in body and "(" not in body, f"{st}: {body[:120]}")
+
+        # ----- the page that is sending
+        def add(summary, origin=None, tok=None, host=True, pad=""):
+            fields = {"csrf": token if tok is None else tok, "action": "add", "type": "fact", "scope": "global",
+                      "summary": summary, "body": "written by the test of who is asking" + pad, "confidence": "0.5"}
+            headers = {"Content-Type": "application/x-www-form-urlencoded"}
+            if origin is not None:
+                headers["Origin"] = origin
+            st, _, text = _request(port, "POST", "/memories", headers=headers,
+                                   body=urllib.parse.urlencode(fields), host=host)
+            try:
+                return st, json.loads(text)
+            except ValueError:
+                return st, {"error": text[:120]}
+
+        st, j = add("door: a script with the token")
+        check("a form with the page's token and no Origin is taken, as before",
+              st == 200 and j.get("ok") is True and holds("store", "door: a script with the token") == 1, f"{st} {j}")
+        st, j = add("door: the page itself", origin=f"http://127.0.0.1:{port}")
+        check("so is one whose Origin is the address it was sent to",
+              st == 200 and j.get("ok") is True and holds("store", "door: the page itself") == 1, f"{st} {j}")
+        st, j = add("door: a script without the token", tok="0" * 32)
+        check("without an Origin the token is still what decides",
+              st == 200 and j.get("error") == "CSRF" and holds("store", "door: a script without") == 0, f"{st} {j}")
+        got = {o: add("door: from another site", origin=o)[0]
+               for o in ("http://evil.example", f"http://evil.example:{port}", "null",
+                         "chrome-extension://abcdefghijklmnop", f"ftp://127.0.0.1:{port}")}
+        check("a form sent by a page of another site is refused, right token or not",
+              all(s == 403 for s in got.values()) and holds("store", "door: from another site") == 0, str(got))
+        got = {o: add("door: from another port", origin=o)[0]
+               for o in ("http://127.0.0.1", f"http://127.0.0.1:{wrong}", "https://127.0.0.1")}
+        check("another port of the same machine is another origin",
+              all(s == 403 for s in got.values()) and holds("store", "door: from another port") == 0, str(got))
+        st, j = add("door: from the other name", origin=f"http://localhost:{port}")
+        check("and so is the same port under a name the request was not sent to",
+              st == 403 and holds("store", "door: from the other name") == 0, f"{st} {j}")
+        st, j = add("door: a long one", origin="http://evil.example", pad=" x" * 150000)
+        check("a refused form is told so, however much it carried", st == 403, f"{st} {j}")
+
+        # ----- /api/propose: the key, and the content type no form can send
+        key = read("staging", ".propose-key").strip()
+        mode = os.stat(os.path.join(data, "staging", ".propose-key")).st_mode & 0o777 if key else 0
+        check("the server leaves a key for /api/propose in the data folder, for its owner only",
+              len(key) >= 32 and key != token and (os.name == "nt" or mode & 0o077 == 0), f"mode {oct(mode)}")
+        pages = "".join(_request(port, "GET", p)[2] for p in ("/", "/queue", "/settings", "/memories"))
+        check("no page carries that key", token in pages and key not in pages,
+              "the form token is not in the pages either" if token not in pages else "the key is in a page")
+
+        def propose(summary, auth=key, ctype="application/json", origin=None):
+            headers = {}
+            if auth:
+                headers["Authorization"] = auth if " " in auth else "Bearer " + auth
+            if ctype:
+                headers["Content-Type"] = ctype
+            if origin is not None:
+                headers["Origin"] = origin
+            body = json.dumps({"type": "fact", "scope": "global", "summary": summary,
+                               "body": "proposed by the test of who is asking"})
+            st, _, text = _request(port, "POST", "/api/propose", headers=headers, body=body)
+            try:
+                return st, json.loads(text)
+            except ValueError:
+                return st, {"error": text[:120]}
+
+        st, j = propose("door: proposed with the key")
+        check("a script with the key and a JSON body puts a proposal in the review queue",
+              st == 200 and j.get("ok") is True and j.get("status") == "pending"
+              and holds("staging", "door: proposed with the key") == 1 and holds("store", "door: proposed") == 0,
+              f"{st} {j}")
+        st, j = propose("door: proposed with a charset", ctype="application/json; charset=utf-8")
+        check("the content type may carry a charset", st == 200 and j.get("ok") is True, f"{st} {j}")
+        got = {what: propose("door: proposed without the key", auth=a)[0]
+               for what, a in (("no key", ""), ("a wrong key", "0" * 64), ("the page's token", token),
+                               ("the key under another scheme", "Basic " + key))}
+        check("without the key nothing is proposed: not with none, a wrong one, or the token every page carries",
+              all(s == 401 for s in got.values()) and holds("staging", "door: proposed without the key") == 0, str(got))
+        got = {c or "none": propose("door: proposed as a form", ctype=c)[0]
+               for c in ("text/plain", "application/x-www-form-urlencoded", "multipart/form-data; boundary=x", "")}
+        check("with the key, a body that does not say application/json is refused",
+              all(s == 415 for s in got.values()) and holds("staging", "door: proposed as a form") == 0, str(got))
+        got = {o: propose("door: proposed by a page", origin=o)[0] for o in ("http://evil.example", "null")}
+        check("and a page of another origin proposes nothing, key or not",
+              all(s == 403 for s in got.values()) and holds("staging", "door: proposed by a page") == 0, str(got))
+
+        # ----- frames
+        got = [(_request(port, "GET", p, host=h)[1]) for p, h in (("/", True), ("/poll", True), ("/", "evil.example"))]
+        check("no answer may be shown inside a frame: a page, a JSON answer, a refusal",
+              all(hd.get("x-frame-options") == "DENY" and "frame-ancestors 'none'" in hd.get("content-security-policy", "")
+                  for hd in got), str([{k: v for k, v in hd.items() if "frame" in k or "security" in k} for hd in got]))
+
+        # ----- the list of extra names
+        def save(value):
+            st, _, text = _request(port, "POST", "/settings",
+                                   headers={"Content-Type": "application/x-www-form-urlencoded",
+                                            "Origin": f"http://127.0.0.1:{port}"},
+                                   body=urllib.parse.urlencode({"csrf": token, "action": "save",
+                                                                "MEM_WEB_ALLOWED_HOSTS": value}))
+            try:
+                return json.loads(text)
+            except ValueError:
+                return {"ok": None, "error": f"{st}: {text[:120]}"}
+
+        got = {v: save(v).get("ok") for v in ("*", "*.late.test", "http://late.test", "late.test/ui", "late.test:99999",
+                                              "user@late.test", "late.test, *")}
+        check("Settings saves no name the server would not read: no wildcard, no address, no path",
+              all(ok is False for ok in got.values()) and "MEM_WEB_ALLOWED_HOSTS" not in read(".mem-local.env"), str(got))
+        j = save("late.test, proxy.late.test:443, moved.late.test:9000")
+        check("a list of names is saved, and says it waits for a restart",
+              j.get("ok") is True and "MEM_WEB_ALLOWED_HOSTS" in (j.get("note") or "")
+              and "MEM_WEB_ALLOWED_HOSTS=late.test, proxy.late.test:443, moved.late.test:9000" in read(".mem-local.env"),
+              str(j)[:200])
+        check("a name saved while the server runs opens nothing until then",
+              status(f"late.test:{port}") == 403 and status("proxy.late.test") == 403, "answered before a restart")
+        described = _request(port, "GET", "/settings?lang=ro")[2]
+        check("Settings says what the list is for, in the page's language",
+              "MEM_WEB_ALLOWED_HOSTS" in described and "Nume de gazda in plus" in described
+              and "Nu exista wildcard" in described, "the Romanian description is not on the page")
+
+        stop(srv)
+        srv = start()
+        if not _answers(port):
+            check("web UI starts again with the saved names", False, "server never answered")
+            return
+        got = {h: status(h) for h in (f"late.test:{port}", "proxy.late.test", "proxy.late.test:443",
+                                      "moved.late.test:9000", f"127.0.0.1:{port}")}
+        check("after a restart they are answered: a bare name on the server's port, a name with a port on that port",
+              all(s == 200 for s in got.values()), str(got))
+        got = {h: status(h) for h in ("late.test", f"late.test:{wrong}", f"proxy.late.test:{port}",
+                                      f"moved.late.test:{port}", "moved.late.test", f"other.late.test:{port}")}
+        check("and on no other port, and no name beside them", all(s == 403 for s in got.values()), str(got))
+        st, j = add("door: behind a proxy", origin="https://proxy.late.test", host="proxy.late.test")
+        check("behind a TLS proxy that passes the name through, the UI's own forms are still taken",
+              st == 200 and j.get("ok") is True, f"{st} {j}")
+        st, j = add("door: beside the proxy", origin="https://proxy.late.test:8443", host="proxy.late.test")
+        check("but not from another port of that name", st == 403 and holds("store", "door: beside the proxy") == 0,
+              f"{st} {j}")
+
+        # ----- written by hand into the variable, where nothing validates it
+        stop(srv)
+        srv = start(MEM_WEB_ALLOWED_HOSTS="*, *.evil.example, http://evil.example, evil.example/, kept.test")
+        if not _answers(port):
+            check("web UI starts with a list written by hand", False, "server never answered")
+            return
+        got = {h: status(h) for h in (f"evil.example:{port}", f"a.evil.example:{port}", f"anything.test:{port}")}
+        check("a wildcard in the variable opens nothing", all(s == 403 for s in got.values()), str(got))
+        check("and takes nothing away: loopback and the readable entries are still answered",
+              status(True) == 200 and status(f"kept.test:{port}") == 200, "an unreadable entry cost a readable one")
+    finally:
+        if srv is not None:
+            stop(srv)
+        shutil.rmtree(data, ignore_errors=True)
+
+
+def test_mcp_surface(mem, store):
+    print("\nMCP surface — what Claude Code keeps of it")
+
+    def rpc(method, params=None):
+        p = subprocess.run([sys.executable, os.path.join(PROJ, "mcp.py")], capture_output=True, text=True,
+                           input=json.dumps({"jsonrpc": "2.0", "id": 1, "method": method,
+                                             "params": params or {}}) + "\n",
+                           env=dict(os.environ, MEM_DATA_DIR=store))
+        try:
+            return json.loads(p.stdout.splitlines()[0])["result"]
+        except (ValueError, KeyError, IndexError):
+            return {}
+
+    def units(text):   # Claude Code counts as JavaScript does: UTF-16 code units
+        return len(text.encode("utf-16-le")) // 2
+
+    # Claude Code cuts MCP server instructions, and the description of a tool loaded up front, at
+    # 4,096 characters, and the model sees only what stands before the cut. For a Claude client the
+    # instructions are the agent guide and nothing else.
+    cap = 4096
+    guide = rpc("initialize", {"clientInfo": {"name": "claude-code"}}).get("instructions", "")
+    check("the agent guide reaches Claude Code whole", "agent guide" in guide[:60] and units(guide) <= cap,
+          f"{units(guide)} characters, the cap is {cap}")
+    tools = {t["name"]: t for t in rpc("tools/list").get("tools", [])}
+    upfront = sorted(n for n, t in tools.items() if (t.get("_meta") or {}).get("anthropic/alwaysLoad") is True)
+    check("memory_search asks to be loaded up front, and only it does", upfront == ["memory_search"],
+          f"got {upfront}")
+    cut = sorted(n for n, t in tools.items() if units(t.get("description", "")) > cap)
+    check("no tool description is longer than what is kept of it", bool(tools) and not cut, f"got {cut}")
+
+
 MUTATIONS = [
     ("private records are filtered out for an agent", "mem.py",
      "return [r for r in records if emit_for(r, dest)[0] is not None]", "return list(records)"),
@@ -3241,6 +3664,154 @@ MUTATIONS = [
     ("a status that revises a status of another scope keeps the rule", "mem.py",
      '                                          and target["meta"].get("scope") == scope)',
      '                                          and True)'),
+    # ---- who is asking: the web UI's own names, its own pages, the key of /api/propose
+    ("the web UI answers only to its own names", "mem_web.py",
+     "        if not host_allowed(pair, self.server.allowed_hosts):", "        if False:"),
+    ("the port is part of the name", "mem_web.py",
+     "    return (name, port) in allowed", "    return any(name == n for n, _ in allowed)"),
+    ("a request that names no host, or two, is not taken for a local one", "mem_web.py",
+     "        pair = split_host(hosts[0]) if len(hosts) == 1 else None",
+     '        pair = split_host(hosts[0]) if len(hosts) == 1 else ("localhost", self.server.server_address[1])'),
+    ("the names are read when the server starts, not on every request", "mem_web.py",
+     "host_allowed(pair, self.server.allowed_hosts)",
+     "host_allowed(pair, allowed_hosts(self.server.server_address[1])[0])"),
+    ("a POST from a page of another origin is refused", "mem_web.py",
+     '        if self.command == "POST" and not all(same_origin(o, pair) for o in origins):', "        if False:"),
+    ("the origin's port counts, not just its name", "mem_web.py",
+     "    return (pair[1] or default) == (host[1] or default)", "    return True"),
+    ("the origin is held to the name the request was sent to", "mem_web.py",
+     "    if pair is None or host is None or pair[0] != host[0]:",
+     "    if pair is None or host is None or pair[0] not in _LOOPBACK_NAMES:"),
+    ("/api/propose asks for the key", "mem_web.py",
+     '            if not propose_key_ok(self.headers.get("Authorization")):', "            if False:"),
+    ("the key of /api/propose is not the token every page carries", "mem_web.py",
+     '_PROPOSE_KEY = _load_or_make_secret(".propose-key", 32)', "_PROPOSE_KEY = _CSRF"),
+    ("/api/propose takes application/json only", "mem_web.py",
+     '            if (self.headers.get("Content-Type") or "").split(";")[0].strip().lower() != "application/json":',
+     "            if False:"),
+    ("the secrets in the data folder are written for their owner only", "mem_web.py",
+     "        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)",
+     "        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)"),
+    ("no answer may be framed", "mem_web.py",
+     '        self.send_header("X-Frame-Options", "DENY")\n'
+     '        self.send_header("Content-Security-Policy", "frame-ancestors \'none\'")\n', ""),
+    ("Settings holds the list of names to the grammar the server reads", "mem_web.py",
+     '        if vt == "hosts":', "        if False:"),
+    # --- redaction rules that judge the value: each one is switched off in turn, then each test of a value
+    ("a password after a keyword and a separator is masked", "redact.py",
+     're.compile(_KW_NAME + r"(?P<sep>', 're.compile("NEVER" + _KW_NAME + r"(?P<sep>'),
+    ("a Romanian password keyword is masked", "redact.py",
+     '|pwd|parol(?:a|', '|pwd|parolX(?:a|'),
+    ("a password after a keyword, some words and a separator is masked", "redact.py",
+     '" + _KW + _WORDS1 + r"', '" + "NEVER" + _KW + _WORDS1 + r"'),
+    ("a password stated in a sentence is masked", "redact.py",
+     '" + _KW + _WORDS0 + r"', '" + "NEVER" + _KW + _WORDS0 + r"'),
+    ("a password after 'cu parola' is masked", "redact.py",
+     '(?:cu|with)[ ', '(?:cuX|withX)[ '),
+    ("the value of a quoted key is masked", "redact.py",
+     ', re.I), _keyed),', ', re.I), lambda m: None),'),
+    ("a quoted token after a keyword is masked", "redact.py",
+     '(?:password|passwd|passphrase|parola|secret|psk)[ ', '(?:NEVER)[ '),
+    ("a bare value after a configuration keyword is masked", "redact.py",
+     '_value(config=True)),', 'lambda m: None),'),
+    ("a bare value after 'password' alone is masked when it cannot be a word", "redact.py",
+     '_value(strict=True)),', 'lambda m: None),'),
+    ("a WireGuard private or preshared key is masked", "redact.py",
+     '(?:private[ _-]?key|preshared[ _-]?key|psk)[ ', '(?:NEVER)[ '),
+    ("a TOTP seed in an otpauth URI is masked", "redact.py",
+     '[?&]secret=(?P<key>', '[?&]never=(?P<key>'),
+    ("a token after its name and a separator is masked", "redact.py",
+     '(?:token|secret)(?:ul)?[', '(?:NEVER)(?:ul)?['),
+    ("an API key outside the old alphabet is masked", "redact.py",
+     '(?:api[_-]?key|apikey|access[_-]?key)[', '(?:NEVER)['),
+    ("a long opaque value under a name ending in key is masked", "redact.py",
+     '("SECRET_KEY", re.compile(r"key[', '("SECRET_KEY", re.compile(r"NEVERkey['),
+    ("a token stated in a sentence is masked", "redact.py",
+     '(?:token(?:ul)?|secret(?:ul)?|api[ _-]?key|apikey|cheia', '(?:NEVER'),
+    ("a password inside a URL is masked", "redact.py",
+     ', _url_password),', ', lambda m: None),'),
+    ("a JWT is masked", "redact.py",
+     'beyJ[A-Za-z0-9_', 'bNEVER[A-Za-z0-9_'),
+    ("a crypt hash is masked", "redact.py",
+     '(?:1|5|6|apr1)', '(?:never)'),
+    ("a bcrypt hash is masked", "redact.py",
+     '2[abxy]?', '2never'),
+    ("a prefixed provider key is masked", "redact.py",
+     '(?:proj|svcacct|admin|ant|or)-', '(?:never)-'),
+    ("a fine-grained GitHub token is masked", "redact.py",
+     '|github_pat_[A-Za-z0-9_]{40,}', ''),
+    ("the rules run on text that holds only a Romanian keyword", "redact.py",
+     'pass|pwd|parol|secret', 'pass|pwd|secret'),
+    ("the rules run on text that holds only a URL", "redact.py",
+     '|key|psk|://"', '|key|psk"'),
+    ("an ordinary word after a password keyword stays", "redact.py",
+     "    if len(judged) < 6 or not any(c in _STRONG for c in judged):", "    if len(judged) < 6:"),
+    ("a product name after 'parola' stays", "redact.py",
+     "    if strict and len(judged) < 20:", "    if False:"),
+    ("a shell variable in the place of a password stays", "redact.py",
+     " or _VARIABLE.match(judged):", ":"),
+    ("a technical word or an environment name after a password keyword stays", "redact.py",
+     "    if _TECH.match(judged) or _ENV_NAME.match(judged):", "    if False:"),
+    ("a quoted URL after a keyword stays", "redact.py",
+     ' and "://" not in v', ''),
+    ("a mask is not masked again", "redact.py",
+     'return bool(v) and "[REDACTED" not in v and', 'return bool(v) and'),
+    ("a label or a validation rule under a quoted key stays", "redact.py",
+     "    if any(c.isspace() for c in v) or _bare(v, config=True) != len(v):", "    if False:"),
+    ("a file name or a slug after 'token:' stays", "redact.py",
+     'if re.fullmatch(r"[a-z0-9]+(?:[-_.][a-z0-9]+)+", v) and not', 'if False and not'),
+    ("a public key stays", "redact.py",
+     'r"pub(?:lic)?[', 'r"NEVERpub(?:lic)?['),
+    ("a short identifier under a name ending in key stays", "redact.py",
+     "and not (len(v) >= 40 and", "and not (len(v) >= 4 and"),
+    ("a placeholder password in a URL stays", "redact.py",
+     '    if v[0] in "$<{*%[" or v.lower() in (', '    if False and v.lower() in ('),
+    ("a Stripe live key is masked", "redact.py",
+     '(?:sk|rk)_live_', '(?:sk|rk)_never_'),
+    ("a Google API key is masked", "redact.py",
+     'bAIza[', 'bNEVER['),
+    ("the words between two quoted phrases are not a quoted value", "redact.py",
+     "    if v != v.strip():\n        return False\n", ""),
+    # --- the password keyword and its separator: what is glued to an equals sign, and what only stands there
+    ("a value glued to an equals sign is masked whatever its shape", "redact.py",
+     '    return m.start("bare"), m.start("bare") + len(core)\n', "    return None\n"),
+    ("only a value glued to the equals sign is taken as it stands", "redact.py",
+     ' or m.group("sep") != "=":', ":"),
+    ("the keyword again or a literal of the language is not a value", "redact.py",
+     "_NAME.match(core) or ", ""),
+    ("a name in camel case that ends in the keyword is not a value", "redact.py",
+     "_CAMEL.match(core) or ", ""),
+    ("a call is not a value", "redact.py",
+     ' or "(" in core', ""),
+    ("a subscript is not a value", "redact.py",
+     ' or "[" in core', ""),
+    ("a placeholder or a path glued to the equals sign is not a value", "redact.py",
+     'core[0] in "[<{(%*/~" or ', ""),
+    ("a URL glued to the equals sign is not a value", "redact.py",
+     ' or "://" in core', ""),
+    ("a relative path is not a value", "redact.py",
+     'core.startswith(("./", "../")) or ', ""),
+    ("a row of one character is not a value", "redact.py",
+     "len(set(core)) == 1", "False"),
+    ("a variable glued to the equals sign is not a value", "redact.py",
+     "bool(_VARIABLE.match(core) or ", "bool("),
+    ("a Windows path is not a value", "redact.py",
+     " or _DRIVE.match(core))", ")"),
+    ("two characters glued to the equals sign are not a value", "redact.py",
+     "len(core) < 4 or ", ""),
+    ("a name that ends in pass is a keyword before its separator", "redact.py",
+     "|(?<=[_.$?&])pass", ""),
+    ("--pass= is a keyword", "redact.py",
+     "|(?<=-)pass(?==)", ""),
+    ("pass inside a word is not a keyword", "redact.py",
+     "|(?<=[_.$?&])pass|", "|pass|"),
+    ("a hyphenated word that ends in pass is a keyword only before an equals sign", "redact.py",
+     "(?<=-)pass(?==)", "(?<=-)pass"),
+    # --- what Claude Code keeps of the MCP surface
+    ("a tool's request to be loaded up front reaches the client", "mcp.py",
+     '        entry["_meta"] = t["_meta"]', "        pass"),
+    ("the agent guide fits what Claude Code keeps of MCP instructions", "MEM0RY4AI.md",
+     "## Reading a memory\n", "## Reading a memory\n" + "(padding) " * 30 + "\n"),
 ]
 
 
@@ -3291,6 +3862,7 @@ def main():
     try:
         mem = load_mem(store)
         test_redaction(mem)
+        test_redaction_values(mem)
         test_injection_scan(mem)
         test_delimiter_forgery(mem)
         test_status_invariant(mem)
@@ -3304,6 +3876,7 @@ def main():
         test_injection_parts(mem, store)
         test_prompt_recall(mem, store)
         test_visible_recall(mem, store)
+        test_mcp_surface(mem, store)
         test_point_of_action(mem, store)
         test_digests(mem, store)
         test_measurement(mem, store)
@@ -3313,6 +3886,7 @@ def main():
         test_summary_note(mem, store)
         test_url_state(mem, store)
         test_web_server_pid(mem, store)
+        test_who_is_asking(mem, store)
         test_status_revision(mem)   # late, not beside the invariant: its statuses stay in the store
         test_line_editors(mem)   # last: no other test sees what it leaves in the store
     finally:

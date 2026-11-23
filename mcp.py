@@ -324,6 +324,10 @@ def t_session_search(a):
 
 TOOLS = [
     {"name": "memory_search", "fn": t_search,
+     # Claude Code keeps MCP tools behind its tool search until a task asks for one. This is the tool an
+     # agent is told to call before answering, so it asks to be loaded up front; whoever configures the
+     # server can still defer it (alwaysLoad: false in their MCP configuration).
+     "_meta": {"anthropic/alwaysLoad": True},
      "description": "Search durable memory (hybrid keyword+semantic). Call BEFORE answering to recall "
                     "gotchas, decisions, infra facts, commands, and the user's preferences. Pass "
                     "`files` to ask what is known about a specific file you are about to edit; it "
@@ -485,6 +489,14 @@ def get_prompt(name, args):
     return None
 
 
+def _tool_entry(t):
+    """A tool as tools/list describes it; `_meta` travels only where a tool sets one."""
+    entry = {"name": t["name"], "description": t["description"], "inputSchema": t["inputSchema"]}
+    if t.get("_meta"):
+        entry["_meta"] = t["_meta"]
+    return entry
+
+
 def handle(msg):
     mid, method, params = msg.get("id"), msg.get("method"), (msg.get("params") or {})
     if mid is None:   # a notification (e.g. notifications/initialized) — never gets a response
@@ -501,8 +513,7 @@ def handle(msg):
     if method == "ping":
         return _result(mid, {})
     if method == "tools/list":
-        return _result(mid, {"tools": [{"name": t["name"], "description": t["description"],
-                                        "inputSchema": t["inputSchema"]} for t in TOOLS]})
+        return _result(mid, {"tools": [_tool_entry(t) for t in TOOLS]})
     if method == "tools/call":
         name = params.get("name")
         if not name:

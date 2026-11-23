@@ -120,8 +120,15 @@ UI-ul apare la `http://127.0.0.1:8841/`.
   (optionala, prin Ollama) trece printr-o coada de review umana — modelele mici sunt zgomotoase
   si supra-increzatoare (masurat).
 - **Coexista cu CLAUDE.md** — nu atinge fisierele tale, namespace propriu.
-- **Redactare de secrete pe orice cale de scriere** (chei API, token-uri, parole, chei private)
-  + `mem.py audit` pentru ce e deja in store. Dezactivabil cu `--no-redact` / `MEM_REDACT=0`.
+- **Redactare de secrete pe orice cale de scriere**: 12 formate mascate oriunde apar (chei si
+  token-uri de furnizori, chei AWS, JWT-uri, chei private, hash-uri de parole) si 15 reguli pe
+  cuvant-cheie care se uita la valoare inainte s-o mascheze, asa ca „parola e obligatorie" ramane
+  cum a fost scrisa; `mem.py audit` raporteaza ce e deja in store. Limita cunoscuta: o parola doar
+  din litere, dupa doua puncte sau intr-o propozitie, nu e prinsa. Dezactivabil cu `--no-redact` /
+  `MEM_REDACT=0`.
+- **UI-ul web raspunde doar sub numele pe care le stie**: `localhost`, `127.0.0.1` si `[::1]`, pe
+  portul lui; alt nume primeste 403 pana e trecut in `MEM_WEB_ALLOWED_HOSTS`, iar un POST trimis de
+  o pagina straina e refuzat. Detalii in README-ul in engleza, „Who it answers to".
 - **Reguli critice + buget de injectare**: `mem.py pin <id>` marcheaza regulile care conditioneaza
   actiunile agentului — intra GARANTAT, primele, cu tot cu body; restul umple `MEM_INJECT_BUDGET`
   (default 8000 bytes), iar orice taietura e anuntata explicit. Injectarea se taie singura,

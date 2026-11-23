@@ -34,15 +34,15 @@ ASSETS_DIR = os.path.join(HERE, "web", "assets")
 # staging/ (already gitignored, never synced) so it survives a server restart: the SessionStart
 # hook relaunches the server and we restart it on upgrades, and a per-process token would break
 # every already-open form with an opaque "CSRF" error.
-def _load_or_make_csrf():
-    path = os.path.join(mem.DATA, "staging", ".csrf")
+def _load_or_make_secret(name, nbytes):
+    path = os.path.join(mem.DATA, "staging", name)
     try:
         tok = open(path, encoding="utf-8").read().strip()
         if len(tok) >= 16:
             return tok
     except OSError:
         pass
-    tok = secrets.token_hex(16)
+    tok = secrets.token_hex(nbytes)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         # create owner-only in one step — no open()+chmod window where the token is world-readable
@@ -54,7 +54,109 @@ def _load_or_make_csrf():
     return tok
 
 
-_CSRF = _load_or_make_csrf()
+_CSRF = _load_or_make_secret(".csrf", 16)
+# What a script shows instead of the form token (see /api/propose). Kept apart from it on purpose:
+# the token is printed in every page, so whatever can read a page has it; the key is only ever in
+# its file, for a program that can read the data folder.
+_PROPOSE_KEY = _load_or_make_secret(".propose-key", 32)
+
+
+# ---------- who is asking ----------
+# The UI has no login: it listens on loopback and takes whoever reaches it there for the user. A
+# browser breaks that twice. Any page it has open may send requests to this port; and with DNS
+# rebinding a foreign page even becomes "same origin" -- its own domain is pointed at 127.0.0.1
+# after it loaded, and from then on the browser lets it read every answer, form token included.
+# Neither shows in the socket, since the request really does come from this machine. Both show in
+# what the browser says about itself: the NAME it believes it is talking to (Host) and the page
+# that is sending (Origin). So those two are looked at before anything is served.
+_HOST_RE = re.compile(r"(\[[0-9a-f:.]{2,45}\]|[a-z0-9](?:[a-z0-9._-]{0,251}[a-z0-9])?)(?::([0-9]{1,5}))?")
+_LOOPBACK_NAMES = ("localhost", "127.0.0.1", "[::1]")
+
+
+def split_host(value):
+    """'Name:8841' -> ('name', 8841), 'name' -> ('name', None); None for whatever is not a host
+    name, an IPv4 address or a bracketed IPv6 one, with an optional port.
+
+    Narrow on purpose -- no scheme, no path, no user, no wildcard -- so that '*' is not a name and
+    nothing typed by accident comes to mean "everyone"."""
+    m = _HOST_RE.fullmatch((value or "").strip().lower())
+    if not m:
+        return None
+    port = int(m.group(2)) if m.group(2) else None
+    if port is not None and not 0 < port < 65536:
+        return None
+    return m.group(1), port
+
+
+def allowed_hosts(port):
+    """The names this server answers to, as (name, port) pairs, and the entries of
+    MEM_WEB_ALLOWED_HOSTS it could not read.
+
+    Loopback under its three spellings, on the server's own port, and nothing else until the
+    operator lists it. An entry without a port is that name on the server's port; an entry with one
+    is that name on exactly that port -- another published port, a proxy in front."""
+    allowed = {(name, port) for name in _LOOPBACK_NAMES}
+    ignored = []
+    for entry in re.split(r"[,\s]+", os.environ.get("MEM_WEB_ALLOWED_HOSTS", "")):
+        pair = split_host(entry) if entry else None
+        if pair:
+            allowed.add((pair[0], pair[1] if pair[1] is not None else port))
+        elif entry:
+            ignored.append(entry)
+    return frozenset(allowed), ignored
+
+
+def host_allowed(pair, allowed):
+    """Whether a Host header, already split, is one of the server's names.
+
+    A browser leaves the port out when it is the default one of the scheme, and behind a TLS proxy
+    this server cannot tell which scheme that was: a Host without a port stands for 80 or 443."""
+    if pair is None:
+        return False
+    name, port = pair
+    if port is None:
+        return (name, 80) in allowed or (name, 443) in allowed
+    return (name, port) in allowed
+
+
+def host_refusal(hosts, pair):
+    """What a caller under an unknown name is told: the name the server saw, and where a name is
+    added. Plain text, and nothing about the server beyond that."""
+    if not hosts:
+        return "Forbidden: the request has no Host header.\n"
+    if len(hosts) > 1:
+        return "Forbidden: the request has more than one Host header.\n"
+    if pair is None:
+        seen = "".join(c if c.isascii() and (c.isalnum() or c in ".:-_[]") else "?" for c in hosts[0][:120])
+        return f'Forbidden: "{seen}" is not a host name.\n'
+    name, port = pair
+    if port is None:
+        seen, add = name, f"{name}:443 (behind https) or {name}:80 (behind http)"
+    else:
+        seen = add = f"{name}:{port}"
+    return (f'Forbidden: this server does not answer to the name "{seen}".\n'
+            f"To allow it, add {add} to MEM_WEB_ALLOWED_HOSTS and restart the server.\n")
+
+
+def same_origin(origin, host):
+    """Whether an Origin header names the very host and port the request was addressed to.
+
+    The scheme is not compared: behind a TLS proxy the browser says https while this server only
+    ever speaks http. It does decide what a missing port means. 'null' -- a sandboxed frame, a
+    data: URL, a redirect across origins -- names nobody, and neither does a scheme no web page has."""
+    m = re.fullmatch(r"(https?)://([^/?#@\s]+)", (origin or "").strip().lower())
+    pair = split_host(m.group(2)) if m else None
+    if pair is None or host is None or pair[0] != host[0]:
+        return False
+    default = 443 if m.group(1) == "https" else 80
+    return (pair[1] or default) == (host[1] or default)
+
+
+def propose_key_ok(header):
+    """Whether an Authorization header carries the key of /api/propose, as 'Bearer <key>'."""
+    scheme, _, given = (header or "").strip().partition(" ")
+    return scheme.lower() == "bearer" and secrets.compare_digest(given.strip().encode("utf-8"),
+                                                                 _PROPOSE_KEY.encode("utf-8"))
 
 # When the server runs detached (no console — e.g. launched by the SessionStart hook),
 # every child process (git, the hook subprocess) pops its own cmd window that flashes on
@@ -109,6 +211,17 @@ RO = {
         "valoare exportata in shell are prioritate fata de fisier.",
     "Reset every setting to its default? This clears your overrides in .mem-local.env.":
         "Resetezi toate setarile la implicit? Asta sterge override-urile din .mem-local.env.",
+    "Extra host names": "Nume de gazda in plus",
+    "The server answers only when the browser calls it by a name it knows: localhost, 127.0.0.1 and "
+    "[::1], on its own port. List here the other names you open it under, separated by commas. A name "
+    "alone means that name on the server's port (nas.example); a name with a port means exactly that "
+    "port, for another published port or a proxy in front (nas.example:9000, mem.example:443). There "
+    "is no wildcard. Default: empty.":
+        "Serverul raspunde doar cand browserul il cheama pe un nume cunoscut: localhost, 127.0.0.1 si "
+        "[::1], pe portul lui. Scrie aici celelalte nume sub care il deschizi, despartite prin virgula. "
+        "Un nume singur inseamna numele acela pe portul serverului (nas.example); un nume cu port "
+        "inseamna exact portul acela, pentru alt port publicat sau un proxy in fata (nas.example:9000, "
+        "mem.example:443). Nu exista wildcard. Implicit: gol.",
     "Dashboard": "Panou", "Memories": "Memorii", "Projects": "Proiecte", "Links": "Legaturi",
     "Git history": "Istoric git", "What Claude sees": "Ce vede Claude", "to review": "de revizuit",
     "System status": "Status sistem", "Health": "Health", "Recent activity": "Activitate recenta",
@@ -1826,6 +1939,12 @@ SETTINGS = [
        "Normally the server watches its own source files and restarts itself when they change (e.g. after "
        "a git-pull). Enable this to disable that auto-restart — useful if the re-exec interrupts "
        "something. Default off (auto-reload on).", advanced=True, apply="restart web server"),
+    _S("MEM_WEB_ALLOWED_HOSTS", "web", "hosts", "", "Extra host names",
+       "The server answers only when the browser calls it by a name it knows: localhost, 127.0.0.1 and "
+       "[::1], on its own port. List here the other names you open it under, separated by commas. A name "
+       "alone means that name on the server's port (nas.example); a name with a port means exactly that "
+       "port, for another published port or a proxy in front (nas.example:9000, mem.example:443). There "
+       "is no wildcard. Default: empty.", advanced=True, apply="restart web server"),
 
     _S("OLLAMA_URL", "ollama", "string", "http://localhost:11434", "Ollama URL",
        "Base URL of the local Ollama server used for semantic embeddings and the optional offline "
@@ -1883,13 +2002,21 @@ def validate_setting(s, raw):
         return ("1" if raw.lower() not in _FALSEY else "0"), None
     if vt == "enum":
         return (raw, None) if raw in (s["choices"] or []) else (None, "invalid choice")
-    if vt == "string":
+    if vt in ("string", "hosts"):
         # reject control chars: a newline would inject a second KEY=VALUE line into .mem-local.env
         # (env-var smuggling); other C0 chars / DEL have no business in a URL or model name.
         if any(ord(c) < 0x20 or ord(c) == 0x7f for c in raw):
             return None, "control characters not allowed"
         if len(raw) > 500:
             return None, "too long"
+        if vt == "hosts":
+            # Held to the grammar the server reads the list with. What is saved here is a name it
+            # answers to after the next restart, so a wildcard or a pasted address is refused now
+            # instead of being quietly ignored then.
+            bad = [e for e in re.split(r"[,\s]+", raw) if e and split_host(e) is None]
+            if bad:
+                return None, ("not a host name: " + ", ".join(bad[:5])
+                              + " (write name or name:port, separated by commas)")
         return raw, None
     try:
         n = int(raw) if vt == "int" else float(raw)
@@ -1927,8 +2054,8 @@ def render_setting_row(s, cur, overridden):
         opts = "".join(f'<option value="{h(c)}"{" selected" if str(cur) == c else ""}>{h(c)}</option>'
                        for c in (s["choices"] or []))
         ctrl = f'<select data-key="{key}" data-type="enum">{opts}</select>'
-    elif vt == "string":
-        ctrl = f'<input type="text" data-key="{key}" data-type="string" value="{h(str(cur))}" size="32">'
+    elif vt in ("string", "hosts"):
+        ctrl = f'<input type="text" data-key="{key}" data-type="{vt}" value="{h(str(cur))}" size="32">'
     else:
         step = s["step"] if s["step"] is not None else ("1" if vt == "int" else "0.01")
         mn = f' min="{s["min"]}"' if s["min"] is not None else ""
@@ -3976,6 +4103,52 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass  # quiet
 
+    def _gate(self):
+        """Decide whether this request is answered at all: True when it was refused, and told so.
+
+        The one place both verbs pass through, before any route is looked at, so a static file
+        and a JSON endpoint are held to the same rule as a page (see 'who is asking')."""
+        hosts = self.headers.get_all("Host") or []
+        pair = split_host(hosts[0]) if len(hosts) == 1 else None
+        if not host_allowed(pair, self.server.allowed_hosts):
+            return self._refuse(403, host_refusal(hosts, pair))
+        # A page of this UI posts to the address it was loaded from, and the browser says so. A
+        # page of any other origin says so too, and no token it got hold of changes that. No
+        # Origin at all is a script or an old browser: the token, or the key, decides.
+        origins = self.headers.get_all("Origin") or []
+        if self.command == "POST" and not all(same_origin(o, pair) for o in origins):
+            return self._refuse(403, "Forbidden: this request was sent by a page of another origin.\n")
+        return False
+
+    def _refuse(self, code, text):
+        """Turn a request away, in plain text. Whatever body it carried is read and dropped first,
+        up to a limit: closing a socket with unread data resets the connection, and the caller
+        would see that instead of the reason."""
+        try:
+            left = min(int(self.headers.get("Content-Length") or 0), 1 << 20)
+        except ValueError:
+            left = 0
+        while left > 0:
+            chunk = self.rfile.read(min(left, 65536))
+            if not chunk:
+                break
+            left -= len(chunk)
+        data = text.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+        return True
+
+    def end_headers(self):
+        # No page of this UI is meant to sit inside someone else's frame, where a foreign page
+        # could show it and steer a click onto one of its buttons. Said on every answer.
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+        super().end_headers()
+
     def _remember_url(self, path, qs):
         """Keep the current path+query on the request context so a link can override ONE parameter
         instead of replacing the whole query string. The language switcher used a bare `?lang=xx`,
@@ -3995,6 +4168,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         _ctx.lang = c if c in ("en", "ro") else envdef
 
     def do_GET(self):
+        if self._gate():
+            return
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
@@ -4018,16 +4193,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._send_html(f"<h1>404</h1><p>{h(path)} — not found. <a href=\"/\">Dashboard</a></p>", 404)
 
     def do_POST(self):
+        if self._gate():
+            return
         parsed = urllib.parse.urlparse(self.path)
         self._set_lang(urllib.parse.parse_qs(parsed.query))
         length = int(self.headers.get("Content-Length", 0) or 0)
         raw = self.rfile.read(length) if length else b""
         if parsed.path == "/api/propose":
-            # Uniform machine-ingestion channel (Vercel eve 'channels' idea, kept local): any agent or
-            # script POSTs JSON to PROPOSE a memory. It goes to the human REVIEW QUEUE, never straight to
-            # the store — so it's the same low-trust path as the LLM extractor. CSRF-exempt on purpose
-            # (a script has no browser token); safe because the server binds 127.0.0.1 and this only
-            # touches the reviewed queue. Body redacted + injection-scanned before it lands.
+            # Machine-ingestion channel (Vercel eve 'channels' idea, kept local): an agent or a script
+            # POSTs JSON to PROPOSE a memory. It goes to the human REVIEW QUEUE, never straight to the
+            # store -- the same low-trust path as the LLM extractor -- redacted and injection-scanned
+            # before it lands. A script has no page to take the form token from, so it shows the key
+            # instead: staging/.propose-key, which only a program that can read the data folder has.
+            # And it has to say application/json: no HTML form can send that, and a page of another
+            # origin could only after a preflight, which this server answers with 501.
+            if not propose_key_ok(self.headers.get("Authorization")):
+                return self._send_json({"ok": False, "error": "missing or wrong key: send the contents of "
+                                        "staging/.propose-key (in the data folder) as "
+                                        "'Authorization: Bearer <key>'"}, 401)
+            if (self.headers.get("Content-Type") or "").split(";")[0].strip().lower() != "application/json":
+                return self._send_json({"ok": False, "error": "Content-Type must be application/json"}, 415)
             try:
                 d = json.loads(raw or b"{}")
             except Exception:
@@ -4390,11 +4575,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_json(self, obj):
+    def _send_json(self, obj, code=200):
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
-        self.send_response(200)
+        self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        if code == 401:
+            self.send_header("WWW-Authenticate", "Bearer")
         self.end_headers()
         self.wfile.write(data)
 
@@ -4402,6 +4589,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+
+    def server_bind(self):
+        super().server_bind()
+        # Read once, now that the port is known, and not again while the process lives: a name
+        # written into the settings by whoever managed to post there opens nothing until the
+        # operator restarts the server.
+        self.allowed_hosts, self.ignored_hosts = allowed_hosts(self.server_address[1])
 
 
 def _write_local_env(updates, removes=()):
@@ -4555,6 +4749,13 @@ def serve(host=None, port=None):
     # tell a server that started from one that hung.
     print(f"mem0ry4ai web UI on http://{host}:{port}/  (data: {mem.DATA})"
           + ("  · auto-reload on" if reload_on else ""), flush=True)
+    listed = sorted(f"{n}:{p}" for n, p in httpd.allowed_hosts
+                    if n not in _LOOPBACK_NAMES or p != httpd.server_address[1])
+    if listed:
+        print("  also answers to: " + ", ".join(listed), flush=True)
+    if httpd.ignored_hosts:
+        print("  MEM_WEB_ALLOWED_HOSTS: ignored " + ", ".join(repr(e) for e in httpd.ignored_hosts)
+              + " (write name or name:port, separated by commas)", flush=True)
     _exit_cleanly_on_signals()
     # Only now that the port is ours: a second `serve` that lost the race for it fails above, and
     # must not replace the pid of the server that is actually listening.

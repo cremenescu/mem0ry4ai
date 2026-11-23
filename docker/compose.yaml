@@ -12,8 +12,8 @@ services:
       args:
         # Pin a release rather than tracking main: this container commits to your store, and an
         # unattended rebuild should never be the first time new code touches it.
-        VERSION: v0.21.0
-    image: mem0ry4ai:v0.21.0
+        VERSION: v0.22.0
+    image: mem0ry4ai:v0.22.0
     container_name: mem0ry4ai
     restart: unless-stopped
     # tini as PID 1. The application does not reap the orphans it inherits, and a PID 1 that does
@@ -24,7 +24,8 @@ services:
     ports:
       # 127.0.0.1 on the left: reachable from the host only. The UI has no authentication, so
       # exposing it to the LAN is a decision to make deliberately -- drop the prefix, or put a
-      # reverse proxy with auth in front. Never expose it to the internet.
+      # reverse proxy with auth in front. Never expose it to the internet. Opened under another
+      # name or another port than these, it answers 403: see MEM_WEB_ALLOWED_HOSTS below.
       - "127.0.0.1:8841:8841"
     volumes:
       # The store. Everything else in the container is disposable; this is not.
@@ -33,3 +34,8 @@ services:
       # Inside the container the server must bind all interfaces, or the published port reaches
       # nothing. The container's own network namespace is the boundary, not this setting.
       MEM_WEB_HOST: "0.0.0.0"
+      # The server answers only when the browser calls it localhost, 127.0.0.1 or [::1], on port
+      # 8841. Under any other name it answers 403 until that name is listed here, separated by
+      # commas: a name alone is that name on 8841, name:port when the published port is another
+      # one or a proxy stands in front (nas.example:9000, mem.example:443). No wildcard.
+      # MEM_WEB_ALLOWED_HOSTS: "nas.example"

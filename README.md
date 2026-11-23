@@ -33,7 +33,7 @@ agentmemory, the official MCP memory server). Recurring failure modes shaped thi
 | Auto-extraction noise (small LLMs are over-confident: ~1.0 confidence on everything — we measured) | **Trust-gated writes**: the in-context agent writes directly; batch LLM extraction goes through a human review queue |
 | Tools that vandalize CLAUDE.md / fight native memory | Coexists cleanly — own namespace, never touches your files |
 | Nobody remembers "where was I?" on returning to a project | First-class **`todo`** and **`status`** types, pinned in injection and UI |
-| Credentials accumulate in an unencrypted memory file | **Secret redaction on every write path** (8 patterns: API keys, Bearer/GitHub/OpenAI/Slack tokens, AWS keys, private keys, passwords) + `mem.py audit` for what is already stored |
+| Credentials accumulate in an unencrypted memory file | **Secret redaction on every write path**: 12 formats masked wherever they stand (provider keys and tokens, AWS keys, JWTs, private keys, password hashes) and 15 keyword rules that look at the value before masking it, so "the password is required" stays as written + `mem.py audit` for what is already stored |
 | As memory grows, the injection grows — and the harness truncates it blindly, silently dropping rules the agent must follow | **Self-budgeted injection**: `priority: critical` rules are always in (first, full body); the rest fills `MEM_INJECT_BUDGET`; every cut is announced with the command that retrieves it |
 
 ## Measured impact (author's real setup)
@@ -283,6 +283,15 @@ knows to search before answering and how to save — **without touching your `CL
 *want* a pointer there, add one line yourself (optional): `Memory: use the mem0ry4ai MCP tools; see
 MEM0RY4AI.md`.
 
+**Sized for the client.** Claude Code cuts a server's instructions at 4,096 characters, and the model
+sees only what stands before the cut — so the guide is kept under it, and a test fails when it grows
+past. With tool search on, a session starts with a server's instructions and the *names* of its
+tools, not their schemas; `memory_search` is the tool the guide says to call before answering, so it
+asks to be loaded up front (`"_meta": {"anthropic/alwaysLoad": true}` in its `tools/list` entry,
+Claude Code v2.1.285 or later) while the other seven stay behind the search. To defer it as well, set
+`"alwaysLoad": false` on the server in your MCP configuration. Before Claude Code v2.1.296 the cut
+was at 2,048 characters, and there the guide still arrives cut.
+
 **Push for hook-less agents.** For agents that have no SessionStart hook (Gemini/Antigravity, Cursor, …)
 the `instructions` also carry your **global essentials — the user profile and every critical rule —
 straight from the store**, so the must-haves are present before the model's first turn, not left to a
@@ -304,7 +313,10 @@ notes** page or with `mem.py list --status working`. (CLI: `mem.py add --working
 conversation history** instead — "what did we actually discuss weeks ago?" — over a derived FTS5 index of
 the Claude Code transcripts, at zero LLM cost. Secrets are stripped before indexing and the index is
 owner-only, gitignored, and never leaves your machine. (CLI: `mem.py sessions "<query>"`, `--list`,
-`--reindex`, `--project <name>`.)
+`--reindex`, `--project <name>`.) The index keeps each message as it was redacted on the day it was
+indexed. After an upgrade that changes the redaction rules, `--reindex` deletes the index and builds
+it again from the transcripts still on disk — and a session whose transcript file is gone by then
+does not come back, so skip the rebuild if you would rather keep those searchable.
 
 **Fragment refs.** `memory_get` shows a record's body with 1-based line numbers; pass `"<id>:5-9"` (or a
 `lines` arg) to retrieve just those lines and cite a precise line of a longer memory. (CLI: `mem.py get
@@ -315,8 +327,22 @@ memories and writes the merge proposals to a `mem-consolidation` git branch you 
 (never auto-merged); `mem_maintenance.py install` schedules that plus reindex/re-embed and stale
 working-note cleanup as a local launchd job (non-destructive by default). Memories carry a `session:`
 provenance stamp (which conversation produced them) and an optional `protected:` flag that blocks
-in-place edits, and injection at session start honours a per-record body cap. Any non-MCP agent or
-script can `POST /api/propose` JSON to drop a memory into the human review queue.
+in-place edits, and injection at session start honours a per-record body cap.
+
+**Proposing over HTTP.** A script on the same machine can `POST /api/propose` JSON to drop a memory
+into the human review queue — never straight into the store. The request carries the key the server
+writes at start to `staging/.propose-key` in the data directory (owner-only, and printed in no
+page), and has to say `Content-Type: application/json`:
+
+```bash
+curl -s -X POST http://127.0.0.1:8841/api/propose \
+  -H "Authorization: Bearer $(cat "$MEM_DATA_DIR/staging/.propose-key")" \
+  -H "Content-Type: application/json" \
+  --data-binary '{"type":"fact","scope":"global","summary":"one line","body":"the text"}'
+```
+
+Without the key the answer is `401`, with another content type `415`. `$MEM_DATA_DIR` stands here
+for your data directory: the folder of the code, or `~/.mem0ry4ai` in a plugin install.
 
 ## Quick start
 
@@ -493,6 +519,12 @@ container: the server binds loopback by default, and publishing a port to a loop
 gives you a container that looks healthy and answers nothing. And the compose file publishes to
 `127.0.0.1` only — **the web UI has no authentication**, so exposing it beyond the host is a
 decision to make on purpose, with a reverse proxy in front. Never expose it to the internet.
+
+A third one decides what you can open it as. The server answers only when it is called `localhost`,
+`127.0.0.1` or `[::1]`, on its own port; under any other name — the NAS's host name or LAN address,
+another published port, a proxy — it answers `403` and names the entry to add. Those go in
+`MEM_WEB_ALLOWED_HOSTS`, which has a commented line in `compose.yaml`; the rule itself is under
+[Who it answers to](#who-it-answers-to).
 
 ### Uninstalling
 
@@ -712,10 +744,35 @@ replacing values with `[REDACTED:<label>]`:
 - `mem.py audit` — read-only report of secret-like patterns already in the store (exit 1 if
   any found, handy in CI). It never modifies records — you decide what to clean up.
 
-Patterns: generic API/secret/access keys, Bearer tokens, AWS keys, private key blocks,
-quoted passwords, GitHub/OpenAI/Slack tokens. Opt out per call with `--no-redact`, or
-globally with `MEM_REDACT=0`. Infrastructure facts you store on purpose (hosts, paths,
-ports, usernames) are not touched — only credential-shaped values are.
+Two kinds of rule do the work. **Formats** are masked whole, wherever they stand: API, secret and
+access keys after their keyword, Bearer tokens, AWS keys, private key blocks, GitHub, OpenAI, Slack,
+Stripe and Google keys, the prefixed keys LLM providers issue, JWTs, and crypt-style and Argon2
+password hashes. **Keyword rules** start from a word — `password`, `passwd`, `passphrase`, `parola`,
+`secret`, `token`, a name ending in `key` — and then look at the value before masking it, because
+to a regex "the password is hunter2" and "the password is required" are the same sentence:
+
+- a quoted value is taken as it stands, unless it is a placeholder, a variable or a URL;
+- a bare one has to be shaped like a credential: six characters or more with a letter and a digit
+  or one of `!@#$%^&`, or four digits and more; right after the word and nothing but a space
+  (`password Hunter2x`), where a product name is as likely as a password, it has to be eight long
+  with a symbol or both letter cases, or twenty;
+- glued to an equals sign (`DB_PASSWORD=hunter`) it is the value whatever its shape, unless it
+  stands for one instead of being one: a variable, a placeholder, a path, a call, a literal such as
+  `None`, or a name that ends in the keyword (`password=self.db_password`).
+
+Only the value is replaced, so `password: [REDACTED:PASSWORD]` still reads as a line of
+configuration, and "the password is required", `password=None` and `NOPASSWD: /usr/bin/x` stay as
+written. The same rules cover passwords in prose (English and Romanian), quoted keys in JSON, YAML
+and PHP arrays, router and command-line syntax, WireGuard private and preshared keys, TOTP seeds in
+`otpauth://` links, long opaque tokens, and the password inside a `scheme://user:…@host` URL.
+
+Known limit: a password made only of letters, after a colon or in a sentence (`password: hunter`),
+is left alone — nothing in its shape tells it from a word. `mem.py audit` reports what the rules
+see in the store; it cannot report what they do not.
+
+Opt out per call with `--no-redact`, or globally with `MEM_REDACT=0`. Infrastructure facts you
+store on purpose (hosts, paths, ports, usernames) are not touched — only credential-shaped values
+are.
 
 For secrets the agent should be able to *use* across sessions, store a **pointer, not the
 value**: keep the secret in your OS keychain / password manager, and save a `fact` telling
@@ -753,16 +810,18 @@ to a model along with everything else.
 ## Tests
 
 ```bash
-python3 tests/test_guards.py             # 400 checks, isolated store, stdlib only
+python3 tests/test_guards.py             # 534 checks, isolated store, stdlib only
 python3 tests/test_guards.py --canary    # remove each guard in turn; the suite must notice
 tools/crawl_ui.py http://127.0.0.1:8841  # reachability, broken links, URL state — no LLM needed
 ```
 
-The suite covers the rules that must not quietly break: secret redaction (each pattern is fed
-something it *must* catch), the injection scan, record-delimiter forgery, the one-live-`status`
-invariant, `protected`, egress across every surface, what each hook pushes and when it must stay
-silent, the duplicate groups and their undo, and — after that class of bug shipped three times —
-that no link in the web UI drops the filters you are looking at.
+The suite covers the rules that must not quietly break: secret redaction (each format and each
+keyword rule is fed something it *must* catch, and prose it must leave as written), the injection
+scan, record-delimiter forgery, the one-live-`status` invariant, `protected`, egress across every
+surface, what each hook pushes and when it must stay silent, the duplicate groups and their undo,
+the names the web UI answers to and the pages it takes a POST from, what the MCP server tells a
+client about itself, and — after that class of bug shipped three times — that no link in the web UI
+drops the filters you are looking at.
 
 `--canary` is the part worth stealing. It deletes each guard from a scratch copy and requires the
 suite to go red — because a check that passes while the thing it checks is gone reports green and
@@ -872,6 +931,31 @@ Bilingual (English default, Romanian via the EN/RO switch in the top bar).
 - **Git history**: the store's timeline — commits touching `store/` with colored per-commit
   diffs and a commit-from-the-UI button (store files only).
 
+### Who it answers to
+
+The UI has no login: it listens on loopback and takes whoever reaches it there for you. A browser
+makes that too generous twice over — any page you have open may send requests to a local port, and
+with DNS rebinding a foreign page can pass for the UI's own origin and read its pages. Neither
+shows in the socket, since the request really does come from your machine; both show in what the
+browser says about itself. So two things are looked at before anything is served:
+
+- **The name it was called by.** The server answers only as `localhost`, `127.0.0.1` or `[::1]`, on
+  its own port. Any other `Host` gets `403` and a line naming the entry to add. Extra names go in
+  `MEM_WEB_ALLOWED_HOSTS`, comma-separated (or in Settings, the *Extra host names* row among the
+  advanced ones): `nas.example` is that name on the server's port, `nas.example:9000`
+  exactly that port. There is no wildcard and no switch that turns the check off, and the list is
+  read when the server starts — a name saved from Settings opens nothing until a restart.
+- **The page that is posting.** A `POST` whose `Origin` is not the host and port the request was
+  addressed to is refused with `403`, whatever token it carries. A request with no `Origin` — a
+  script — is judged as before by the form token, or by the key of `/api/propose`.
+
+Every answer also says it may not be shown inside another page's frame.
+
+Behind a reverse proxy, list the public name with its port (`mem.example:443` — a `Host`
+without a port stands for 80 or 443) and have the proxy pass the browser's `Host` through. If it
+rewrites it, pages load but every form is refused: the page's origin no longer matches the name
+the server sees.
+
 ## Optional: offline extraction with a local LLM
 
 For sessions where the agent could not capture live, `consolidate.py` digests transcripts with a
@@ -912,6 +996,7 @@ the CLI and the MCP server all read:
 | `MEM_SEARCH_LOG` | `1` | keep the agent's search queries, redacted, in the local access log |
 | `MEM_DUPS_THRESHOLD` | `0.80` | how alike two memories must be to be grouped as duplicates (0.60–0.99) |
 | `MEM_WEB_PORT` | `8841` | web UI port (`mem.py serve`) |
+| `MEM_WEB_ALLOWED_HOSTS` | empty | names the web UI answers to besides `localhost`, `127.0.0.1` and `[::1]` on its own port: `name` or `name:port`, comma-separated, no wildcard; read at start — see [Who it answers to](#who-it-answers-to) |
 | `MEM_UI_LANG` | `en` | default web UI language (`ro` for Romanian; per-user EN/RO switch overrides) |
 | `MEM_RECENCY_WEIGHT` | `1.5` | how much fresher memories are nudged up in ranking (0 = pure bm25) |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint for offline extraction + embeddings |
