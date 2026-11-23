@@ -16,6 +16,7 @@ import math
 import os
 import re
 import secrets
+import signal
 import socketserver
 import subprocess
 import sys
@@ -74,6 +75,10 @@ _ctx = threading.local()
 # A record id as the store mints it: YYYYMMDD + '-' + a short suffix. Used to tell "go to this
 # record" apart from "search for this text" when something is typed into the search box.
 _ID_RE = re.compile(r"^\d{8}-[A-Za-z0-9]{4,12}$")
+# Rows per page on /memories. The default view listed every active record -- 9.5 MB of HTML for
+# ~2,200 records once each body rode along three times; a page of 200 lean rows is ~290 KB,
+# 60 KB of which is the page itself (measured 2026-10-06).
+PAGE_ROWS = 200
 
 
 def lang():
@@ -109,10 +114,17 @@ RO = {
     "System status": "Status sistem", "Health": "Health", "Recent activity": "Activitate recenta",
     "active": "active", "superseded": "superseded", "open todos": "todo deschise", "of": "din",
     "SessionStart injection": "Injectare SessionStart", "budget": "buget", "critical rules": "reguli critice",
+    "profile": "profil", "rules": "reguli", "knowledge": "cunostinte", "per hook": "per hook",
+    "limit": "limita", "a part was cut to fit": "o parte a fost taiata ca sa incapa",
+    "one hook for everything — re-run hooks/install.py to give each section its own limit":
+        "un singur hook pentru tot — ruleaza din nou hooks/install.py ca fiecare sectiune sa aiba limita ei",
+    "Claude Code caps each hook's output separately, so each part has its own limit.":
+        "Claude Code plafoneaza separat iesirea fiecarui hook, deci fiecare parte are limita ei.",
     "active — last capture": "activ — ultima captura",
     "no evidence yet (no captures in staging)": "fara dovezi inca (nicio captura in staging)",
     "Source of truth:": "Sursa de adevar:", "(markdown + git). CLI:": "(markdown + git). CLI:",
-    "Quick guide": "Ghid rapid", "Navigation": "Navigare",
+    "Quick guide": "Ghid rapid", "Navigation": "Navigare", "Guide": "Ghid", "Filters": "Filtre",
+    "Status": "Status", "all scopes": "toate domeniile", "Show help": "Arata ghidul paginii",
     "Store writable": "Store writable", "write OK": "scriere OK",
     "Staging writable": "Staging writable", "queue functional": "coada functionala",
     "not created yet": "necreat inca", "FTS index": "Index FTS", "up to date": "la zi",
@@ -193,6 +205,8 @@ RO = {
     "Commit from the UI": "Commit din UI", "Live": "Live",
     # queue
     "Review queue": "Coada de review", "candidates": "candidati", "Approve": "Aproba",
+    "Statuses not listed at start": "Status-uri nelistate la start",
+    "kept, searchable — mem.py stale": "pastrate, cautabile — mem.py stale",
     "Edit & approve": "Editeaza & aproba", "Reject": "Respinge", "How review works": "Cum functioneaza review-ul",
     "Tip": "Sfat", "Queue:": "Coada:", "Cancel": "Anuleaza", "Type": "Tip", "Scope": "Scope",
     "global or project:slug": "global sau project:slug",
@@ -241,7 +255,7 @@ RO = {
     "critical rule: always injected, first, at SessionStart": "regula critica: injectata mereu, prima, la SessionStart",
     "Operation failed": "Operatie esuata", "selected": "selectate", "Clear selection": "Goleste selectia",
     "Supersede chain:": "Lant de supersedare:", "close": "inchide", "(no chain)": "(fara lant)", "back": "inapoi",
-    "+ Add memory": "+ Adauga memorie", "search (FTS ranked)...": "cauta (FTS ranked)...",
+    "+ Add memory": "+ Adauga memorie", "search — Enter = full text, typing filters this page": "cauta — Enter = full text, tastarea filtreaza pagina",
     "all types": "toate tipurile", "all scopes": "toate scope-urile", "Add memory": "Adauga memorie",
     "one-line summary": "sumar pe o linie",
     "memory details (simple markdown, inline `code`)": "detalii (markdown simplu, `code` inline)",
@@ -249,13 +263,92 @@ RO = {
     "Delete permanently? (it stays in git history)": "Stergi definitiv? (ramane in istoricul git)",
     "New scope (global or project:slug):": "Scope nou (global sau project:slug):", "Network error": "Eroare de retea",
     "Session expired (the server restarted) — reload the page and try again.": "Sesiune expirata (serverul a repornit) — reincarca pagina si incearca din nou.",
+    # duplicates -- the keys carry the page as context ("dups|"): short words that read differently elsewhere
+    "Duplicates": "Dubluri", "Duplicates threshold": "Pragul de dubluri",
+    "How alike two active memories of the same type must be to be offered as a group on the Duplicates "
+    "page and by 'mem.py dups'. Raise it to be shown only near-identical texts; lower it for more groups "
+    "to look through, more of which will turn out not to be duplicates. Default 0.80.":
+        "Cat de asemanatoare trebuie sa fie doua memorii active de acelasi tip ca sa apara ca grup pe pagina "
+        "Dubluri si in 'mem.py dups'. Mai sus: doar textele aproape identice. Mai jos: mai multe grupuri de "
+        "parcurs, dintre care mai multe se vor dovedi a nu fi dubluri. Implicit 0.80.",
+    "dups|groups": "grupuri", "dups|groups to review": "grupuri de vazut", "dups|extra copies": "copii in plus",
+    "dups|identical or nearly identical text": "cu text identic sau aproape", "dups|settled": "rezolvate",
+    "dups|threshold, same type · Settings": "prag, acelasi tip · Setari", "dups|marked": "marcat",
+    "dups|= words that do not appear in the memory that stays": "= cuvinte care nu apar in memoria care ramane",
+    "dups|State": "Stare", "dups|to review": "de vazut", "dups|all": "toate", "dups|Where": "Unde",
+    "dups|anywhere": "oriunde", "dups|same project": "acelasi proiect", "dups|across projects": "intre proiecte",
+    "dups|order": "ordine", "dups|most alike": "cele mai asemanatoare", "dups|least to lose": "pierzi cel mai putin",
+    "dups|newest first": "cele mai noi", "dups|largest groups": "grupurile mari",
+    "dups|latest settled": "ultimele rezolvate", "dups|likeness": "asemanare",
+    "dups|1 memory": "o memorie", "dups|memories": "memorii",
+    "dups|written {x} apart": "scrise la {x}", "dups|written in the same second": "scrise in aceeasi secunda",
+    "dups|1 second": "o secunda", "dups|seconds": "secunde", "dups|1 minute": "un minut", "dups|minutes": "minute",
+    "dups|1 hour": "o ora", "dups|hours": "ore", "dups|1 day": "o zi", "dups|days": "zile",
+    "dups|1 month": "o luna", "dups|months": "luni",
+    "dups|stays": "ramane", "dups|to retire": "se retrage", "dups|retired": "retrasa",
+    "dups|newest": "cea mai noua", "dups|says the most": "spune cel mai mult",
+    "dups|identical text": "text identic", "dups|{n}% only here": "{n}% doar aici",
+    "dups|words that do not appear in the memory that stays": "cuvinte care nu apar in memoria care ramane",
+    "dups|Title": "Titlu", "dups|Written": "Scrisa", "dups|Size": "Marime",
+    "dups|1 character": "un caracter", "dups|characters": "caractere",
+    "dups|Opened by agents": "Deschisa de agenti", "dups|never": "niciodata", "dups|once": "o data",
+    "dups|times": "ori", "dups|Cited by": "Citata de", "dups|Anchors": "Ancore",
+    "dups|Keep this one": "Pastreaz-o pe asta", "dups|Not duplicates": "Nu sunt dubluri", "dups|Skip": "Sar peste",
+    "dups|Edit first": "Editeaza intai", "dups|Retire the other": "Retrage cealalta",
+    "dups|Retire the other {n}": "Retrage celelalte {n}", "dups|Undo": "Anuleaza", "dups|Groups": "Grupuri",
+    "dups|1 to review": "unul de vazut", "dups|{n} to review": "{n} de vazut",
+    "dups|1 settled": "unul rezolvat", "dups|{n} settled": "{n} rezolvate",
+    "dups|1 retired": "retrasa una", "dups|{n} retired": "retrase {n}",
+    "dups|both left": "lasate amandoua", "dups|all {n} left": "lasate toate {n}",
+    "dups|No group matches this filter.": "Niciun grup la filtrul asta.",
+    "dups|Next to review": "Urmatorul de vazut",
+    "dups|Comparing memories… {n} left": "Se compara memoriile… {n} ramase",
+    "dups|No vectors yet: likeness comes from the semantic index — run mem.py embed.":
+        "Inca nu exista vectori: asemanarea vine din indexul semantic — ruleaza mem.py embed.",
+    "dups|No duplicates above the threshold.": "Nicio dublura peste prag.",
+    "dups|Nothing settled yet.": "Nimic rezolvat inca.",
+    "dups|Active again. No note of this retirement is left, so the memory that stayed keeps the links and "
+    "anchors it was given.":
+        "Sunt din nou active. Nota retragerii nu mai exista, asa ca memoria pastrata ramane cu legaturile si "
+        "ancorele primite atunci.",
+    "dups|Active again, but no longer alike enough at this threshold to be offered as a group.":
+        "Sunt din nou active, dar la pragul asta nu mai sunt destul de asemanatoare ca sa apara ca grup.",
+    "dups|Saved. These memories are no longer offered as a group.": "Salvat. Memoriile astea nu mai apar ca grup.",
+    # what the store answers when it refuses (the id it names follows the text)
+    "dups|id not found": "id negasit", "dups|nothing to retire": "nimic de retras",
+    "dups|it takes at least two memories to be distinct from one another":
+        "e nevoie de cel putin doua memorii ca sa nu fie dubluri una alteia",
+    "dups|the memory to keep is not active": "memoria care ar ramane nu mai e activa",
+    "dups|not active, nothing to retire": "nu mai e activa, nu e nimic de retras",
+    "dups|cannot retire protected memory": "memoria e protejata si nu poate fi retrasa",
+    "dups|cannot retire a critical rule in favour of a memory that is not one":
+        "o regula critica nu se retrage in favoarea unei memorii care nu e regula critica",
+    "dups|protected": "protejata", "dups|a protected memory is not retired": "o memorie protejata nu se retrage",
+    "dups|the memory that was kept is no longer active": "memoria pastrata nu mai e activa",
+    "dups|nothing is retired as a duplicate of": "nimic nu e retras ca dublura a memoriei",
     "help.intro": "O memorie e un fapt scurt pe care vrei sa-l pastrezi intre sesiuni. Sursa de adevar e "
                   "markdown + git; web UI-ul si <code>mem.py</code> sunt doua ferestre spre acelasi store.",
+    "help.nav": "Click pe un <b>scope</b> → pagina proiectului (status + todo sus). Click pe un <b>id</b> → lantul "
+                "de supersedare. Click pe un rand → corpul memoriei (se incarca la prima deschidere). Antetul "
+                "grupului → pliere.",
+    "help.bulk": "Bifezi randuri → bara de jos: Supersede / Re-scope / Delete pe toate deodata.",
+    "help.search": "Camp + Enter = FTS ranked (acelasi index ca <code>mem.py search</code>). Ledul de langa buton "
+                   "arata modul de cautare: <b>verde</b> = LLM-ul local e pornit, cautarea e keyword + semantic; "
+                   "<b>gri</b> = cade automat pe cautarea clasica pe cuvinte. Fara comutator. Ce tastezi in camp "
+                   "filtreaza randurile deja afisate pe pagina asta, dupa rezumat, scope si tip — corpul unei "
+                   "memorii se cauta doar prin cautarea full-text (Enter), iar listele lungi vin in pagini de "
+                   + str(PAGE_ROWS) + ".",
+    "all in this scope →": "tot din acest scope →", "previous": "inapoi", "next": "inainte",
+    "loading…": "se incarca…",
 }
 
 
-def t(s):
-    return RO.get(s, s) if lang() == "ro" else s
+def t(s, ctx=None):
+    """`ctx` tells apart short words that read differently from one page to another ("all", "State",
+    "never"): the Romanian is then looked up as "ctx|words" first. The English stays the words."""
+    if lang() != "ro":
+        return s
+    return RO.get(f"{ctx}|{s}", RO.get(s, s)) if ctx else RO.get(s, s)
 
 
 def h(s):
@@ -499,6 +592,14 @@ def health_checks():
     else:
         out.append([t("Embedder (semantic)"), None,
                     f"{vec} {t('vectors')}{gap} · {t('Ollama offline (keyword search)')}"])
+    # Informative, never an error: these are kept, they are only not listed at session start.
+    try:
+        n_old = len(mem.stale_statuses())
+    except Exception:
+        n_old = 0
+    if n_old:
+        out.append([t("Statuses not listed at start"), None,
+                    f"{n_old} · {t('kept, searchable — mem.py stale')}"])
     nq = len(queue_pending())
     out.append([t("Review queue (health)"), nq == 0, t("empty") if nq == 0 else f"{nq} {t('candidates to review')}"])
     # Anchored memories whose files moved on. Unknown-state (grey) rather than red when nothing is
@@ -543,13 +644,27 @@ def health_checks():
             hdet = t("no evidence yet (no captures in staging)")
     out.append([t("Claude Code hooks"), hooks, hdet])
     # the injection must fit its own budget (below the harness persist/truncation threshold)
-    isz, ibud, ncrit = injection_stats()
-    if isz is not None:
+    parts, ibud, ncrit = injection_stats()
+    if parts:
         # Links to what is actually being injected. A red light with no way to see what is in it,
         # or where the budget is set, is a complaint rather than a diagnostic.
-        out.append([t("SessionStart injection"), isz <= ibud,
-                    f"{round(isz / 1024, 1)} KB / {t('budget')} {round(ibud / 1024, 1)} KB · {ncrit} {t('critical rules')}",
-                    "/inject"])
+        if len(parts) == 1:
+            # The original layout: everything through one hook, so one ceiling for all of it.
+            isz = parts[0][1]
+            out.append([t("SessionStart injection"), isz <= ibud,
+                        f"{round(isz / 1024, 1)} KB / {t('budget')} {round(ibud / 1024, 1)} KB · "
+                        f"{ncrit} {t('critical rules')} · "
+                        + t("one hook for everything — re-run hooks/install.py to give each section its own limit"),
+                        "/inject"])
+        else:
+            cap = _hook_consts()[1]
+            ok = all(sz <= cap and not cut for _, sz, cut in parts)
+            det = " · ".join(f"{t(name)} {round(sz / 1024, 1)}" for name, sz, _ in parts)
+            out.append([t("SessionStart injection"), ok,
+                        f"{det} KB ({t('limit')} {round(cap / 1024, 1)} KB {t('per hook')}) · "
+                        f"{ncrit} {t('critical rules')}"
+                        + (f" · {t('a part was cut to fit')}" if any(cut for _, _, cut in parts) else ""),
+                        "/inject"])
     # git store: real dirty state (dirty is informative, not an error — auto-checkpoint at session end)
     if os.path.isdir(os.path.join(mem.DATA, ".git")):
         out.append([t("Git store"), None, t("uncommitted — auto-checkpoint at session end")]
@@ -557,24 +672,73 @@ def health_checks():
     return out
 
 
-def injection_stats():
-    """Real injection size (root mode = the maximal case) vs budget + active critical-rule count."""
-    hook = os.path.join(HERE, "hooks", "session_start.py")
-    bud = _int_env("MEM_INJECT_BUDGET", "8000")
-    if not os.path.isfile(hook):
-        return (None, bud, 0)
+def _hook_consts():
+    """(PARTS, PART_MAX, OVERFLOW_MARK) read from the hook itself, so this page and the hook cannot
+    come to disagree about what the limit is or how an overflow is announced."""
     try:
-        payload = json.dumps({"cwd": os.path.dirname(HERE), "source": "health"})
-        r = subprocess.run([sys.executable, hook], input=payload, capture_output=True, text=True,
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_m4a_session_start", os.path.join(HERE, "hooks", "session_start.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return tuple(mod.PARTS), int(mod.PART_MAX), str(mod.OVERFLOW_MARK)
+    except Exception:
+        return ("profile", "rules", "knowledge"), 9600, "> [mem0ry4ai] over the per-hook limit:"
+
+
+def hook_layout():
+    """How the SessionStart hook is registered: 'split' (one hook per part) or 'single'.
+
+    Read from settings.json rather than assumed, because the page exists to show what the agent
+    actually receives: after an upgrade the code can split while the registration still calls the
+    hook once, and a preview of three roomy parts would then describe a session nobody is having."""
+    needle = os.path.join(HERE, "hooks").replace("\\", "/")
+    try:
+        with open(os.path.join(os.path.expanduser("~"), ".claude", "settings.json"), encoding="utf-8") as f:
+            cfg = json.load(f)
+        cmds = [hh.get("command", "").replace("\\", "/")
+                for entry in ((cfg.get("hooks") or {}).get("SessionStart") or [])
+                for hh in (entry.get("hooks", []) or [])]
+        ours = [c for c in cmds if needle in c and "session_start.py" in c]
+        if ours:
+            return "split" if any("--part" in c for c in ours) else "single"
+    except (OSError, ValueError):
+        pass
+    return "split"      # not registered here (plugin install, another machine): show the default layout
+
+
+def run_injection(cwd, source):
+    """The hook's real output for `cwd`, as [(part, text)] in the registered layout, or raises."""
+    hook = os.path.join(HERE, "hooks", "session_start.py")
+    payload = json.dumps({"cwd": cwd, "hook_event_name": "SessionStart", "source": source})
+    names = _hook_consts()[0] if hook_layout() == "split" else (None,)
+    out = []
+    for name in names:
+        # sys.executable (not "python3") -> works on Windows too
+        r = subprocess.run([sys.executable, hook] + (["--part", name] if name else []),
+                           input=payload, capture_output=True, text=True,
                            timeout=30, creationflags=_NO_WINDOW)
         if r.returncode != 0:
-            return (None, bud, 0)
-        size = len(r.stdout.encode("utf-8"))
+            raise RuntimeError(f"hook exit {r.returncode}: {r.stderr.strip()}")
+        out.append((name or "all", r.stdout))
+    return out
+
+
+def injection_stats():
+    """([(part, bytes, was_cut)], budget, critical-rule count) for the real injection.
+    Root mode is the maximal case, so that is what gets measured. ([], ...) when it cannot run."""
+    bud = _int_env("MEM_INJECT_BUDGET", "8000")
+    if not os.path.isfile(os.path.join(HERE, "hooks", "session_start.py")):
+        return ([], bud, 0)
+    mark = _hook_consts()[2]
+    try:
+        parts = [(name, len(text.encode("utf-8")), mark in text)
+                 for name, text in run_injection(os.path.dirname(HERE), "health")]
     except Exception:
-        return (None, bud, 0)
+        return ([], bud, 0)
     ncrit = sum(1 for rec in mem.all_records()
                 if rec["meta"].get("priority") == "critical" and rec["meta"].get("status", "active") == "active")
-    return (size, bud, ncrit)
+    return (parts, bud, ncrit)
 
 
 def _ollama_up():
@@ -794,24 +958,45 @@ def projects_overview():
     return dict(sorted(p.items()))
 
 
-def supersede_chain(rec_id):
-    """Ordered chain: [...older that this replaced, rec_id, ...newer that replaced it]."""
+def supersede_steps(rec_id):
+    """The supersede chain around a record, as steps: [..., [what it replaced], [rec_id], [what
+    replaced it], ...]. Every memory in a step was replaced by one in the next.
+
+    A step holds several ids where one memory replaced several: the memory kept from a group of
+    three duplicates replaced the other two. Following only the first one found, as this did, left
+    the second copy out of its own keeper's chain -- retired, and one click further away than the
+    page said."""
     all_recs = mem.all_records()
     by_id = {r["id"]: r for r in all_recs}
-    back, cur = [], rec_id
-    while True:
-        prev = next((r["id"] for r in all_recs if r["meta"].get("superseded-by", "") == cur), None)
-        if not prev or prev in back or prev == rec_id:   # stop on a cyclic superseded-by edge (else infinite loop)
-            break
-        back.append(prev)
-        cur = prev
+    replaced = {}
+    for r in sorted(all_recs, key=lambda r: (r["meta"].get("created", ""), r["id"])):
+        nxt = r["meta"].get("superseded-by", "")
+        if nxt:
+            replaced.setdefault(nxt, []).append(r["id"])
+    seen, back, step = {rec_id}, [], [rec_id]
+    while step:
+        before = []
+        for cur in step:
+            for prev in replaced.get(cur, []):
+                if prev not in seen:     # a cyclic superseded-by edge must end the walk, not loop it
+                    seen.add(prev)
+                    before.append(prev)
+        if before:
+            back.append(before)
+        step = before
     fwd, cur = [], rec_id
     while by_id.get(cur, {}).get("meta", {}).get("superseded-by"):
         cur = by_id[cur]["meta"]["superseded-by"]
-        if cur not in by_id or cur in fwd:
+        if cur not in by_id or cur in seen:
             break
-        fwd.append(cur)
-    return list(reversed(back)) + [rec_id] + fwd
+        seen.add(cur)
+        fwd.append([cur])
+    return list(reversed(back)) + [[rec_id]] + fwd
+
+
+def supersede_chain(rec_id):
+    """The same chain as one ordered list: [...what this replaced, rec_id, ...what replaced it]."""
+    return [i for step in supersede_steps(rec_id) for i in step]
 
 
 def search_light(mode, q):
@@ -845,13 +1030,12 @@ def relations_block(r, rel_in, by_id):
     return out
 
 
-def render_row(r, by_id, rel_in, drift_why=None):
+def render_row(r, drift_why=None):
     m = r["meta"]
     st = m.get("status", "active")
     summ = rec_summary(r)
     typ = m.get("type", "?")
     scope = m.get("scope", "global")
-    hay = (r["title"] + " " + r["body"]).lower()
     scope_href = "/memories?scope=global" if scope == "global" else f"/project?slug={h(scope_label(scope))}"
     crit = ""
     if m.get("priority") == "critical":
@@ -862,10 +1046,13 @@ def render_row(r, by_id, rel_in, drift_why=None):
         by = m.get("superseded-by", "")
         link = f' → <a href="/memories?id={h(by)}">{h(by)}</a>' if by else ""
         sup = f'<span class="status-superseded">· superseded{link}</span>'
+    # The row carries only what the page scripts read off it: the id and the fields the sort and
+    # the live filter use. The body used to ride along three times -- as the filter haystack, as
+    # the edit modal's seed and as a hidden pre-rendered row -- which put 9.5 MB behind the
+    # default view. It now comes from /record on demand (toggleBody, the edit action).
     return (
         f'<tr class="{"row-superseded" if st == "superseded" else ""}" data-id="{h(r["id"])}" data-status="{h(st)}" '
-        f'data-hay="{h(hay)}" data-type="{h(typ)}" data-scope="{h(scope)}" data-summary="{h(summ)}" '
-        f'data-confidence="{h(m.get("confidence","1.0"))}" data-body="{h(r["body"])}" data-created="{h(m.get("created",""))}">'
+        f'data-type="{h(typ)}" data-scope="{h(scope)}" data-created="{h(m.get("created",""))}">'
         f'<td class="sel"><input type="checkbox" class="rowsel"></td>'
         f'<td>{type_badge(typ)}</td>'
         f'<td><a class="scope-tag" href="{scope_href}">{h(scope_label(scope))}</a></td>'
@@ -882,9 +1069,13 @@ def render_row(r, by_id, rel_in, drift_why=None):
         f'<button type="button" class="act-rescope">{t("Re-scope")}</button>'
         f'<button type="button" class="act-supersede">{t("Supersede")}</button>'
         f'<a href="/memories?id={h(r["id"])}">{t("View chain")}</a>'
-        f'<button type="button" class="act-delete danger">{t("Delete")}</button></div></div></td></tr>'
-        f'<tr class="bodyrow" data-bodyfor="{h(r["id"])}" style="display:none"><td colspan="6">'
-        f'{render_body(r["body"])}{rec_extras_html(r)}{relations_block(r, rel_in, by_id)}</td></tr>')
+        f'<button type="button" class="act-delete danger">{t("Delete")}</button></div></div></td></tr>')
+
+
+def expanded_row_html(r, by_id, rel_in):
+    """The content of a record's expanded row: body, extras (tier, anchors, session, invalidation)
+    and relations. Served by /record and inserted by the page when a row is first opened."""
+    return render_body(r["body"]) + rec_extras_html(r) + relations_block(r, rel_in, by_id)
 
 
 # ---------- git history (subprocess) ----------
@@ -1034,10 +1225,17 @@ def lang_switch():
     return out + "</span>"
 
 
-def topbar(active):
+# The mark next to the name: an "m" on the accent, the shape every app in the family uses.
+BRAND_MARK = ('<svg class="brand-mark" viewBox="0 0 26 26" aria-hidden="true"><rect width="26" height="26" rx="6" fill="#006fff"/>'
+              '<path d="M7 18V9l3 4 3-4v9M17 9v9M17 9h2.5a2.5 2.5 0 0 1 0 5H17" fill="none" stroke="#fff" '
+              'stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>')
+
+
+def topbar(active, has_help=False):
     nwk = sum(1 for r in mem.all_records() if r["meta"].get("status") == "working")
     nav = [("dashboard", "/", t("Dashboard")), ("memories", "/memories", t("Memories")),
            ("projects", "/projects", t("Projects")), ("links", "/links", t("Links")),
+           ("dups", "/duplicates", t("Duplicates")),
            ("git", "/git", t("Git history")), ("inject", "/inject", t("What Claude sees")),
            ("claudemd", "/claude-md", "CLAUDE.md"), ("about", "/about", t("About me")),
            ("settings", "/settings", t("Settings")),
@@ -1045,20 +1243,44 @@ def topbar(active):
     nq = len(queue_pending())
     links = ""
     for k, href, label in nav:
-        on = ' class="nav-on"' if active == k else ""
-        links += f'<a{on} href="{href}">{h(label)}</a> '
-    review = f'<a class="review-tag" href="/queue">{nq} {t("to review")}</a> ' if nq else ""
-    return (f'<div class="topbar"><a class="brand" href="/">mem0ry4ai '
-            f'<small>{t("local memory")}</small></a><div class="right">{links}{review}{lang_switch()}</div></div>')
+        on = ' class="on"' if active == k else ""
+        links += f'<a{on} href="{href}">{h(label)}</a>'
+    review = f'<a class="review-tag" href="/queue">{nq} {t("to review")}</a>' if nq else ""
+    # The page's guide opens on demand from here, so no page carries a column of explanations.
+    helpb = (f'<button type="button" class="helpbtn" id="help-open" title="{h(t("Show help"))}" '
+             f'aria-label="{h(t("Show help"))}">?</button>' if has_help else "")
+    return (f'<header class="topbar"><a class="brand" href="/">{BRAND_MARK}mem0ry4ai '
+            f'<small>{t("local memory")}</small></a><nav class="modnav">{links}</nav>'
+            f'<div class="userbox">{review}{helpb}{lang_switch()}</div></header>')
 
 
-def layout(title, active, content, aside="", scripts=""):
+_HELP_JS = ('<script>(function(){var m=document.getElementById("help-modal"),b=document.getElementById("help-open");'
+            'if(!m||!b)return;function close(){m.classList.remove("open");}'
+            'b.addEventListener("click",function(){m.classList.add("open");});'
+            'm.querySelectorAll("[data-help-close]").forEach(function(x){x.addEventListener("click",close);});'
+            'm.addEventListener("click",function(e){if(e.target===m)close();});'
+            'document.addEventListener("keydown",function(e){if(e.key==="Escape"&&m.classList.contains("open"))close();});'
+            '})();</script>')
+
+
+def layout(title, active, content, aside="", scripts="", side=""):
+    """`aside` is the page's guide: it opens from the ? in the topbar instead of taking a column.
+    `side` is a real right-hand panel (actions, filters) that a page wants next to its content."""
+    help_modal = ""
+    if aside:
+        help_modal = (f'<div class="modal-overlay" id="help-modal" aria-hidden="true"><div class="modal modal-help">'
+                      f'<div class="modal-head"><h3>{t("Guide")}</h3>'
+                      f'<button type="button" class="modal-close" data-help-close aria-label="close">&times;</button></div>'
+                      f'<div class="modal-body">{aside}</div></div></div>{_HELP_JS}')
+    main = (f'<main class="page">\n<div class="layout">\n<div class="content">\n{content}\n</div><!-- /content -->\n'
+            f'{side}\n</div><!-- /layout -->\n</main>' if side else f'<main class="page">\n{content}\n</main>')
     return (f'<!doctype html>\n<html lang="{lang()}">\n<head>\n<meta charset="utf-8">\n'
             f'<meta name="viewport" content="width=device-width, initial-scale=1">\n'
             f'<title>{h(title)}</title>\n<link rel="icon" href="{FAVICON}">\n'
             f'<link rel="stylesheet" href="{h(asset("assets/style.css"))}">\n</head>\n<body>\n'
-            f'{topbar(active)}\n<main>\n<div class="layout">\n<div class="content">\n{content}\n'
-            f'</div><!-- /content -->\n{aside}\n</div><!-- /layout -->\n</main>\n{scripts}\n</body>\n</html>')
+            f'{topbar(active, bool(aside))}\n{main}\n'
+            f'<footer class="sitefoot">mem0ry4ai<span class="sep">&middot;</span>{t("local memory")}</footer>\n'
+            f'{help_modal}{scripts}\n</body>\n</html>')
 
 
 # ---------- dashboard fragments (shared with the poll endpoint) ----------
@@ -1219,16 +1441,10 @@ def page_inject(qs=None):
         cwd, label = os.path.join(repo_root, scope_label(sel)), f"cwd = {scope_label(sel)}/"
     else:
         sel, cwd, label = "root", repo_root, t("monorepo root (all projects)")
-    output, err = None, None
-    hook = os.path.join(HERE, "hooks", "session_start.py")
+    output, err, parts = None, None, []
     try:
-        stdin = json.dumps({"cwd": cwd, "hook_event_name": "SessionStart", "source": "preview"})
-        # sys.executable (not "python3") -> works on Windows too
-        r = subprocess.run([sys.executable, hook], input=stdin, capture_output=True, text=True,
-                           timeout=30, creationflags=_NO_WINDOW)
-        output = r.stdout
-        if r.returncode != 0:
-            err = f"hook exit {r.returncode}: {r.stderr.strip()}"
+        parts = [(name, text) for name, text in run_injection(cwd, "preview") if text.strip()]
+        output = "\n".join(text for _, text in parts)
     except Exception as e:
         err = str(e)
     nbytes = len(output.encode("utf-8")) if output else 0
@@ -1248,8 +1464,19 @@ def page_inject(qs=None):
                  'This is the exact output of the real hook (<code>hooks/session_start.py</code>), not an approximation.')
         bodyblock = (f'<p class="inject-meta">{t("Injection for")} <b>{h(label)}</b>: <b>{nbytes:,} {t("bytes")}</b> '
                      f'≈ ~{tokens:,} {t("tokens (approx.)")} · {t("budget")} {ibud:,} bytes (MEM_INJECT_BUDGET) — '
-                     f'{t("critical rules are always in; the rest is trimmed deterministically.")} {exact}</p>'
-                     f'<pre class="inject">{h(output)}</pre>')
+                     f'{t("critical rules are always in; the rest is trimmed deterministically.")} {exact}</p>')
+        if len(parts) > 1:
+            cap = _hook_consts()[1]
+            # Taken out of the f-string: before Python 3.12 an f-string expression cannot hold a
+            # backslash, and the apostrophe would need one.
+            caps_note = t("Claude Code caps each hook's output separately, so each part has its own limit.")
+            bodyblock += f'<p class="inject-meta">{caps_note}</p>'
+            for name, text in parts:
+                sz = len(text.encode("utf-8"))
+                bodyblock += (f'<p class="inject-meta"><b>{h(t(name))}</b>: {sz:,} {t("bytes")} / '
+                              f'{t("limit")} {cap:,}</p><pre class="inject">{h(text)}</pre>')
+        else:
+            bodyblock += f'<pre class="inject">{h(output)}</pre>'
     foot = ('Hook-ul ruleaza la fiecare start de sesiune Claude Code (startup/resume/clear/compact).'
             if lang() == "ro" else
             'The hook runs at every Claude Code session start (startup/resume/clear/compact).')
@@ -1374,15 +1601,7 @@ def page_claudemd(qs=None):
             f'<button type="button" class="btn btn-primary cmd-savebtn" hidden>{t("Save")}</button>'
             f'<button type="button" class="btn cmd-cancelbtn" hidden>{t("Cancel")}</button>'
             f'<span class="cmd-status"></span></div></div>')
-    style = ("<style>.cmd-file{border:1px solid var(--border,#e2e8f0);border-radius:8px;padding:14px;margin:14px 0;}"
-             ".cmd-head{margin-bottom:8px;} .cmd-head code{font-size:12px;color:var(--muted,#64748b);}"
-             ".cmd-meta{margin-left:8px;font-size:12px;color:var(--muted,#64748b);}"
-             ".cmd-edit{width:100%;min-height:240px;box-sizing:border-box;resize:vertical;"
-             "font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;line-height:1.5;padding:10px;"
-             "border:1px solid var(--border,#e2e8f0);border-radius:6px;background:var(--bg2,#f8fafc);}"
-             ".cmd-edit:not([readonly]){background:#fff;}"
-             ".cmd-actions{margin-top:8px;display:flex;gap:8px;align-items:center;}"
-             ".cmd-status{font-size:13px;} .cmd-status.ok{color:#1f9d4d;} .cmd-status.err{color:#dc2626;}</style>")
+    style = ""
     intro = t("The CLAUDE.md files Claude Code loads automatically for the selected project, alongside your "
               "memories — your static rules. Saving writes a timestamped .bak next to the file first.")
     content = (f'{style}'
@@ -1447,11 +1666,7 @@ def page_about(qs=None):
     location = (f'{t("Stored in")} <code>{h(path)}</code>'
                 + (f' · id <a href="/memories?id={h(rec["id"])}"><code>{h(rec["id"])}</code></a>'
                    if rec else f' — {t("created on first save")}'))
-    style = ("<style>.about-edit{width:100%;min-height:300px;box-sizing:border-box;resize:vertical;"
-             "font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;line-height:1.6;padding:12px;"
-             "border:1px solid var(--border,#e2e8f0);border-radius:8px;background:#fff;}"
-             ".cmd-actions{margin-top:10px;display:flex;gap:10px;align-items:center;}"
-             ".cmd-status{font-size:13px;} .cmd-status.ok{color:#1f9d4d;} .cmd-status.err{color:#dc2626;}</style>")
+    style = ""
     content = (f'{style}'
                f'  <div class="crumb"><a href="/">{t("Dashboard")}</a> / {t("About me")}</div>\n'
                f'  <h2>{t("About me")}</h2>\n'
@@ -1526,6 +1741,42 @@ SETTINGS = [
        "truncated with a marker pointing to search/get for the full text. Stops one huge memory from "
        "eating the whole injection budget. Applies to critical rules and full-body memories. Default 1000.",
        min=200, max=8000, step=100, apply="next session"),
+    _S("MEM_INJECT_STATUS_DAYS", "injection", "int", "60", "Status age limit (days)",
+       "A status nobody has touched for this many days is no longer listed at session start, so the "
+       "line goes to something current. It is not retired: it stays active and searchable, "
+       "`mem.py stale` lists it (`--keep <id>` says it still stands), and a project's latest still "
+       "comes with that project's brief. The status of the project a session starts in is always "
+       "listed. 0 turns this off. "
+       "Default 60.", min=0, max=3650, apply="next session"),
+    _S("MEM_INJECT_TITLE", "injection", "int", "120", "Title width at session start",
+       "Longer summaries are cut to this many characters in the session-start list, with an ellipsis; "
+       "the id at the start of the line opens the whole memory. The store is never changed by this. "
+       "0 lists every summary whole. Default 120.", min=0, max=1000, step=10, apply="next session"),
+    _S("MEM_RECALL_NOTICE", "injection", "bool", "1", "Show what was injected",
+       "After an injection, show YOU one line about it: how many memories went into context at session "
+       "start, and — when a prompt pulls memories in — which ones, with their project and a shortened "
+       "title. Everything else the hooks write goes to the model only, so this is how a wrong recall "
+       "gets noticed. Default on.", apply="next session"),
+    _S("MEM_BRIEF", "injection", "bool", "1", "Project brief on first touch",
+       "The first time a session works in a project — a tool touches a path inside its folder, or a "
+       "prompt names the project in full — add that project's brief to the context: its latest status, "
+       "the todos nothing blocks, its preferences, and the knowledge that has been opened most. Once "
+       "per session and project, again after a compaction, and never what the session was already "
+       "shown. Needs the PostToolUse hook (hooks/install.py). Default on."),
+    _S("MEM_FILE_RECALL", "injection", "bool", "1", "Memories anchored to a touched file",
+       "The first time a session reads or edits a file, add the memories whose `files:` anchor names "
+       "that file: the newest few, and a pointer to the rest. Once per session and file. Needs the "
+       "PostToolUse hook. Default on."),
+    _S("MEM_DIGEST", "injection", "bool", "1", "Digests at their moment",
+       "A digest is a page of preferences distilled by theme, which you approved by promoting it. "
+       "Each is given when its `when:` line says: at every session start, or the first time a "
+       "session touches a file or runs a command of the kind it names. Off stops the ones that wait "
+       "for a tool call; the ones for session start have their own hook. `mem.py digest` lists them "
+       "and says which have sources that changed. Default on."),
+    _S("MEM_SCOPE_ALIASES", "injection", "string", "", "Folder aliases",
+       "For a project folder whose memories are filed under another project's name: comma-separated "
+       "folder=slug pairs, e.g. `client-app=old-product, fork=upstream`. Touching the folder then "
+       "brings the named project's brief and anchored memories. Empty by default.", advanced=True),
 
     _S("MEM_RECENCY_WEIGHT", "search", "float", "1.5", "Recency weight",
        "In keyword (bm25) search, a recency bonus is folded into each hit's score so newer memories edge "
@@ -1548,6 +1799,11 @@ SETTINGS = [
        "Fallback duplicate cutoff when no embeddings exist: the share of shared words (Jaccard) above "
        "which two memories are flagged. Same direction as the semantic threshold — higher = stricter, "
        "lower = more aggressive. Default 0.5.", min=0, max=1, step=0.01, advanced=True),
+    _S("MEM_SEARCH_LOG", "search", "bool", "1", "Log what agents search for",
+       "Keep one row per search an agent runs (CLI or MCP): the query, redacted and cut to 200 "
+       "characters, and how much came back. It is what shows where the store is asked for something "
+       "it does not hold. Local only, in the access database; your prompts are never stored. "
+       "Default on."),
 
     _S("MEM_UI_LANG", "web", "enum", "en", "Default UI language",
        "The default language for this dashboard when a request has no ?lang query and no saved cookie. The "
@@ -1557,6 +1813,11 @@ SETTINGS = [
        "Minimum semantic similarity for a pair to appear under 'suggested links' on the Links page. Raise "
        "it for fewer, tighter suggestions; lower it for more candidates (and more noise). Same control as "
        "the slider on the Links page. Default 0.62.", min=0.5, max=0.95, step=0.01),
+    _S("MEM_DUPS_THRESHOLD", "web", "float", "0.80", "Duplicates threshold",
+       "How alike two active memories of the same type must be to be offered as a group on the Duplicates "
+       "page and by 'mem.py dups'. Raise it to be shown only near-identical texts; lower it for more groups "
+       "to look through, more of which will turn out not to be duplicates. Default 0.80.",
+       min=0.6, max=0.99, step=0.01),
     _S("MEM_WEB_PORT", "web", "int", "8841", "Web UI port",
        "TCP port this web dashboard listens on. Change it only if 8841 clashes with another service; "
        "you'll need to restart the server and reopen it on the new port. Default 8841.",
@@ -1661,7 +1922,7 @@ def render_setting_row(s, cur, overridden):
     key, vt = s["key"], s["vtype"]
     if vt == "bool":
         chk = "checked" if str(cur).lower() not in _FALSEY else ""
-        ctrl = f'<input type="checkbox" data-key="{key}" data-type="bool" {chk}>'
+        ctrl = f'<label class="auto-snap"><input type="checkbox" data-key="{key}" data-type="bool" {chk}></label>'
     elif vt == "enum":
         opts = "".join(f'<option value="{h(c)}"{" selected" if str(cur) == c else ""}>{h(c)}</option>'
                        for c in (s["choices"] or []))
@@ -1740,26 +2001,7 @@ def page_settings(qs=None):
     intro = t("Tune the knobs that control injection, search and the UI. Saved to .mem-local.env "
               "(gitignored) and honored by the hook, the CLI and the MCP server. On load, a value "
               "exported in your shell takes precedence over the file.")
-    style = ("<style>"
-             ".st-row{display:flex;gap:16px;align-items:flex-start;justify-content:space-between;"
-             "padding:12px 0;border-top:1px solid var(--border,#e2e8f0);}"
-             ".st-row:first-of-type{border-top:0;} .st-main{flex:1 1 auto;min-width:0;}"
-             ".st-label{font-weight:600;font-size:14px;} .st-label code{font-weight:400;font-size:12px;"
-             "color:#64748b;background:#f1f5f9;padding:1px 5px;border-radius:4px;margin-left:6px;}"
-             ".st-help{font-size:12.5px;color:#475569;margin-top:3px;line-height:1.5;}"
-             ".st-warn{font-size:12.5px;color:#b45309;background:#fffbeb;border:1px solid #fde68a;"
-             "border-radius:6px;padding:6px 9px;margin-top:6px;}"
-             ".st-badge{display:inline-block;font-size:10.5px;font-weight:600;padding:1px 7px;border-radius:"
-             "999px;margin-left:6px;vertical-align:middle;}"
-             ".st-adv{background:#ede9fe;color:#6d28d9;} .st-apply{background:#e0f2fe;color:#0369a1;}"
-             ".st-over{background:#dcfce7;color:#15803d;}"
-             ".st-ctrl{flex:0 0 auto;} .st-ctrl input[type=number],.st-ctrl input[type=text],"
-             ".st-ctrl select{padding:6px 8px;border:1px solid var(--border,#cbd5e1);border-radius:7px;"
-             "font-size:13px;font-family:ui-monospace,Menlo,Consolas,monospace;}"
-             ".st-ctrl input[type=number]{width:8em;} .st-ctrl input[type=text]{width:22em;}"
-             ".cmd-actions{margin:16px 0 4px;display:flex;gap:12px;align-items:center;}"
-             ".cmd-status{font-size:13px;} .cmd-status.ok{color:#1f9d4d;} .cmd-status.err{color:#dc2626;}"
-             "</style>")
+    style = ""
     actions = (f'<div class="cmd-actions">'
                f'<button type="button" class="btn btn-primary" id="st-save">{h(t("Save settings"))}</button>'
                f'<button type="button" class="btn" id="st-reset">{h(t("Reset all to defaults"))}</button>'
@@ -1924,8 +2166,33 @@ _SUGGEST_JS_BODY = r'''
 
 
 # memories-page JS — verbatim vanilla JS; CSRF/STATUS_FILTER/TXT are prepended by the page.
-_MEM_JS_BODY = r'''function toggleBody(cell){ var r = cell.closest('tr').nextElementSibling;
-  if (r && r.classList.contains('bodyrow')) r.style.display = (r.style.display === 'none') ? '' : 'none'; }
+_MEM_JS_BODY = r'''function bodyRowFor(tr){ return document.querySelector('tr[data-bodyfor="'+tr.dataset.id+'"]'); }
+function fetchRecord(id){
+  return fetch('/record?id=' + encodeURIComponent(id)).then(function(r){ return r.json(); })
+    .then(function(j){ if (!j.ok) throw new Error(j.error || TXT.failed); return j; });
+}
+function toggleBody(cell){
+  var tr = cell.closest('tr'); var r = bodyRowFor(tr);
+  if (r) { r.style.display = (r.style.display === 'none') ? '' : 'none'; return; }
+  // First open: the body is not in the page (2,000 bodies shipped three times made the default
+  // view 9.5 MB), so it is fetched once and kept in the DOM from then on.
+  r = document.createElement('tr'); r.className = 'bodyrow'; r.setAttribute('data-bodyfor', tr.dataset.id);
+  var td = document.createElement('td'); td.colSpan = 6; td.textContent = TXT.loading; r.appendChild(td);
+  tr.parentNode.insertBefore(r, tr.nextSibling);
+  fetchRecord(tr.dataset.id).then(function(j){ td.innerHTML = j.html; })
+    .catch(function(e){ td.textContent = e.message || TXT.failed; });
+}
+function rowHay(tr){
+  // What is on screen -- summary, id, source, scope, type -- not the body. Full text is the form
+  // submit (FTS); this box narrows the rows already on this page.
+  if (tr._hay === undefined) {
+    var s = tr.querySelector('td.summary'), sc = tr.querySelector('.scope-tag');
+    tr._hay = ((s ? s.textContent : '') + ' ' + (sc ? sc.textContent : '') + ' ' + (tr.dataset.scope || '')
+      + ' ' + (tr.dataset.type || '')).replace(/\s+/g, ' ').toLowerCase();
+  }
+  return tr._hay;
+}
+function rowSummary(tr){ var b = tr.querySelector('td.summary b'); return b ? b.textContent : ''; }
 function toggleAct(btn){ var w = btn.closest('.actwrap'); var open = w.classList.contains('open');
   closeActMenus(); if (!open) w.classList.add('open'); }
 function closeActMenus(){ document.querySelectorAll('.actwrap.open').forEach(function(x){ x.classList.remove('open'); }); }
@@ -1940,10 +2207,10 @@ document.querySelectorAll('tr.group-head').forEach(function(gh){
 });
 var live = document.getElementById('live');
 if (live) live.addEventListener('input', function(){ var q = this.value.toLowerCase();
-  document.querySelectorAll('table.mem tbody tr[data-hay]').forEach(function(tr){
-    var show = tr.getAttribute('data-hay').indexOf(q) !== -1;
+  document.querySelectorAll('table.mem tbody tr[data-id]').forEach(function(tr){
+    var show = rowHay(tr).indexOf(q) !== -1;
     tr.style.display = show ? '' : 'none';
-    var b = document.querySelector('tr[data-bodyfor="'+tr.dataset.id+'"]'); if (b && !show) b.style.display='none';
+    var b = bodyRowFor(tr); if (b && !show) b.style.display='none';
   }); });
 var sortState = {};
 document.querySelectorAll('th.sortable').forEach(function(th){
@@ -1955,11 +2222,10 @@ document.querySelectorAll('th.sortable').forEach(function(th){
     th.querySelector('.arrow').textContent = asc ? '▲' : '▼';
     document.querySelectorAll('table.mem tbody').forEach(function(tb){
       var pairs = [];
-      tb.querySelectorAll('tr[data-id]').forEach(function(tr){
-        pairs.push([tr, document.querySelector('tr[data-bodyfor="'+tr.dataset.id+'"]')]);
-      });
+      tb.querySelectorAll('tr[data-id]').forEach(function(tr){ pairs.push([tr, bodyRowFor(tr)]); });
       pairs.sort(function(a, b){
-        var va = a[0].dataset[key] || '', vb = b[0].dataset[key] || '';
+        var va = key === 'summary' ? rowSummary(a[0]) : (a[0].dataset[key] || '');
+        var vb = key === 'summary' ? rowSummary(b[0]) : (b[0].dataset[key] || '');
         return asc ? va.localeCompare(vb) : vb.localeCompare(va);
       });
       pairs.forEach(function(p){ tb.appendChild(p[0]); if (p[1]) tb.appendChild(p[1]); });
@@ -2004,8 +2270,9 @@ document.addEventListener('click', function(e){
   var tr = e.target.closest('tr[data-id]'); if (!tr) return;
   if (e.target.classList.contains('act-edit')){
     closeActMenus();
-    openModal('edit', { id: tr.dataset.id, type: tr.dataset.type, scope: tr.dataset.scope,
-      confidence: tr.dataset.confidence, summary: tr.dataset.summary, body: tr.dataset.body });
+    fetchRecord(tr.dataset.id).then(function(j){
+      openModal('edit', { id: j.id, type: j.type, scope: j.scope, confidence: j.confidence, summary: j.summary, body: j.body });
+    }).catch(function(e){ alert(e.message || TXT.failed); });
   } else if (e.target.classList.contains('act-rescope')){
     closeActMenus();
     var ns = prompt(TXT.rescopeQ, tr.dataset.scope);
@@ -2439,10 +2706,10 @@ def page_memories(qs=None):
                 drift_why[r["id"]] = "; ".join(f"{rel}: {verdict} ({detail})" for rel, verdict, detail in findings)
         except Exception:
             pass
-    by_id, rel_in = records_by_id(), related_in_index()
-    chain_ids = []
+    chain_ids, chain_steps = [], []
     if fid:
-        chain_ids = supersede_chain(fid)
+        chain_steps = supersede_steps(fid)
+        chain_ids = [i for step in chain_steps for i in step]
         fstat = "all"
     # Typing (or pasting) a record id into the search box means "take me to that record", not
     # "rank the store against this string" — which is what a hybrid search does with an id, and it
@@ -2452,7 +2719,8 @@ def page_memories(qs=None):
         maybe = q.strip().lstrip("@")
         if mem.get_record(maybe):
             fid, q = maybe, ""
-            chain_ids = supersede_chain(fid)
+            chain_steps = supersede_steps(fid)
+            chain_ids = [i for step in chain_steps for i in step]
             fstat = "all"
     fts_ids, mode = None, ""
     if q and not fid:
@@ -2490,6 +2758,21 @@ def page_memories(qs=None):
         rows.sort(key=lambda r: r["meta"].get("created", ""), reverse=True)
 
     grouped = fscope == "" and q == "" and fid == ""
+    # Pages of PAGE_ROWS, grouped or not: a 1,700-row list is a page nobody reads top to bottom.
+    # The group order is applied before the cut so a page boundary never reorders anything --
+    # global first, then projects by name, newest first inside each (the stable sort keeps the
+    # created-desc order within a scope).
+    if grouped:
+        rows.sort(key=lambda r: (0, "") if r["meta"].get("scope", "global") == "global"
+                  else (1, r["meta"].get("scope", "")))
+    total_rows = len(rows)
+    try:
+        offset = max(0, int(qs.get("offset", ["0"])[0] or 0))
+    except ValueError:
+        offset = 0
+    if offset >= total_rows:   # past the end (a stale link after deletions): the last page, not an empty one
+        offset = max(0, (total_rows - 1) // PAGE_ROWS * PAGE_ROWS)
+    page_rows = rows[offset:offset + PAGE_ROWS]
     stats = store_stats()
     scopes = known_scopes()
 
@@ -2503,6 +2786,9 @@ def page_memories(qs=None):
         # default is not the empty string, `q`/`id` because pasting an id into the search box moves
         # the value from one to the other.
         p = {k: v[0] for k, v in qs.items() if v and v[0] != ""}
+        # The page cut is not a filter. A different filter starts over from the first page, or
+        # "gotcha" clicked from page 4 of everything lands on an empty page 4 of gotchas.
+        p.pop("offset", None)
         p.update({"q": q, "status": fstat})
         if fid:
             p["id"] = fid
@@ -2513,7 +2799,7 @@ def page_memories(qs=None):
     # The form posts, so anything carried in the URL that is not one of its named controls has to
     # ride along as a hidden input or submitting the form drops it -- same failure as above, other
     # mechanism.
-    _named = ("q", "type", "scope")
+    _named = ("q", "scope")
     hidden = "".join(f'<input type="hidden" name="{h(k)}" value="{h(v)}">'
                      for k, v in sorted(urllib.parse.parse_qsl(mkqs({}).split("?", 1)[1]))
                      if k not in _named)
@@ -2522,19 +2808,15 @@ def page_memories(qs=None):
     parts = [f'  <div class="crumb"><a href="/">{t("Dashboard")}</a> / {t("Memories")}</div>',
              f'  <h2>{t("Memories")} <span class="count">{len(rows)} {t("of")} {stats["total"]}</span></h2>']
     if fid and len(chain_ids) > 1:
-        chain = ""
-        for i, cid in enumerate(chain_ids):
-            chain += ("<span class=\"arrow\">→</span>" if i else "") + f'<a href="/memories?id={h(cid)}">{h(cid)}</a>'
+        # an arrow between steps, a comma between the memories one step holds together
+        chain = '<span class="arrow">→</span>'.join(
+            ", ".join(f'<a href="/memories?id={h(cid)}">{h(cid)}</a>' for cid in step) for step in chain_steps)
         parts.append(f'  <div class="chain"><b>{t("Supersede chain:")}</b> {chain} '
                      f'<a class="btn btn-ghost" style="margin-left:12px" href="/memories">{t("close")}</a></div>')
     elif fid:
         parts.append(f'  <div class="chain"><code>{h(fid)}</code> {t("(no chain)")}. <a href="/memories">{t("back")}</a></div>')
-    parts.append(f'  <a href="#" class="add-link" id="open-add">{t("+ Add memory")}</a>')
     parts.append('  <datalist id="scopes">' + "".join(f'<option value="{h(s)}">' for s in scopes) + "</datalist>")
 
-    type_opts = '<option value="">' + t("all types") + "</option>"
-    for ty in mem.TYPES:
-        type_opts += f'<option{" selected" if ftype == ty else ""}>{h(ty)}</option>'
     scope_opts = '<option value="">' + t("all scopes") + "</option>"
     for s in scopes:
         sel = " selected" if fscope == s else ""
@@ -2542,12 +2824,12 @@ def page_memories(qs=None):
     lcls, llbl, ltip = search_light(mode, q)
     pills = ""
     for st_key in ("active", "superseded", "all"):
-        cls = "active" if fstat == st_key else ""
-        pills += f'<a class="{cls}" href="{h(mkqs({"status": st_key}))}">{t(st_key)}</a>'
+        cls = "on" if fstat == st_key else ""
+        pills += f'<a class="{cls}" href="{h(mkqs({"status": st_key}))}"><span class="n">{t(st_key)}</span></a>'
     # The drift view was reachable only from the dashboard, so once you were here you could not get
     # back to it. Shown only when there is something to show — a pill that always reads 0 is furniture.
     if fdrift:
-        pills += f'<a class="active" href="{h(mkqs({"drift": ""}))}">{t("drift")}</a>'
+        pills += f'<a class="on warn" href="{h(mkqs({"drift": ""}))}"><span class="n">{t("drift")}</span></a>'
     else:
         try:
             n_drift = len(drift_findings([r for r in records
@@ -2556,16 +2838,31 @@ def page_memories(qs=None):
         except Exception:
             n_drift = 0
         if n_drift:
-            pills += f'<a href="{h(mkqs({"drift": "1"}))}">{t("drift")} ({n_drift})</a>'
+            pills += (f'<a class="warn" href="{h(mkqs({"drift": "1"}))}"><span class="n">{t("drift")}</span>'
+                      f'<span class="c">{n_drift}</span></a>')
     parts.append(
         '  <div class="toolbar"><form class="filters" method="get">'
-        f'<input type="search" name="q" value="{h(q)}" placeholder="{h(t("search (FTS ranked)..."))}" id="live">'
-        f'<select name="type" onchange="this.form.submit()">{type_opts}</select>'
+        f'<input type="search" name="q" value="{h(q)}" '
+        f'placeholder="{h(t("search — Enter = full text, typing filters this page"))}" id="live">'
         f'<select name="scope" onchange="this.form.submit()">{scope_opts}</select>'
         + hidden
         + f'<button class="btn" type="submit">{t("Search")}</button>'
-        f'<span class="search-light {lcls}" title="{h(ltip)}">{h(llbl)}</span></form>'
-        f'<div class="pills">{pills}</div></div>')
+        f'<span class="search-light {lcls}" title="{h(ltip)}">{h(llbl)}</span></form></div>')
+    # The filters live in the panel on the right, as links that carry the rest of the state
+    # (mkqs), so a click never silently drops the search or the drift view.
+    side_types = (f'<a href="{h(mkqs({"type": ""}))}" class="{"on" if not ftype else ""}">'
+                  f'<span class="n">{t("all types")}</span><span class="c">{stats["active"]}</span></a>')
+    for ty in mem.TYPES:
+        if ty == "profile":
+            continue
+        side_types += (f'<a href="{h(mkqs({"type": ty}))}" class="{"on" if ftype == ty else ""}">'
+                       f'<span class="n">{h(ty)}</span><span class="c">{stats["by_type"].get(ty, 0)}</span></a>')
+    side = (f'<aside class="side"><div class="side-head"><div class="side-title">{t("Actions")}</div></div>'
+            f'<div class="side-sec"><button type="button" class="btn btn-primary" id="open-add">{t("+ Add memory")}</button></div>'
+            f'<div class="side-head"><div class="side-title">{t("Status")}</div></div>'
+            f'<div class="side-sec sidelinks">{pills}</div>'
+            f'<div class="side-head"><div class="side-title">{t("Types")}</div></div>'
+            f'<div class="side-sec sidelinks">{side_types}</div></aside>')
 
     # An active filter that is invisible is a trap: you cannot tell why rows are missing, and you
     # cannot turn it off without knowing the URL. Say it is on, say what it means, offer the exit.
@@ -2593,6 +2890,23 @@ def page_memories(qs=None):
             f'<div><b>{t("Code drift")}</b> — {h(explain)}<div class="notice-todo">{todo}</div></div>'
             f'<a class="btn btn-sm" href="{h(clear_url)}">{t("Show all memories")}</a></div>')
 
+    # ----- pager -----
+    # Above and below the table, only when there is more than one page. Its links go through
+    # mkqs like every other link here, so the filters in effect survive a page turn.
+    pager = ""
+    if total_rows > PAGE_ROWS:
+        lo, hi = offset + 1, min(offset + PAGE_ROWS, total_rows)
+        prev_href = mkqs({"offset": str(offset - PAGE_ROWS) if offset - PAGE_ROWS > 0 else ""})
+        next_href = mkqs({"offset": str(offset + PAGE_ROWS)})
+        pager = ('<div class="pager">'
+                 + (f'<a href="{h(prev_href)}">‹ {t("previous")}</a>' if offset > 0
+                    else f'<span class="off">‹ {t("previous")}</span>')
+                 + f'<span class="range">{lo}–{hi} {t("of")} {total_rows}</span>'
+                 + (f'<a href="{h(next_href)}">{t("next")} ›</a>' if hi < total_rows
+                    else f'<span class="off">{t("next")} ›</span>')
+                 + "</div>")
+        parts.append("  " + pager)
+
     # ----- table -----
     if not rows:
         parts.append(f'  <div id="table-wrap"><div class="empty">{t("No memories match the current filter.")}</div></div>')
@@ -2604,21 +2918,36 @@ def page_memories(qs=None):
                  f'<th class="sortable" data-sort="created">{t("Added")}<span class="arrow"></span></th><th></th></tr></thead>')
         body = ""
         if grouped:
-            groups = {}
+            groups, full = {}, {}
             for r in rows:
+                sc = r["meta"].get("scope", "global")
+                full[sc] = full.get(sc, 0) + 1
+            for r in page_rows:
                 groups.setdefault(r["meta"].get("scope", "global"), []).append(r)
             for sc in sorted(groups.keys(), key=lambda x: (0, "") if x == "global" else (1, x)):
                 grs = groups[sc]
                 head = t("Global") if sc == "global" else (t("Project:") + " " + h(scope_label(sc)))
-                proj_link = ("" if sc == "global" else
-                             f'<a class="gcount" style="float:right" href="/project?slug={h(scope_label(sc))}" '
-                             f'onclick="event.stopPropagation()">{t("project page →")}</a>')
+                cut = len(grs) < full.get(sc, 0)
+                links = []
+                if cut:
+                    # The page cut went through this group: say so, and offer the whole scope (the
+                    # ungrouped view, which keeps the other filters and has pages of its own).
+                    links.append(f'<a class="gcount" href="{h(mkqs({"scope": sc}))}" '
+                                 f'onclick="event.stopPropagation()">{t("all in this scope →")}</a>')
+                if sc != "global":
+                    links.append(f'<a class="gcount" href="/project?slug={h(scope_label(sc))}" '
+                                 f'onclick="event.stopPropagation()">{t("project page →")}</a>')
+                right = f'<span class="gcount" style="float:right">{" · ".join(links)}</span>' if links else ""
+                count = (f'· {len(grs)} {t("of")} {full[sc]} {t("memories")}' if cut
+                         else f'· {len(grs)} {t("memories")}')
                 body += (f'<tbody class="grp" data-scope="{h(sc)}"><tr class="group-head"><td colspan="6">{head} '
-                         f'<span class="gcount">· {len(grs)} {t("memories")}</span>{proj_link}</td></tr>'
-                         + "".join(render_row(r, by_id, rel_in, drift_why.get(r["id"])) for r in grs) + "</tbody>")
+                         f'<span class="gcount">{count}</span>{right}</td></tr>'
+                         + "".join(render_row(r, drift_why.get(r["id"])) for r in grs) + "</tbody>")
         else:
-            body = "<tbody>" + "".join(render_row(r, by_id, rel_in, drift_why.get(r["id"])) for r in rows) + "</tbody>"
+            body = "<tbody>" + "".join(render_row(r, drift_why.get(r["id"])) for r in page_rows) + "</tbody>"
         parts.append(f'  <div id="table-wrap"><table class="mem">{thead}{body}</table></div>')
+        if pager:
+            parts.append("  " + pager)
     parts.append(f'  <p class="foot">{t("Source of truth:")} <code>store/*.md</code> {t("(markdown + git). CLI:")} <code>./mem.py</code>.</p>')
 
     # ----- aside -----
@@ -2637,12 +2966,14 @@ def page_memories(qs=None):
                  for ty, en, ro in type_defs)
     navh = (t("help.nav") if lang() == "ro" else
             "Click a <b>scope</b> → the project page (status + todos on top). Click an <b>id</b> → the supersede chain. "
-            "Click a row → its body. Group header → collapse.")
+            "Click a row → its body (loaded when first opened). Group header → collapse.")
     bulkh = (t("help.bulk") if lang() == "ro" else "Tick rows → bottom bar: Supersede / Re-scope / Delete all at once.")
     searchh = (t("help.search") if lang() == "ro" else
                "Field + Enter = FTS ranked (same index as <code>mem.py search</code>). The light by the button shows the "
                "search mode: <b>green</b> = the local LLM is up, so search is keyword + semantic; <b>gray</b> = it falls "
-               "back to classic keyword search automatically. No toggle. Typing also live-filters what is on screen.")
+               "back to classic keyword search automatically. No toggle. Typing in the box narrows the rows already "
+               "on this page by summary, scope and type — the body of a memory is reached only by the full-text "
+               "search (Enter), and long lists come in pages of " + str(PAGE_ROWS) + ".")
     aside = (f'<aside class="help"><h3>{t("Quick guide")}</h3><p>{intro}</p>'
              f'<h4>{t("Types")}</h4><dl>{dl}</dl>'
              f'<h4>{t("Navigation")}</h4><p>{navh}</p>'
@@ -2676,10 +3007,11 @@ def page_memories(qs=None):
            "deleteQ": t("Delete permanently? (it stays in git history)"),
            "rescopeQ": t("New scope (global or project:slug):"), "failed": t("Operation failed"),
            "network": t("Network error"), "addTitle": t("Add memory"), "editTitle": t("Edit"),
+           "loading": t("loading…"),
            "csrf": t("Session expired (the server restarted) — reload the page and try again.")}
     js = ("<script>\nvar CSRF = " + json.dumps(_CSRF) + ";\nvar STATUS_FILTER = " + json.dumps(fstat)
           + ";\nvar TXT = " + json.dumps(txt, ensure_ascii=False) + ";\n" + _MEM_JS_BODY + "\n</script>")
-    return layout(t("Memories") + " — mem0ry4ai", "memories", "\n".join(parts), aside, after + js)
+    return layout(t("Memories") + " — mem0ry4ai", "memories", "\n".join(parts), aside, after + js, side=side)
 
 
 def page_index(qs=None):
@@ -2826,6 +3158,25 @@ def endpoint_poll(qs):
             "cards_html": dash_cards(stats), "recent_html": recent_list(stats)}
 
 
+def endpoint_record(qs):
+    """One record for the page scripts: the raw fields the edit modal seeds itself with, and the
+    rendered expanded row. The web UI is the user's own machine, so DEST_LOCAL withholds nothing --
+    the text still passes through emit_for, the one place that decides what a record shows."""
+    rid = (qs.get("id", [""])[0] or "").strip()
+    r = mem.get_record(rid) if _ID_RE.match(rid) else None
+    if r is None:
+        return {"ok": False, "error": "not found"}
+    summary, body = mem.emit_for(r, mem.DEST_LOCAL)
+    if summary is None:
+        return {"ok": False, "error": "not found"}
+    m = r["meta"]
+    return {"ok": True, "id": r["id"], "summary": summary, "body": body or "",
+            "type": m.get("type", ""), "scope": m.get("scope", "global"),
+            "status": m.get("status", "active"), "confidence": m.get("confidence", "1.0"),
+            "created": m.get("created", ""), "source": m.get("source", ""),
+            "html": expanded_row_html(r, records_by_id(), related_in_index())}
+
+
 # ---------- HTTP server ----------
 _WORKING_JS = r'''
 (function(){
@@ -2904,11 +3255,719 @@ def page_working(qs=None):
     return layout(t("Working notes") + " — mem0ry4ai", "working", content, aside, script)
 
 
+# ---------- duplicates ----------
+# The page script: verbatim vanilla JS. CSRF, LANG and TXT are prepended by the page.
+_DUP_JS_BODY = r'''
+(function () {
+  'use strict';
+  var page = document.getElementById('dp-page');
+  var modal = document.getElementById('dp-edit'), form = document.getElementById('mem-form');
+  // `view` is what the list holds: 'open' = groups still to review, 'done' = what was settled
+  var S = { view: 'open', type: '', where: '', sorts: { open: 'sim', done: 'at' }, sel: null };
+  var G = [], D = { threshold: 0, vectors: 0 };
+  var READY = false, PENDING = null, BUSY = false, ERR = '', NOTE = '', editing = null;
+
+  // ------------------------------------------------------------------ helpers
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function fmt(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, TXT.thousands); }
+  function pct(x) { return Math.round(x * 100) + '%'; }
+  function scopeLabel(s) { return s.indexOf('project:') === 0 ? s.slice(8) : s; }
+  // "1 minute", "5 minutes"; Romanian puts "de" after a number from 20 up: "un minut", "5 minute", "27 de minute"
+  function count(n, forms) {
+    if (n === 1) return forms[0];
+    var r = n % 100;
+    return fmt(n) + (LANG === 'ro' && n >= 20 && (r === 0 || r >= 20) ? ' de ' : ' ') + forms[1];
+  }
+  function pick(n, forms) { return (n === 1 ? forms[0] : forms[1]).replace('{n}', n); }
+  function ts(s) { return new Date(String(s).replace(' ', 'T')).getTime(); }
+  function gapSeconds(g) {
+    var t = g.members.map(function (m) { return ts(m.created); });
+    return Math.round((Math.max.apply(null, t) - Math.min.apply(null, t)) / 1000);
+  }
+  function gapText(g) {
+    var s = gapSeconds(g), u = TXT.units;
+    if (!isFinite(s)) return '';
+    if (s < 1) return TXT.sameSecond;
+    return TXT.apart.replace('{x}', s < 60 ? count(s, u.s) : s < 3600 ? count(Math.round(s / 60), u.m) :
+      s < 86400 ? count(Math.round(s / 3600), u.h) : s < 86400 * 60 ? count(Math.round(s / 86400), u.d) :
+      count(Math.round(s / (86400 * 30.4)), u.mo));
+  }
+  function has(g, id) { return g.members.some(function (m) { return m.id === id; }); }
+  function ids(g) { return g.members.map(function (m) { return m.id; }); }
+  function keeper(g) { return g.members.filter(function (m) { return m.id === g.keep; })[0] || g.members[0]; }
+  function others(g) { var K = keeper(g); return g.members.filter(function (m) { return m !== K; }); }
+  function byId(gid) { return G.filter(function (g) { return g.gid === gid; })[0]; }
+  function short(t, n) { n = n || 110; return t.length > n ? t.slice(0, n - 1) + '…' : t; }
+  function byNewest(a, b) { return a.created < b.created ? 1 : a.created > b.created ? -1 : a.id < b.id ? 1 : -1; }
+
+  // What `a` says that `b` does not: the words of `a` that appear nowhere in `b`. Only words that carry
+  // content count (four letters or more, not a filler word), compared without diacritics and, for plain
+  // words, on their first six letters, so an inflected form is the same word. Two memories that say the
+  // same thing in different sentences score low; a number, a path or a name found in one only stands out.
+  var STOP = {};
+  ('acest aceasta aceste acestea acel acea acolo aici care cand catre ceea chiar cum daca dar deci din dintre doar dupa ' +
+   'este fara fiecare fiind fost face foarte iar inainte inca intr intre insa mai mult nici niste numai orice pana pentru ' +
+   'peste prin sau sunt spre sub toate tot unde unui unei era avea avem trebuie poate that this with from have has were ' +
+   'what when where which will would there their then than them they been being also into only over such some more most ' +
+   'other your about after before because while should could').split(/\s+/).forEach(function (w) { STOP[w] = 1; });
+  function wordKey(t) {
+    var w = t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
+    if (w.length < 4 || STOP[w]) return '';
+    return /^[a-z]+$/.test(w) && w.length > 6 ? w.slice(0, 6) : w;
+  }
+  var cache = {};
+  function cmp(a, b) {
+    var key = a.id + '|' + b.id;
+    if (cache[key]) return cache[key];
+    var have = {}, i, j;
+    (b.body.match(/\S+/g) || []).forEach(function (t) { var k = wordKey(t); if (k) have[k] = 1; });
+    var parts = a.body.match(/\s+|\S+/g) || [], flag = [], total = 0, uniq = 0;
+    for (i = 0; i < parts.length; i++) {
+      var k = /\S/.test(parts[i]) ? wordKey(parts[i]) : '';
+      if (!k) { flag.push(null); continue; }
+      total++;
+      if (have[k]) flag.push(false); else { flag.push(true); uniq++; }
+    }
+    // bridge: up to two filler words between two marked ones join the same mark, so a phrase reads as one
+    for (i = 0; i < parts.length; i++) {
+      if (flag[i] !== true) continue;
+      var fill = 0;
+      for (j = i + 1; j < parts.length && flag[j] === null; j++) if (/\S/.test(parts[j])) fill++;
+      if (j < parts.length && flag[j] === true && fill <= 2) for (var m = i + 1; m < j; m++) flag[m] = true;
+    }
+    var html = '', open = false;
+    for (i = 0; i < parts.length; i++) {
+      var on = flag[i] === true;
+      if (on && !open) { html += '<mark class="dp-uq">'; open = true; }
+      if (!on && open) { html += '</mark>'; open = false; }
+      html += esc(parts[i]);
+    }
+    if (open) html += '</mark>';
+    return (cache[key] = { html: html, share: total ? uniq / total : 0 });
+  }
+  // how much would leave the active set if `m` were the one kept
+  function lossIfKept(g, m) {
+    var rest = g.members.filter(function (o) { return o !== m; });
+    return rest.length ? Math.max.apply(null, rest.map(function (o) { return cmp(o, m).share; })) : 0;
+  }
+  function maxShare(g) {
+    var K = keeper(g), o = others(g);
+    return o.length ? Math.max.apply(null, o.map(function (x) { return cmp(x, K).share; })) : 0;
+  }
+  function shareChip(x) {
+    if (x === 0) return '<span class="dp-chip dp-chip-same">' + TXT.identical + '</span>';
+    return '<span class="dp-chip ' + (x <= 0.15 ? 'dp-chip-same' : 'dp-chip-diff') + '" title="' + TXT.onlyHereTitle + '">' +
+      TXT.onlyHere.replace('{n}', Math.max(1, Math.round(x * 100))) + '</span>';
+  }
+  function idchip(id) { return '<a class="idchip" href="/memories?id=' + esc(id) + '" target="_blank" rel="noopener">' + esc(id) + '</a>'; }
+
+  // ------------------------------------------------------------- the model
+  // A row as the server sends it, plus what the page adds: which memory stays (`keep`), the tab
+  // open on a group of three or more, and `acted` -- settled or taken back in this view, so it
+  // stays in the list where it was until the view changes.
+  function prepare(g) {
+    var scopes = {};
+    g.members.forEach(function (m) { scopes[m.scope] = 1; });
+    g.where = Object.keys(scopes).length > 1 ? 'cross' : 'same';
+    g.tab = 0;
+    g.acted = false;
+    var newest = g.members.slice().sort(byNewest)[0];
+    g.newest = newest.id;
+    g.newestAt = ts(newest.created) || 0;
+    if (g.state === 'open') {
+      // proposed keeper: the newest, unless an older one leaves clearly less of the others unsaid
+      var best = newest, loss = lossIfKept(g, best);
+      g.members.forEach(function (m) { var l = lossIfKept(g, m); if (l < loss - 0.15) { best = m; loss = l; } });
+      // before either: a memory the store does not retire as a copy -- a critical rule first, then a protected one
+      var held = g.members.filter(function (m) { return m.pinned || m.protected; })
+        .sort(function (a, b) { return (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || byNewest(a, b); })[0];
+      g.held = !!held;
+      if (held) best = held;
+      g.keep = g.proposed = best.id;
+    } else if (g.state === 'distinct') {
+      g.keep = g.newest;        // nothing was kept or retired here: the first column is simply the newest
+    }
+    return g;
+  }
+  function natural(g) { return (S.view === 'open') === (g.state === 'open'); }
+  function inView(g) { return g.acted || natural(g); }
+  function sortKey(g) {
+    var by = S.sorts[S.view];
+    if (by === 'n') return g.members.length;
+    if (by === 'uq') return maxShare(g);
+    if (by === 'created') return g.newestAt;
+    if (by === 'at') return g.at || '';
+    return g.sim === null ? -1 : g.sim;
+  }
+  function visible() {
+    var dir = S.sorts[S.view] === 'uq' ? 1 : -1;
+    return G.filter(function (g) { return inView(g) && (!S.type || g.type === S.type) && (!S.where || g.where === S.where); })
+      .map(function (g) { return { g: g, k: sortKey(g) }; })
+      .sort(function (a, b) {
+        return (a.k < b.k ? -1 : a.k > b.k ? 1 : 0) * dir || (b.g.sim || 0) - (a.g.sim || 0) ||
+          (a.g.gid < b.g.gid ? -1 : a.g.gid > b.g.gid ? 1 : 0);
+      })
+      .map(function (x) { return x.g; });
+  }
+  function counts(field) {
+    var c = {};
+    G.forEach(function (g) {
+      if (!inView(g)) return;
+      if (field === 'type' ? (!S.where || g.where === S.where) : (!S.type || g.type === S.type)) c[g[field]] = (c[g[field]] || 0) + 1;
+    });
+    return c;
+  }
+
+  // ------------------------------------------------------------ the pieces
+  function dash() {
+    var open = G.filter(function (g) { return g.state === 'open'; });
+    var copies = open.reduce(function (a, g) { return a + g.members.length - 1; }, 0);
+    var same = open.filter(function (g) { return maxShare(g) <= 0.15; }).length;
+    function stat(n, l) { return '<div class="card-stat"><div class="num">' + n + '</div><div class="lbl">' + l + '</div></div>'; }
+    return '<div class="dash dp-dash">' + stat(open.length, TXT.cardOpen) + stat(copies, TXT.cardCopies) +
+      stat(same, TXT.cardSame) + stat(G.length - open.length, TXT.cardDone) +
+      '<a class="card-stat" href="/settings"><div class="num">' + pct(D.threshold) + '</div><div class="lbl">' + TXT.cardThreshold + '</div></a></div>';
+  }
+  function toolbar() {
+    var ct = counts('type'), cw = counts('where'), total = 0, wt = 0, k;
+    for (k in ct) total += ct[k];
+    for (k in cw) wt += cw[k];
+    var types = Object.keys(ct).sort(function (a, b) { return ct[b] - ct[a] || (a < b ? -1 : 1); });
+    if (S.type && !ct[S.type]) types.push(S.type);      // a filter that matches nothing stays visible, to be turned off
+    function pill(group, val, label, n) {
+      return '<a data-act="filter" data-f="' + group + '" data-val="' + esc(val) + '" class="' + (S[group] === val ? 'active' : '') + '">' +
+        label + '<small>' + n + '</small></a>';
+    }
+    var nOpen = G.filter(function (g) { return g.state === 'open'; }).length;
+    var sorts = [['sim', TXT.sortSim], ['uq', TXT.sortUq], ['created', TXT.sortNew], ['n', TXT.sortBig]];
+    if (S.view === 'done') sorts.unshift(['at', TXT.sortAt]);
+    return '<div class="toolbar dp-toolbar"><span class="dp-flabel">' + TXT.fState + '</span><div class="pills">' +
+      pill('view', 'open', TXT.vOpen, nOpen) + pill('view', 'done', TXT.vDone, G.length - nOpen) + '</div>' +
+      '<span class="dp-flabel">' + TXT.fType + '</span><div class="pills">' + pill('type', '', TXT.all, total) +
+      types.map(function (t) { return pill('type', t, esc(t), ct[t] || 0); }).join('') + '</div>' +
+      '<span class="dp-flabel">' + TXT.fWhere + '</span><div class="pills">' + pill('where', '', TXT.anywhere, wt) +
+      pill('where', 'same', TXT.sameProject, cw.same || 0) + pill('where', 'cross', TXT.crossProject, cw.cross || 0) + '</div>' +
+      '<span class="grow"></span><select id="dp-sort" title="' + TXT.order + '" aria-label="' + TXT.order + '">' +
+      sorts.map(function (o) {
+        return '<option value="' + o[0] + '"' + (S.sorts[S.view] === o[0] ? ' selected' : '') + '>' + o[1] + '</option>';
+      }).join('') + '</select></div>';
+  }
+  function legend() {
+    return '<p class="dp-legend"><mark class="dp-uq">' + TXT.marked + '</mark> ' + TXT.legend + '</p>';
+  }
+  function headLine(g) {
+    var seen = {}, tags = '', gap = gapText(g);
+    g.members.forEach(function (m) {
+      if (!seen[m.scope]) { seen[m.scope] = 1; tags += '<span class="scope-tag">' + esc(scopeLabel(m.scope)) + '</span>'; }
+    });
+    return (g.sim === null ? '' : '<span class="dp-pct" title="' + TXT.likeness + '">' + pct(g.sim) + '</span>') +
+      '<span class="badge t-' + esc(g.type) + '">' + esc(g.type) + '</span>' + tags +
+      '<span class="dp-when">' + count(g.members.length, TXT.mem) + (gap ? ' · ' + gap : '') + '</span>';
+  }
+  function why(g, m) {
+    return (m.pinned ? '<span class="badge t-status" title="' + TXT.pinnedTitle + '">critical</span>' : '') +
+      (m.protected ? '<span class="dp-new" title="' + TXT.protectedTitle + '">' + TXT.protectedChip + '</span>' : '') +
+      (m.id === g.newest ? '<span class="dp-new">' + TXT.newest + '</span>' : '') +
+      (g.state === 'open' && !g.held && m.id === g.proposed && m.id !== g.newest ? '<span class="dp-new">' + TXT.saysMost + '</span>' : '');
+  }
+  function doneLine(g) {
+    var K = keeper(g), n = g.members.length - 1, t;
+    if (g.state === 'retired') {
+      t = '<span class="ok">&#10003;</span><span class="t">' + TXT.stays + ' ' + idchip(K.id) + ' ' + esc(short(K.title)) + '</span><span>' +
+        pick(n, TXT.retiredN) + (g.at ? ' · ' + esc(g.at.slice(0, 16)) : '') + '</span>';
+    } else {
+      t = '<span class="t">' + (n === 1 ? TXT.leftBoth : TXT.leftAll.replace('{n}', n + 1)) + ' · ' + esc(short(K.title)) + '</span>';
+    }
+    return '<div class="dp-done" data-g="' + esc(g.gid) + '">' + t + '<button type="button" class="btn btn-sm" data-act="undo"' +
+      (BUSY ? ' disabled' : '') + '>' + TXT.undo + '</button></div>';
+  }
+  // One group, compared: the memory that stays on the left, a copy on the right. A settled group shows
+  // the same comparison without the actions, under the line that takes it back.
+  function stage(g, pos, total, left) {
+    var open = g.state === 'open', judged = g.state === 'distinct', dis = BUSY ? ' disabled' : '';
+    var K = keeper(g), o = others(g), cur = o[Math.min(g.tab, o.length - 1)], c = cmp(cur, K);
+    var kc = judged ? '' : ' keep';
+    function row(label, a, b) { return '<div class="k">' + label + '</div><div class="v' + kc + '">' + a + '</div><div class="v">' + b + '</div>'; }
+    function opened(m) { return !m.opened ? TXT.never : m.opened === 1 ? TXT.times[0] : TXT.timesPre + count(m.opened, TXT.times); }
+    function cited(m) { return m.cited ? count(m.cited, TXT.mem) : '—'; }
+    function files(m) { return m.files.length ? m.files.map(function (f) { return '<code>' + esc(f) + '</code>'; }).join(' ') : '—'; }
+    function written(m) { return esc(m.created.slice(0, 16)) + ' · ' + esc(scopeLabel(m.scope)); }
+    var tabs = o.length > 1 ? '<span class="dp-tabs">' + o.map(function (x, i) {
+      return '<button type="button" data-act="tab" data-i="' + i + '" class="' + (x === cur ? 'on' : '') + '">' + esc(x.id.slice(-6)) + ' · ' +
+        Math.round(cmp(x, K).share * 100) + '%</button>';
+    }).join('') + '</span>' : '';
+    var next = !open && !natural(g) && left ? '<a data-act="next">' + TXT.nextOpen + '</a>' : '';
+    return (open ? '' : doneLine(g)) +
+      '<div class="dp-group dp-stage" data-g="' + esc(g.gid) + '"><div class="dp-head">' + headLine(g) +
+      '<span class="dp-headact">' + next + '<span class="dp-prog">' + pos + ' ' + TXT.of + ' ' + total + '</span></span></div>' +
+      '<div class="dp-cmp"><div class="k top"></div>' +
+      '<div class="v top' + kc + '">' + (judged ? '' : '<span class="dp-chip dp-chip-keep">' + TXT.stays + '</span>') + idchip(K.id) + why(g, K) + '</div>' +
+      '<div class="v top">' + (judged ? '' : '<span class="dp-chip dp-chip-out">' + (open ? TXT.toRetire : TXT.retired) + '</span>') +
+      idchip(cur.id) + why(g, cur) + tabs +
+      (open ? '<button type="button" class="btn btn-sm" data-act="swap" data-id="' + esc(cur.id) + '"' + dis + '>' + TXT.keepThis +
+              '<span class="dp-key">S</span></button>' : '') + '</div>' +
+      row(TXT.rTitle, '<span class="dp-title">' + esc(K.title) + '</span>', '<span class="dp-title">' + esc(cur.title) + '</span>') +
+      row(TXT.rWritten, written(K), written(cur)) +
+      row(TXT.rSize, count(K.chars, TXT.chars), count(cur.chars, TXT.chars)) +
+      row(TXT.rOpened, opened(K), opened(cur)) +
+      row(TXT.rCited, cited(K), cited(cur)) +
+      row(TXT.rAnchors, files(K), files(cur)) +
+      row(TXT.rText, '<div class="dp-body">' + esc(K.body) + '</div>', shareChip(c.share) + '<div class="dp-body dp-body-gap">' + c.html + '</div>') +
+      '</div>' + (open ? '<div class="dp-foot"><button type="button" class="btn btn-ghost" data-act="dismiss"' + dis + '>' + TXT.notDups +
+      '<span class="dp-key">N</span></button><button type="button" class="btn btn-ghost" data-act="skip">' + TXT.skip +
+      '<span class="dp-key">J</span></button><span class="grow"></span><button type="button" class="btn" data-act="edit"' + dis + '>' +
+      TXT.editFirst + '<span class="dp-key">E</span></button><button type="button" class="btn btn-primary" data-act="retire"' + dis + '>' +
+      pick(o.length, TXT.retireN) + '<span class="dp-key">&#9166;</span></button></div>' : '') + '</div>';
+  }
+  function emptyText(all) {
+    if (all) return TXT.noMatch;
+    if (S.view === 'done') return TXT.noneDone;
+    return D.vectors < 2 ? TXT.noVectors : TXT.noneOpen;
+  }
+  function pageHtml() {
+    var head = '<div class="crumb"><a href="/">' + TXT.dashboard + '</a> / ' + TXT.title + '</div>';
+    var msg = (ERR ? '<div class="flash flash-error dp-err" role="alert">' + esc(ERR) + '</div>' : '') +
+      (NOTE ? '<div class="flash flash-info dp-note" role="status">' + esc(NOTE) + '</div>' : '');
+    if (!READY || PENDING !== null) {
+      return head + '<h2>' + TXT.title + '</h2>' + msg + (ERR ? '' : '<div class="empty dp-wait">' +
+        (PENDING === null ? TXT.loading : TXT.comparing.replace('{n}', fmt(PENDING))) + '</div>');
+    }
+    var vis = visible(), idx = -1, all = G.filter(inView).length;
+    vis.forEach(function (g, i) { if (g.gid === S.sel) idx = i; });
+    if (idx < 0 && vis.length) { idx = 0; S.sel = vis[0].gid; }
+    var out = head + '<h2>' + TXT.title + ' <span class="count">' + vis.length + ' ' + TXT.of + ' ' + all + ' ' + TXT.groups + '</span></h2>' +
+      dash() + toolbar() + legend() + msg;
+    if (!vis.length) return out + '<div class="empty">' + emptyText(all) + '</div>';
+    var left = vis.filter(natural).length;
+    return out + '<div class="dp-triage"><div class="dp-list"><div class="side-head"><div class="side-title">' + TXT.listTitle +
+      ' <span class="side-count">' + pick(left, S.view === 'open' ? TXT.nOpen : TXT.nDone) + '</span></div></div><div class="dp-items sidelinks">' +
+      vis.map(function (g) {
+        var K = keeper(g);
+        return '<a data-act="select" data-g="' + esc(g.gid) + '" class="' + (g.gid === S.sel ? 'on ' : '') + (natural(g) ? '' : 'dp-isdone ') +
+          (g.state === 'retired' ? 'kept' : '') + '">' +
+          (g.sim === null ? '<span class="dp-pct dp-nopct">&ndash;</span>' : '<span class="dp-pct">' + pct(g.sim) + '</span>') +
+          '<span class="n" title="' + esc(K.title) + '">' + esc(K.title) + '</span><span class="c">' +
+          (g.state === 'retired' ? '&#10003;' : g.state === 'distinct' ? '&ne;' : '&times;' + g.members.length) + '</span></a>';
+      }).join('') + '</div></div><div>' + stage(vis[idx], idx + 1, vis.length, left) + '</div></div>';
+  }
+
+  // -------------------------------------------------------------- behaviour
+  function render() {
+    var y = window.scrollY, list = page.querySelector('.dp-items'), ly = list ? list.scrollTop : 0;
+    page.innerHTML = pageHtml();
+    page.classList.toggle('dp-busy', BUSY);
+    window.scrollTo(0, y);
+    list = page.querySelector('.dp-items');
+    if (!list) return;
+    list.scrollTop = ly;
+    // bring the selected row into the list's own window, without moving the page under the reader
+    var on = list.querySelector('a.on');
+    if (on) {
+      var r = on.getBoundingClientRect(), b = list.getBoundingClientRect();
+      if (r.top < b.top) list.scrollTop -= b.top - r.top;
+      else if (r.bottom > b.bottom) list.scrollTop += r.bottom - b.bottom;
+    }
+  }
+  // J / K: the next or the previous row that belongs to this view (a row settled here is passed over)
+  function step(d) {
+    var vis = visible(), at = d > 0 ? -1 : vis.length, i;
+    vis.forEach(function (g, k) { if (g.gid === S.sel) at = k; });
+    for (i = at + d; i >= 0 && i < vis.length; i += d) if (natural(vis[i])) { S.sel = vis[i].gid; return true; }
+    return false;
+  }
+  // after settling a group: on to the next one still waiting, from the top again when the list ends
+  function onward() {
+    var vis = visible(), start = 0, i;
+    vis.forEach(function (g, k) { if (g.gid === S.sel) start = k; });
+    for (i = 1; i <= vis.length; i++) {
+      var g = vis[(start + i) % vis.length];
+      if (natural(g)) { S.sel = g.gid; return true; }
+    }
+    return false;
+  }
+  function pickFirst() {
+    var vis = visible(), first = vis.filter(natural)[0] || vis[0];
+    S.sel = first ? first.gid : null;
+  }
+  function setView(v) {
+    if (S.view === v) return;
+    S.view = v;
+    G.forEach(function (g) { g.acted = false; });      // a new view starts clean: only what belongs to it
+    pickFirst();
+  }
+
+  // The server's answer is the truth after every action: the rows are rebuilt from it, and what the
+  // reader had chosen on a row that is still there (which memory stays, which tab) is carried over.
+  function take(d, then) {
+    if (!d || d.ok === false) { ERR = (d && d.error) || TXT.failed; render(); return; }
+    if (d.pending !== undefined) {
+      PENDING = d.pending;
+      render();
+      setTimeout(function () { load(then); }, 700);
+      return;
+    }
+    var old = {};
+    G.forEach(function (g) { old[g.gid] = g; });
+    PENDING = null; READY = true; cache = {};
+    D.threshold = d.threshold; D.vectors = d.vectors;
+    G = d.groups.filter(function (g) { return g.members.length > 1; }).map(prepare);
+    G.forEach(function (g) {
+      var o = old[g.gid];
+      if (!o) return;
+      g.acted = o.acted; g.tab = o.tab;
+      if (o.at && !g.at) g.at = o.at;
+      if (g.state === 'open' && has(g, o.keep)) g.keep = o.keep;
+    });
+    if (then) then();
+    if (!visible().some(function (g) { return g.gid === S.sel; })) pickFirst();
+    render();
+  }
+  function load(then) {
+    // the failure handler sits beside the success one, not after it: a fault in drawing the answer is
+    // then a fault in the console, not a "network error" on the page
+    fetch('/duplicates/data', { cache: 'no-store' }).then(function (r) { return r.json(); })
+      .then(function (d) { take(d, then); }, function () { PENDING = null; ERR = TXT.network; render(); });
+  }
+  function run(params, done) {
+    if (BUSY) return;
+    BUSY = true; ERR = ''; NOTE = '';
+    render();
+    var fd = new URLSearchParams();
+    fd.set('csrf', CSRF);
+    Object.keys(params).forEach(function (k) { fd.set(k, params[k]); });
+    fetch('/duplicates', { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' }, body: fd })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        BUSY = false;
+        if (!j.ok) ERR = j.error === 'CSRF' ? TXT.csrf : (j.error || TXT.failed);
+        if (j.data) take(j.data, j.ok ? function () { done(j); } : null); else render();
+      }, function () { BUSY = false; ERR = TXT.network; render(); });
+  }
+  // the row that now holds a settled group stays where the group was, and the reader moves on
+  function settled(g, row) {
+    if (row) {
+      row.acted = true;
+      if (row.sim === null) row.sim = g.sim;
+      S.sel = row.gid;
+    }
+    if (S.view === 'open') onward();      // among the settled there is no queue to move along
+  }
+  function retire(g) {
+    var K = keeper(g);
+    run({ action: 'retire', keep: K.id, ids: ids({ members: others(g) }).join(',') }, function () {
+      settled(g, byId('retired:' + K.id));
+    });
+  }
+  function dismiss(g) {
+    var mine = ids(g);
+    run({ action: 'distinct', ids: mine.join(',') }, function () {
+      settled(g, G.filter(function (n) { return n.state === 'distinct' && mine.every(function (i) { return has(n, i); }); })[0]);
+    });
+  }
+  function undo(g) {
+    var mine = ids(g);
+    run(g.state === 'retired' ? { action: 'restore', keep: g.keep } : { action: 'alike', ids: (g.ids || mine).join(',') }, function (j) {
+      var rows = G.filter(function (n) { return n.state === 'open' && mine.some(function (i) { return has(n, i); }); });
+      rows.forEach(function (n) { n.acted = true; if (g.at) n.at = g.at; });
+      if (rows.length) S.sel = rows[0].gid;
+      NOTE = [j.exact === false ? TXT.undoInexact : '', rows.length ? '' : TXT.undoNoGroup].filter(Boolean).join(' ');
+    });
+  }
+
+  // "Edit first": the memory that stays, in the editor of the Memories page, with the copies beside it
+  function editOpen() { return modal.classList.contains('open'); }
+  function closeEdit() { modal.classList.remove('open'); modal.setAttribute('aria-hidden', 'true'); editing = null; }
+  function field(id) { return document.getElementById(id); }
+  function showEdit(g) {
+    var K = keeper(g);
+    if (BUSY) return;
+    BUSY = true; ERR = ''; NOTE = '';
+    render();
+    fetch('/record?id=' + encodeURIComponent(K.id)).then(function (r) { return r.json(); }).then(function (d) {
+      BUSY = false;
+      if (!d.ok) { ERR = d.error || TXT.failed; render(); return; }
+      editing = g.gid;
+      field('m-id').value = d.id;
+      field('m-type').value = d.type;
+      field('m-scope').value = d.scope;
+      field('m-confidence').value = d.confidence || '1.0';
+      field('m-summary').value = d.summary;
+      field('m-body').value = d.body;
+      field('m-err').style.display = 'none';
+      field('m-submit').disabled = false;
+      field('dp-edit-title').textContent = TXT.editTitle + ' ' + d.id;
+      field('dp-edit-side').innerHTML = others(g).map(function (o) {
+        var c = cmp(o, K);
+        return '<div class="dp-other"><div class="dp-colhead"><span class="dp-chip dp-chip-out">' + TXT.toRetire + '</span>' + idchip(o.id) +
+          shareChip(c.share) + '</div><div class="dp-title">' + esc(o.title) + '</div><div class="dp-body">' + c.html + '</div></div>';
+      }).join('');
+      modal.classList.add('open'); modal.setAttribute('aria-hidden', 'false');
+      render();
+      setTimeout(function () { field('m-body').focus(); }, 30);
+    }, function () { BUSY = false; ERR = TXT.network; render(); });
+  }
+  function editFailed(text) { var e = field('m-err'); e.textContent = text; e.style.display = 'block'; field('m-submit').disabled = false; }
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var fd = new URLSearchParams(new FormData(form)), gid = editing;
+    fd.set('csrf', CSRF);
+    field('m-submit').disabled = true;
+    fetch('/memories', { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' }, body: fd })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j.ok) { editFailed(j.error === 'CSRF' ? TXT.csrf : (j.error || TXT.failed)); return; }
+        closeEdit();
+        ERR = ''; NOTE = j.warning || '';
+        load(function () {
+          if (byId(gid)) S.sel = gid; else NOTE = [TXT.goneAfterEdit, NOTE].filter(Boolean).join(' ');
+        });
+      }, function () { editFailed(TXT.network); });
+  });
+  // closed by its own buttons or Escape, never by a click beside it: a half-moved paragraph is not lost to a stray click
+  modal.addEventListener('click', function (e) { if (e.target.closest('[data-close]')) closeEdit(); });
+
+  page.addEventListener('click', function (e) {
+    var el = e.target.closest('[data-act]');
+    if (!el || e.target.closest('a.idchip')) return;
+    var act = el.dataset.act, box = el.closest('[data-g]'), g = box ? byId(box.dataset.g) : null;
+    if (act === 'filter') {
+      if (el.dataset.f === 'view') setView(el.dataset.val); else S[el.dataset.f] = el.dataset.val;
+      ERR = ''; NOTE = ''; render();
+    }
+    else if (act === 'next') { onward(); ERR = ''; NOTE = ''; render(); }
+    else if (act === 'skip') { if (step(1)) { ERR = ''; NOTE = ''; render(); } }
+    else if (!g) return;
+    else if (act === 'select') { S.sel = g.gid; ERR = ''; NOTE = ''; render(); }
+    else if (act === 'tab') { g.tab = +el.dataset.i; render(); }
+    else if (BUSY) return;
+    else if (act === 'swap') { g.keep = el.dataset.id; g.tab = 0; render(); }
+    else if (act === 'dismiss') dismiss(g);
+    else if (act === 'retire') retire(g);
+    else if (act === 'undo') undo(g);
+    else if (act === 'edit') showEdit(g);
+  });
+  page.addEventListener('change', function (e) {
+    if (e.target.id === 'dp-sort') { S.sorts[S.view] = e.target.value; render(); }
+  });
+  document.addEventListener('keydown', function (e) {
+    if (editOpen()) { if (e.key === 'Escape') { e.preventDefault(); closeEdit(); } return; }
+    var guide = document.getElementById('help-modal');
+    if ((guide && guide.classList.contains('open')) || !READY || e.metaKey || e.ctrlKey || e.altKey ||
+        /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
+    var k = (e.key || '').toLowerCase(), g = byId(S.sel);
+    if (k === 'j' || k === 'k') { if (step(k === 'j' ? 1 : -1)) { ERR = ''; NOTE = ''; render(); } }
+    else if (e.repeat || BUSY || !g || g.state !== 'open') return;
+    else if (k === 'enter') { if (/^(A|BUTTON)$/.test(e.target.tagName)) return; retire(g); }
+    else if (k === 'n') dismiss(g);
+    else if (k === 's') { var o = others(g); g.keep = o[Math.min(g.tab, o.length - 1)].id; g.tab = 0; render(); }
+    else if (k === 'e') showEdit(g);
+    else return;
+    e.preventDefault();
+  });
+
+  render();
+  load(pickFirst);
+})();
+'''
+
+_CITED_RE = re.compile(r"(?<![\w-])\d{8}-[A-Za-z0-9]{4,12}(?![\w-])")
+
+
+def duplicates_payload():
+    """What the Duplicates page shows, as data: the groups still to review and what was settled.
+
+    One answer for the whole page, sent again after every action, so the page never has to work
+    out what an action did to the rows around it: a retirement in favour of a memory that already
+    kept another copy widens that row, and taking it back offers every one of its copies again.
+
+    The pairs come from the table mem.sim_sync keeps. When the embedder has left vectors that the
+    table has not compared yet, the answer is {"pending": how many are left}: the page says so and
+    asks again, instead of holding one request open for as long as a first build takes."""
+    waiting = mem.sim_sync(budget=1.5)[1]
+    if waiting:
+        return {"ok": True, "pending": waiting}
+    records = mem.all_records()
+    opened = mem.opened_counts()
+    cited = {}
+    for r in records:
+        if r["meta"].get("status", "active") != "active":
+            continue
+        for i in set(_CITED_RE.findall(rec_summary(r) + "\n" + r["body"])):
+            if i != r["id"]:
+                cited[i] = cited.get(i, 0) + 1
+
+    def member(r):
+        summary, body = mem.emit_for(r, mem.DEST_LOCAL)
+        body = (body or "").strip()
+        return {"id": r["id"], "title": summary or "", "scope": r["meta"].get("scope", "global"),
+                "created": r["meta"].get("created", ""), "chars": len(body),
+                "opened": opened.get(r["id"], 0), "cited": cited.get(r["id"], 0),
+                "files": mem._list_meta(r, "files"), "body": body,
+                # what the store does not retire as somebody's copy: the page proposes it as the one that stays
+                "pinned": r["meta"].get("priority") == "critical",
+                "protected": r["meta"].get("protected", "").strip().lower() in ("true", "yes", "1")}
+
+    groups = []
+    for g in mem.duplicate_groups(records=records):
+        groups.append({"gid": "open:" + min(r["id"] for r in g["members"]), "state": "open", "sim": g["sim"],
+                       "type": g["type"], "members": [member(r) for r in g["members"]]})
+    for g in mem.resolved_duplicates(records):
+        if g["kind"] == "retired":   # the memory that was kept comes first, then what it replaced
+            groups.append({"gid": "retired:" + g["keep"]["id"], "state": "retired", "sim": g["sim"],
+                           "type": g["type"], "keep": g["keep"]["id"], "at": g["at"],
+                           "members": [member(g["keep"])] + [member(r) for r in g["members"]]})
+        else:
+            groups.append({"gid": "distinct:" + g["ids"][0], "state": "distinct", "sim": g["sim"],
+                           "type": g["type"], "ids": g["ids"], "members": [member(r) for r in g["members"]]})
+    return {"ok": True, "threshold": mem.duplicates_threshold(), "vectors": embed_count(), "groups": groups}
+
+
+def endpoint_duplicates(qs):
+    return duplicates_payload()
+
+
+# What the engine says when it refuses one of the page's actions. It says it in English, for the
+# CLI; on the page the same reason is given in the page's language, with the id it names left as is.
+_DUPS_REFUSALS = ("id not found", "it takes at least two memories to be distinct from one another",
+                  "nothing to retire", "the memory to keep is not active", "not active, nothing to retire",
+                  "cannot retire protected memory",
+                  "cannot retire a critical rule in favour of a memory that is not one",
+                  "the memory that was kept is no longer active",
+                  "nothing is retired as a duplicate of")
+
+
+def _dups_refusal(e):
+    text = str(e)
+    for known in _DUPS_REFUSALS:
+        if text.startswith(known):
+            return t(known, "dups") + text[len(known):]
+    return text
+
+
+def page_duplicates(qs=None):
+    def T(s):
+        return t(s, "dups")
+
+    txt = {
+        "title": t("Duplicates"), "dashboard": t("Dashboard"), "of": t("of"), "groups": T("groups"),
+        "thousands": "." if lang() == "ro" else ",",
+        "cardOpen": T("groups to review"), "cardCopies": T("extra copies"),
+        "cardSame": T("identical or nearly identical text"), "cardDone": T("settled"),
+        "cardThreshold": T("threshold, same type · Settings"),
+        "marked": T("marked"), "legend": T("= words that do not appear in the memory that stays"),
+        "fState": T("State"), "vOpen": T("to review"), "vDone": T("settled"), "fType": t("Type"), "all": T("all"),
+        "fWhere": T("Where"), "anywhere": T("anywhere"), "sameProject": T("same project"),
+        "crossProject": T("across projects"), "order": T("order"), "sortSim": T("most alike"),
+        "sortUq": T("least to lose"), "sortNew": T("newest first"), "sortBig": T("largest groups"),
+        "sortAt": T("latest settled"), "likeness": T("likeness"), "mem": [T("1 memory"), T("memories")],
+        "apart": T("written {x} apart"), "sameSecond": T("written in the same second"),
+        "units": {"s": [T("1 second"), T("seconds")], "m": [T("1 minute"), T("minutes")],
+                  "h": [T("1 hour"), T("hours")], "d": [T("1 day"), T("days")], "mo": [T("1 month"), T("months")]},
+        "stays": T("stays"), "toRetire": T("to retire"), "retired": T("retired"),
+        "newest": T("newest"), "saysMost": T("says the most"),
+        "identical": T("identical text"), "onlyHere": T("{n}% only here"),
+        "onlyHereTitle": T("words that do not appear in the memory that stays"),
+        "rTitle": T("Title"), "rWritten": T("Written"), "rSize": T("Size"),
+        "chars": [T("1 character"), T("characters")], "rOpened": T("Opened by agents"), "never": T("never"),
+        "times": [T("once"), T("times")], "timesPre": "de " if lang() == "ro" else "",
+        "rCited": T("Cited by"), "rAnchors": T("Anchors"), "rText": T("Text"),
+        "keepThis": T("Keep this one"), "notDups": T("Not duplicates"), "skip": T("Skip"),
+        "editFirst": T("Edit first"), "retireN": [T("Retire the other"), T("Retire the other {n}")],
+        "undo": T("Undo"), "listTitle": T("Groups"),
+        "nOpen": [T("1 to review"), T("{n} to review")], "nDone": [T("1 settled"), T("{n} settled")],
+        "retiredN": [T("1 retired"), T("{n} retired")], "leftBoth": T("both left"), "leftAll": T("all {n} left"),
+        "noMatch": T("No group matches this filter."), "nextOpen": T("Next to review"),
+        "comparing": T("Comparing memories… {n} left"), "loading": t("Loading..."),
+        "noVectors": T("No vectors yet: likeness comes from the semantic index — run mem.py embed."),
+        "noneOpen": T("No duplicates above the threshold."), "noneDone": T("Nothing settled yet."),
+        "undoInexact": T("Active again. No note of this retirement is left, so the memory that stayed keeps "
+                         "the links and anchors it was given."),
+        "undoNoGroup": T("Active again, but no longer alike enough at this threshold to be offered as a group."),
+        "goneAfterEdit": T("Saved. These memories are no longer offered as a group."),
+        "pinnedTitle": t("critical rule: always injected, first, at SessionStart"),
+        "protectedChip": T("protected"), "protectedTitle": T("a protected memory is not retired"),
+        "editTitle": t("Edit"), "failed": t("Operation failed"), "network": t("Network error"),
+        "csrf": t("Session expired (the server restarted) — reload the page and try again."),
+    }
+    # "Edit first": the form of the Memories page (same ids, so the same styles and the same
+    # POST /memories), in a wider modal that has the copies' texts beside it.
+    types = "".join(f"<option>{h(ty)}</option>" for ty in mem.TYPES)
+    scopes = "".join(f'<option value="{h(s)}">' for s in known_scopes())
+    modal = (
+        f'<div class="modal-overlay" id="dp-edit" aria-hidden="true"><div class="modal dp-editmodal" role="dialog" '
+        f'aria-modal="true" aria-labelledby="dp-edit-title">'
+        f'<div class="modal-head"><h3 id="dp-edit-title"></h3>'
+        f'<button type="button" class="modal-close" data-close aria-label="{h(t("close"))}">&times;</button></div>'
+        f'<div class="dp-editgrid"><form id="mem-form"><input type="hidden" name="action" value="edit">'
+        f'<input type="hidden" name="id" id="m-id" value="">'
+        f'<div class="form-row"><label>{t("Type")} <select name="type" id="m-type">{types}</select></label>'
+        f'<label>{t("Scope")} <small>{t("global or project:slug")}</small>'
+        f'<input type="text" name="scope" id="m-scope" list="scopes"></label>'
+        f'<label>Confidence <input type="text" name="confidence" id="m-confidence"></label></div>'
+        f'<label>Summary <input type="text" name="summary" id="m-summary" required></label>'
+        f'<label class="dp-editbody">Body <textarea name="body" id="m-body" required></textarea></label>'
+        f'<div class="modal-err" id="m-err" style="display:none"></div>'
+        f'<div class="form-actions"><button class="btn btn-primary" id="m-submit" type="submit">{t("Save")}</button>'
+        f'<button type="button" class="btn btn-ghost" data-close>{t("Cancel")}</button></div></form>'
+        f'<div class="dp-editside" id="dp-edit-side"></div></div></div></div>'
+        f'<datalist id="scopes">{scopes}</datalist>')
+    if lang() == "ro":
+        guide = (
+            '<p>Memorii active de acelasi tip care spun acelasi lucru. Asemanarea vine din vectorii indexului '
+            'semantic, iar pragul se schimba din Setari. Digest-urile nu apar aici, fiindca isi repeta sursele '
+            'intentionat.</p><h4>Actiuni</h4>'
+            '<p><b>Retrage</b>: copia devine superseded in favoarea celei care ramane, cu textul ei intreg, iar '
+            'legaturile si ancorele ei trec la cea care ramane. O gasesti apoi la &bdquo;rezolvate&rdquo; si, din '
+            'memoria pastrata, prin &bdquo;Vezi lantul&rdquo;.</p>'
+            '<p>O regula critica nu se retrage in favoarea unei memorii care nu e regula critica: ramane ea, ori ii '
+            'scoti intai marcajul cu <code>mem.py unpin</code>. La un grup intre proiecte, memoria retrasa iese din '
+            'listele proiectului ei: daca trebuie sa ramana in amandoua, alege &bdquo;Nu sunt dubluri&rdquo; ori muta '
+            'intai memoria pastrata pe <code>global</code>, din &bdquo;Editeaza intai&rdquo;.</p>'
+            '<p><b>Nu sunt dubluri</b>: se noteaza pe memoriile insesi, iar grupul nu mai apare.</p>'
+            '<p><b>Editeaza intai</b>: deschide memoria care ramane in editor, cu textul copiei alaturi, ca sa muti '
+            'ce merita inainte sa retragi.</p>'
+            '<p><b>Anuleaza</b>: orice rand rezolvat se ia inapoi, si peste o saptamana, din &bdquo;rezolvate&rdquo;. '
+            'O retragere se anuleaza cat timp memoria pastrata e activa. Ce a primit ea atunci se da inapoi exact '
+            'cat timp nota retragerii mai exista in <code>staging/</code>; fara nota, copiile revin la fel, iar '
+            'memoria pastrata ramane cu ce a primit.</p><h4>Taste</h4>'
+            '<p><b>J</b> / <b>K</b> urmatorul / precedentul &middot; <b>S</b> schimba care ramane &middot; '
+            '<b>Enter</b> retrage &middot; <b>N</b> nu sunt dubluri &middot; <b>E</b> editeaza intai</p>')
+    else:
+        guide = (
+            '<p>Active memories of one type that say the same thing. Likeness comes from the vectors of the '
+            'semantic index, and the threshold is changed from Settings. Digests are left out: they repeat their '
+            'sources on purpose.</p><h4>Actions</h4>'
+            '<p><b>Retire</b>: the copy is superseded by the memory that stays, with its whole text, and its links '
+            'and anchors move to the one that stays. It is then found under &ldquo;settled&rdquo; and, from the '
+            'kept memory, through &ldquo;View chain&rdquo;.</p>'
+            '<p>A critical rule is not retired in favour of a memory that is not one: it is the one that stays, or '
+            'you unpin it first with <code>mem.py unpin</code>. In a group across projects, the retired memory leaves '
+            'its project\'s lists: if both projects need it, choose &ldquo;Not duplicates&rdquo; or first move the '
+            'kept memory to <code>global</code>, from &ldquo;Edit first&rdquo;.</p>'
+            '<p><b>Not duplicates</b>: written on the memories themselves; the group is not offered again.</p>'
+            '<p><b>Edit first</b>: opens the memory that stays in the editor, with the copy\'s text beside it, to '
+            'move what is worth keeping before you retire.</p>'
+            '<p><b>Undo</b>: any settled row can be taken back, a week later too, from &ldquo;settled&rdquo;. A '
+            'retirement can be taken back while the kept memory is active. What that memory was given is returned '
+            'exactly while the note of the retirement is still in <code>staging/</code>; without the note the '
+            'copies come back all the same, and the kept memory keeps what it was given.</p><h4>Keys</h4>'
+            '<p><b>J</b> / <b>K</b> next / previous &middot; <b>S</b> swap which one stays &middot; '
+            '<b>Enter</b> retire &middot; <b>N</b> not duplicates &middot; <b>E</b> edit first</p>')
+    aside = f'<aside class="help"><h3>{t("Duplicates")}</h3>{guide}</aside>'
+    js = ("<script>\nvar CSRF = " + json.dumps(_CSRF) + ";\nvar LANG = " + json.dumps(lang()) + ";\nvar TXT = "
+          + json.dumps(txt, ensure_ascii=False) + ";\n" + _DUP_JS_BODY + "</script>")
+    return layout(t("Duplicates") + " — mem0ry4ai", "dups", '  <div id="dp-page"></div>', aside, modal + js)
+
+
 ROUTES_HTML = {"/": page_index, "/projects": page_projects, "/project": page_project,
                "/inject": page_inject, "/git": page_git, "/queue": page_queue, "/links": page_links,
                "/memories": page_memories, "/claude-md": page_claudemd, "/about": page_about,
-               "/settings": page_settings, "/working": page_working}
-ROUTES_JSON = {"/poll": endpoint_poll}
+               "/settings": page_settings, "/working": page_working, "/duplicates": page_duplicates}
+ROUTES_JSON = {"/poll": endpoint_poll, "/record": endpoint_record, "/duplicates/data": endpoint_duplicates}
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -3228,9 +4287,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if action in ("add", "edit", "supersede", "rescope"):
                 rec = next((r for r in mem.all_records() if r["id"] == rid), None)
                 if rec:
-                    resp["html"] = render_row(rec, records_by_id(), related_in_index())
+                    resp["html"] = render_row(rec)
                     resp["status"] = rec["meta"].get("status", "active")
                     resp["scope"] = rec["meta"].get("scope", "")
+            return self._send_json(resp)
+        if parsed.path == "/duplicates":
+            if not csrf_ok(form.get("csrf", [""])[0]):
+                return self._send_json({"ok": False, "error": "CSRF"})
+            action = form.get("action", [""])[0]
+            keep = (form.get("keep", [""])[0] or "").strip()
+            ids = [i.strip() for i in (form.get("ids", [""])[0] or "").split(",") if i.strip()]
+            if not all(_ID_RE.match(i) for i in ids + [keep] if i):
+                return self._send_json({"ok": False, "error": "invalid id"})
+            resp = {"ok": True}
+            try:
+                if action == "retire":        # `ids` are retired as copies of `keep`
+                    resp["retired"] = mem.retire_duplicates(keep, ids)
+                elif action == "distinct":    # `ids` are not duplicates of one another
+                    mem.mark_distinct(ids)
+                elif action == "restore":     # every copy retired in favour of `keep` is active again
+                    resp["restored"], resp["exact"] = mem.restore_duplicates(keep)
+                elif action == "alike":       # "not duplicates" is taken back for `ids`
+                    mem.unmark_distinct(ids)
+                else:
+                    return self._send_json({"ok": False, "error": "unknown action"})
+            except ValueError as e:
+                # refused, with the store as it was -- usually because it changed under a page left
+                # open. The reason goes back with what is true now, so the page stops showing the rest.
+                resp = {"ok": False, "error": _dups_refusal(e)}
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)})
+            resp["data"] = duplicates_payload()
             return self._send_json(resp)
         self.send_response(404)
         self.end_headers()
@@ -3409,6 +4496,50 @@ def _reload_watcher(interval=2.0):
     threading.Thread(target=loop, daemon=True).start()
 
 
+def _write_pid_file():
+    """Record which process is the server, so uninstall.py can find it: it runs detached, and
+    nothing else knows. Best-effort — a data dir that cannot be written to must not keep the UI
+    from starting."""
+    path = os.path.join(mem.DATA, ".web-server.pid")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"{os.getpid()}\n")
+        return path
+    except OSError:
+        return None
+
+
+def _remove_pid_file(path):
+    """Take the pid file away on the way out — unless another server has claimed it since, in which
+    case it is that server's to remove. A file left behind names a pid the system will hand to
+    some other process sooner or later."""
+    if not path:                            # never written
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            mine = f.read().strip() == str(os.getpid())
+        if mine:
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def _exit_cleanly_on_signals():
+    """SIGTERM is how a detached server gets stopped, and its default action skips every cleanup
+    Python has. Turn it into an ordinary exit so serve() unwinds. A signal the launcher asked to
+    have ignored (nohup does that to SIGHUP) stays ignored."""
+    def bye(signum, frame):
+        raise SystemExit(0)
+
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        try:
+            if sig is not None and signal.getsignal(sig) == signal.SIG_DFL:
+                signal.signal(sig, bye)
+        except (ValueError, OSError):       # not the main thread
+            pass
+
+
 def serve(host=None, port=None):
     _load_local_env()
     # Loopback by default: the UI has no authentication, so binding it to the network is a decision
@@ -3424,10 +4555,16 @@ def serve(host=None, port=None):
     # tell a server that started from one that hung.
     print(f"mem0ry4ai web UI on http://{host}:{port}/  (data: {mem.DATA})"
           + ("  · auto-reload on" if reload_on else ""), flush=True)
+    _exit_cleanly_on_signals()
+    # Only now that the port is ours: a second `serve` that lost the race for it fails above, and
+    # must not replace the pid of the server that is actually listening.
+    pid_file = _write_pid_file()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        _remove_pid_file(pid_file)
 
 
 if __name__ == "__main__":

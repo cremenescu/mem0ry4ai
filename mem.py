@@ -107,15 +107,68 @@ def access_db_path():
     return os.path.join(STORE, ".access.db")
 
 
-def log_access(rec_id, action):
-    """Log an access event (inject, get, search) for a record ID to .access.db."""
+# What an access row means. PUSHED: the system put the memory in front of the agent, unasked --
+# at session start (inject), next to a prompt (prompt), in a project's brief (brief), because a
+# tool touched the file it is anchored to (file), or as a digest whose moment came (digest). READ:
+# something asked for it. Only a read says the memory was wanted.
+PUSHED_ACTIONS = ("inject", "prompt", "brief", "file", "digest")
+READ_ACTIONS = ("search", "get")
+
+_ACCESS_READY = False
+
+
+def _access_con():
+    """Open .access.db with its schema in place (once per process).
+
+    `session` came later than the table: without it an injection cannot be tied to the session it
+    happened in, so "was what we pushed ever used?" has no answer. An older file gains the column
+    here. `prompt_log` records one row per prompt the recall hook looked at -- sizes, counts and the
+    outcome, never the text: the prompt is the user's, and the transcript already holds it."""
+    global _ACCESS_READY
     path = access_db_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    con = sqlite3.connect(path, timeout=5.0)
+    if not _ACCESS_READY:
+        con.execute("CREATE TABLE IF NOT EXISTS access (id TEXT, action TEXT, ts TEXT, session TEXT)")
+        if "session" not in {row[1] for row in con.execute("PRAGMA table_info(access)")}:
+            try:
+                con.execute("ALTER TABLE access ADD COLUMN session TEXT")
+            except sqlite3.OperationalError:
+                pass                       # a concurrent process added it between the two statements
+        con.execute("CREATE INDEX IF NOT EXISTS access_session ON access (session, action)")
+        con.execute("CREATE TABLE IF NOT EXISTS prompt_log (ts TEXT, session TEXT, chars INTEGER, "
+                    "terms INTEGER, candidates INTEGER, injected INTEGER, top_score REAL, "
+                    "ms INTEGER, outcome TEXT)")
+        con.execute("CREATE TABLE IF NOT EXISTS session_reset (session TEXT PRIMARY KEY, ts TEXT)")
+        # Which sessions' prompts used which word -- only words that already occur in the store.
+        # See recall.py: a word spread across most sessions is conversation, not a topic.
+        con.execute("CREATE TABLE IF NOT EXISTS prompt_vocab (term TEXT, session TEXT, "
+                    "PRIMARY KEY (term, session)) WITHOUT ROWID")
+        # What a session has already been briefed on -- a project's brief is given once, when the
+        # session first touches the project (brief.py). `kind` leaves room for other things that
+        # are said once.
+        con.execute("CREATE TABLE IF NOT EXISTS session_seen (session TEXT, kind TEXT, key TEXT, "
+                    "ts TEXT, PRIMARY KEY (session, kind, key)) WITHOUT ROWID")
+        # What agents searched for (see log_search). The one table here that keeps a text.
+        con.execute("CREATE TABLE IF NOT EXISTS search_log (ts TEXT, session TEXT, source TEXT, "
+                    "query TEXT, mode TEXT, total INTEGER, shown INTEGER)")
+        con.commit()
+        _ACCESS_READY = True
+    return con
+
+
+def log_access(rec_ids, action, session=None):
+    """Log an access event for one id or several (one transaction). Never raises: a memory that
+    could not be counted must still be served."""
+    ids = [rec_ids] if isinstance(rec_ids, str) else [i for i in rec_ids if i]
+    if not ids:
+        return
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        con = sqlite3.connect(path, timeout=5.0)
+        con = _access_con()
         try:
-            con.execute("CREATE TABLE IF NOT EXISTS access (id TEXT, action TEXT, ts TEXT)")
-            con.execute("INSERT INTO access (id, action, ts) VALUES (?, ?, ?)", (rec_id, action, now_ts()))
+            ts = now_ts()
+            con.executemany("INSERT INTO access (id, action, ts, session) VALUES (?, ?, ?, ?)",
+                            [(i, action, ts, session) for i in ids])
             con.commit()
         finally:
             con.close()
@@ -123,18 +176,154 @@ def log_access(rec_id, action):
         pass
 
 
+def log_search(query, total, shown, mode, source, session=None):
+    """One row per search an agent ran: what it asked for, and how much came back.
+
+    The access log says which memories a search SHOWED. Nothing said what was being looked for,
+    and that is what shows where the store is asked for something it does not hold: a query whose
+    results nobody went on to open. A prompt is never stored here -- it is the user's. A query is
+    the agent's own wording, so it is kept: redacted like anything written to the store, cut to
+    200 characters, and not at all when MEM_SEARCH_LOG=0. Never raises."""
+    if (os.environ.get("MEM_SEARCH_LOG", "1") or "").strip().lower() in ("0", "no", "false", "off"):
+        return
+    try:
+        text = " ".join((query or "").split())
+        if redact.enabled():
+            text = redact.redact(text)[0]
+        con = _access_con()
+        try:
+            con.execute("INSERT INTO search_log (ts, session, source, query, mode, total, shown) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (now_ts(), session, source, text[:200], mode, int(total), int(shown)))
+            con.commit()
+        finally:
+            con.close()
+    except Exception:
+        pass
+
+
+def mark_session_reset(session):
+    """The session's context was rebuilt (compaction, /clear): what was pushed before is gone from
+    it, so the per-prompt recall may show those memories again."""
+    if not session:
+        return
+    try:
+        con = _access_con()
+        try:
+            con.execute("INSERT OR REPLACE INTO session_reset (session, ts) VALUES (?, ?)",
+                        (session, now_ts()))
+            con.commit()
+        finally:
+            con.close()
+    except Exception:
+        pass
+
+
+def pushed_this_session(session):
+    """Ids already put in front of the agent in this session, since its context was last rebuilt."""
+    if not session:
+        return set()
+    try:
+        con = _access_con()
+        try:
+            row = con.execute("SELECT ts FROM session_reset WHERE session = ?", (session,)).fetchone()
+            since = row[0] if row else ""
+            marks = ",".join("?" * len(PUSHED_ACTIONS))
+            rows = con.execute(f"SELECT DISTINCT id FROM access WHERE session = ? AND ts >= ? "
+                               f"AND action IN ({marks})", (session, since) + PUSHED_ACTIONS).fetchall()
+        finally:
+            con.close()
+        return {r[0] for r in rows}
+    except Exception:
+        return set()
+
+
+def seen_this_session(session, kind, keys):
+    """Which of `keys` this session was already briefed on, since its context was last rebuilt.
+
+    Asked after every tool call, by a process that nearly always has nothing else to do -- so it
+    only reads: no schema set-up, and a database that is not there yet stays not there."""
+    keys = [k for k in keys if k]
+    path = access_db_path()
+    if not session or not keys or not os.path.exists(path):
+        return set()
+    try:
+        con = sqlite3.connect(path, timeout=2.0)
+        try:
+            row = con.execute("SELECT ts FROM session_reset WHERE session = ?", (session,)).fetchone()
+            since = row[0] if row else ""
+            marks = ",".join("?" * len(keys))
+            rows = con.execute(f"SELECT key FROM session_seen WHERE session = ? AND kind = ? "
+                               f"AND ts >= ? AND key IN ({marks})",
+                               [session, kind, since] + keys).fetchall()
+        finally:
+            con.close()
+        return {r[0] for r in rows}
+    except Exception:
+        return set()            # a table from before this existed: nothing was briefed yet
+
+
+def claim_seen(session, kind, key):
+    """Mark `key` as given to this session. True only for the call that made the mark.
+
+    The answer decides who speaks. Tool calls of one turn run in parallel, each with its own hook
+    process, and two of them touching the same project must not both brief it: the insert is the
+    arbiter. A mark older than the session's last context reset is taken over instead of obeyed --
+    what it stood for is no longer in the context."""
+    if not session or not key:
+        return False
+    try:
+        con = _access_con()
+        try:
+            row = con.execute("SELECT ts FROM session_reset WHERE session = ?", (session,)).fetchone()
+            since = row[0] if row else ""
+            cur = con.execute(
+                "INSERT INTO session_seen (session, kind, key, ts) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (session, kind, key) DO UPDATE SET ts = excluded.ts "
+                "WHERE session_seen.ts < ?", (session, kind, key, now_ts(), since))
+            con.commit()
+            return cur.rowcount > 0
+        finally:
+            con.close()
+    except Exception:
+        return False
+
+
 def get_last_accessed():
-    """Return a dict of {rec_id: last_accessed_timestamp_str}."""
+    """{rec_id: when it was last READ} -- searched for or opened, not merely injected.
+
+    Injection orders memories by this, so counting an injection as an access made the order feed
+    itself: whatever was shown last session looked "recently used" this session and was shown
+    again, ahead of every older memory nobody had been offered. Being pushed is not being wanted."""
     path = access_db_path()
     if not os.path.exists(path):
         return {}
     try:
         con = sqlite3.connect(path, timeout=5.0)
         try:
-            rows = con.execute("SELECT id, MAX(ts) FROM access GROUP BY id").fetchall()
+            marks = ",".join("?" * len(READ_ACTIONS))
+            rows = con.execute(f"SELECT id, MAX(ts) FROM access WHERE action IN ({marks}) GROUP BY id",
+                               READ_ACTIONS).fetchall()
         finally:
             con.close()
         return {row[0]: row[1] for row in rows}
+    except Exception:
+        return {}
+
+
+def opened_counts():
+    """{rec_id: how many times an agent opened the memory in full} -- the `get` rows of the access
+    log. Being listed by a search is not counted: a title that was shown is not a text that was
+    read. Never raises."""
+    path = access_db_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        con = sqlite3.connect(path, timeout=5.0)
+        try:
+            return dict(con.execute("SELECT id, count(*) FROM access WHERE action = 'get' GROUP BY id"))
+        finally:
+            con.close()
     except Exception:
         return {}
 
@@ -247,9 +436,11 @@ def ensure_store_repo():
         gi = os.path.join(DATA, ".gitignore")
         if not os.path.exists(gi):
             with open(gi, "w", encoding="utf-8") as f:
-                # derived dbs (FTS index + embeddings) are regenerable and churn on every write
-                f.write("staging/\nstore/.index.db*\nstore/.embed.db*\nstore/.sessions.db*\n"
-                        ".web-server.pid\n.web-server.log\n")
+                # One glob for every database under store/, the ones that exist and the ones
+                # added later: derived indexes and local logs. A name missing from a list here
+                # is a binary the checkpoint commits into the store's history at every
+                # session end.
+                f.write("staging/\nstore/.*.db*\n.web-server.pid\n.web-server.log\n")
         _STORE_REPO = os.path.isdir(os.path.join(DATA, ".git"))
     except Exception:
         _STORE_REPO = False                # no git on this box: everything else still works
@@ -345,7 +536,8 @@ def _neutralize_body(body):
 
 
 def render_record(rid, rtype, scope, summary, body, confidence, source, created, updated, status,
-                  priority=None, files=None, protected=None, session=None, tier=None):
+                  priority=None, files=None, protected=None, session=None, tier=None,
+                  digest_of=None, when=None):
     summary = _sanitize_summary(summary)
     body = _neutralize_body(body)
     lines = [
@@ -361,6 +553,10 @@ def render_record(rid, rtype, scope, summary, body, confidence, source, created,
         lines.append(f"- priority: {priority}")
     if files:
         lines.append(f"- files: {files}")
+    if digest_of:
+        lines.append(f"- digest-of: {digest_of}")
+    if when:
+        lines.append(f"- when: {when}")
     if protected:
         lines.append(f"- protected: {protected}")
     if tier and tier != "open":
@@ -444,7 +640,9 @@ def render_from_meta(rid, meta, summary, body):
              f"- created: {meta.get('created') or now_ts()}",
              f"- updated: {now_ts()}",
              f"- status: {meta.get('status', 'active')}"]
-    for k in ("superseded-by", "invalidated", "invalid-reason", "priority", "files", "related-to", "blocked-by", "protected", "tier", "session"):
+    for k in ("superseded-by", "invalidated", "invalid-reason", "priority", "mirrored-in", "files",
+              "digest-of", "when", "related-to", "blocked-by", "distinct-from", "protected", "tier",
+              "session"):
         if meta.get(k):
             lines.append(f"- {k}: {meta[k]}")
     lines += [f"- confidence: {meta.get('confidence', '1.0')}",
@@ -460,6 +658,46 @@ def _find_record_lines(rec_id):
                 with open(path, "r", encoding="utf-8") as f:
                     return path, f.readlines(), r
     return None, None, None
+
+
+def _body_start(lines, r):
+    """Index of the first line of record `r` that is no longer meta: the blank line that ends its
+    meta block, the boundary `parse_file` draws. Past it a line is text, whatever it looks like.
+
+    The line-level editors below walk a record's lines looking for `- key: value`. A bullet in a
+    body can read exactly like that (`- status: draft`, a record quoted as an example), and an
+    editor that took it for meta would rewrite or drop a line of the memory's own text."""
+    seen = False
+    for k in range(r["start"], r["end"] + 1):
+        text = lines[k].rstrip("\n")
+        if META_RE.match(text):
+            seen = True
+        elif text == "" and seen:
+            return k
+    return r["end"] + 1
+
+
+def _meta_slot(lines, r, body_at):
+    """Index of the line of record `r` before which an editor writes its own lines: the one after
+    the record's `- status:` line.
+
+    A record written or edited by hand may carry no such line (the parser reads it as active). An
+    editor that waits for it writes nothing and still returns the path it "wrote": the pin, the
+    tier or the retirement is reported and never happens. On such a record the lines go at the end
+    of the meta block, after its last line -- and under the title on a record that has no meta
+    line at all. `body_at` is where that block ends (see `_body_start`): a `- status: ...` bullet
+    in the memory's own text is not the line looked for."""
+    slot, titled = r["start"] + 1, False
+    for k in range(r["start"] + 1, min(body_at, r["end"])):
+        text = lines[k].rstrip("\n")
+        mm = META_RE.match(text)
+        if mm and mm.group("k") == "status":
+            return k + 1
+        if mm:
+            slot = k + 1
+        elif not titled and TITLE_RE.match(text):
+            slot, titled = k + 1, True
+    return slot
 
 
 _lock_state = threading.local()
@@ -570,7 +808,7 @@ def _rewrite_block(rec_id, new_block):
         return True
 
 
-def _supersede_prior_status(scope, new_id):
+def _supersede_prior_status(scope, new_id, named=False):
     """A new `status` retires the one it continues: the most recent live status for `scope`.
     Returns (retired_ids, skipped_protected_ids, still_live_count).
 
@@ -585,6 +823,11 @@ def _supersede_prior_status(scope, new_id):
     unrelated write would be a large, surprising edit triggered by an ordinary `add`; retiring the
     one it directly continues is the claim actually being made. Older ones are reported, not touched.
 
+    A status written with `supersedes=` has said which one it continues, and `add_memory` has
+    retired that one by name. Run after that, the rule would take the next most recent as well:
+    two retired by one write, the second named by nobody. So with `named` nothing is retired here
+    and the statuses still live are only counted.
+
     A `protected: true` status is left alone (and reported): the flag exists precisely to stop an
     automatic rewrite. MEM_STATUS_UNIQUE=0 disables the whole behaviour."""
     if os.environ.get("MEM_STATUS_UNIQUE", "1") == "0":
@@ -597,6 +840,8 @@ def _supersede_prior_status(scope, new_id):
             and r["meta"].get("scope") == scope and r["meta"].get("status", "active") == "active"]
     if not live:
         return [], [], 0
+    if named:   # the one it continues is retired already, by name
+        return [], [], len(live)
     live.sort(key=lambda nr: ((nr[1]["meta"].get("created") or ""), nr[0]), reverse=True)
     target = live[0][1]
     try:
@@ -608,12 +853,14 @@ def _supersede_prior_status(scope, new_id):
 
 def add_memory(rtype, scope, summary, body, confidence="1.0", source="web", redact_secrets=True,
                status="active", protected=None, session=None, on_supersede=None,
-               priority=None, files=None, tier=None, supersedes=None):
+               priority=None, files=None, tier=None, supersedes=None, digest_of=None, when=None):
     """Append a fresh record; returns its id. Redacts secrets like every write path.
     status="working" makes it a scratch note: not injected at SessionStart, hidden from default
     search/list — until promote_memory() flips it to active.
-    A new active `status` retires the previous one for its scope (see `_supersede_prior_status`);
-    `on_supersede(done, skipped)` is called with what it did, for callers that report it.
+    A new active `status` retires the previous one for its scope (see `_supersede_prior_status`),
+    unless `supersedes` names the live status of that scope it continues: then that one alone is
+    retired. `on_supersede(done, skipped, older)` is called with what was done and how many
+    statuses of the scope are still live, for callers that report it.
 
     `supersedes` is the id this memory REVISES: it is retired in the same locked section, with the
     usual trail (never a delete). This exists because the agent that just got corrected knows what
@@ -636,11 +883,18 @@ def add_memory(rtype, scope, summary, body, confidence="1.0", source="web", reda
     path = scope_file(scope)
     if files is None:
         files = derive_files(scope, summary, body) or None
+    else:
+        files = normalize_anchors(scope, files) or None
     if session is None:
         session = current_session()   # provenance: stamp the session that produced this memory
+    if when:
+        when = " ".join(str(when).split())
+        parse_when(when)              # a clause it does not know, or a bad regex: refuse the write
+    if digest_of:
+        digest_of = ", ".join(i.strip() for i in str(digest_of).split(",") if i.strip())
     rec = render_record(rid, rtype, scope, summary, body, confidence, source, now_ts(), now_ts(), status,
                         priority=priority, files=files, protected=protected, session=session,
-                        tier=tier)
+                        tier=tier, digest_of=digest_of or None, when=when or None)
     with _locked():
         # Validate BEFORE the append, under the lock: a bad `supersedes` must abort the whole write.
         # Appending first and failing after leaves the new record live AND the old one un-retired --
@@ -674,7 +928,12 @@ def add_memory(rtype, scope, summary, body, confidence="1.0", source="web", reda
             supersede_memory(supersedes, by=rid, reason=f"revised by {rid}")
         # Under the same (reentrant) lock, so no concurrent writer can leave two live statuses.
         if rtype == "status" and status == "active":
-            done, skipped, older = _supersede_prior_status(scope, rid)
+            # A status that named the live status of its own scope has retired it just above. A
+            # revision of anything else leaves the rule as it is: the previous status of the
+            # scope is still live, and still the one this status continues.
+            named = bool(supersedes) and (target["meta"].get("type") == "status"
+                                          and target["meta"].get("scope") == scope)
+            done, skipped, older = _supersede_prior_status(scope, rid, named=named)
             if on_supersede and (done or skipped or older):
                 on_supersede(done, skipped, older)
     return rid
@@ -749,7 +1008,7 @@ def delete_memory(rec_id, bypass_protected=False):
     for other in all_records():
         if other["id"] == rec_id:
             continue
-        for key in ("related-to", "blocked-by"):
+        for key in ("related-to", "blocked-by", "distinct-from"):
             if rec_id in _list_meta(other, key):
                 try:
                     _edit_list_meta(other["id"], key, remove=[rec_id])
@@ -772,24 +1031,27 @@ def supersede_memory(rec_id, by="", reason="", bypass_protected=False):
             with open(path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
             inserts = []
+            if "status" not in r["meta"]:
+                inserts.append("- status: superseded\n")   # there is no line to rewrite: write one
             if by:
                 inserts.append(f"- superseded-by: {by}\n")
             inserts.append(f"- invalidated: {now_ts()}\n")
             if reason:
                 inserts.append(f"- invalid-reason: {reason}\n")
-            new_block = []
+            new_block, body_at = [], _body_start(lines, r)
+            slot = _meta_slot(lines, r, body_at)
             for k in range(r["start"], r["end"] + 1):
                 line = lines[k]
-                mm = META_RE.match(line.rstrip("\n"))
+                if k == slot:
+                    new_block.extend(inserts)
+                mm = META_RE.match(line.rstrip("\n")) if k < body_at else None
                 if mm and mm.group("k") in ("superseded-by", "invalidated", "invalid-reason"):
-                    continue  # drop old copies; re-added after status
+                    continue  # drop old copies; rewritten at the slot
                 if mm and mm.group("k") == "status":
                     line = "- status: superseded\n"
                 elif mm and mm.group("k") == "updated":
                     line = f"- updated: {now_ts()}\n"
                 new_block.append(line)
-                if mm and mm.group("k") == "status":
-                    new_block.extend(inserts)
             lines[r["start"]:r["end"] + 1] = new_block
             with open(path, "w", encoding="utf-8") as f:
                 f.writelines(lines)
@@ -810,14 +1072,44 @@ def promote_memory(rec_id):
                 return False
             with open(path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
-            new_block = []
+            new_block, body_at = [], _body_start(lines, r)
             for k in range(r["start"], r["end"] + 1):
                 line = lines[k]
-                mm = META_RE.match(line.rstrip("\n"))
+                mm = META_RE.match(line.rstrip("\n")) if k < body_at else None
                 if mm and mm.group("k") == "status":
                     line = "- status: active\n"
                 elif mm and mm.group("k") == "updated":
                     line = f"- updated: {now_ts()}\n"
+                new_block.append(line)
+            lines[r["start"]:r["end"] + 1] = new_block
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            return os.path.relpath(path, DATA)
+    return None
+
+
+@_locked_write
+def _edit_meta_lines(rec_id, edit):
+    """One pass over a record's meta lines, in place: `edit(key, value)` returns the value the line
+    should have, or None to drop the line. A line whose value does not change is left byte for
+    byte, and nothing past the meta block is looked at (see `_body_start`). Returns the relpath
+    written, or None when the id is not in the store."""
+    for path in store_files():
+        for r in parse_file(path):
+            if r["id"] != rec_id:
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            new_block, body_at = [], _body_start(lines, r)
+            for k in range(r["start"], r["end"] + 1):
+                line = lines[k]
+                mm = META_RE.match(line.rstrip("\n")) if k < body_at else None
+                if mm:
+                    value = edit(mm.group("k"), mm.group("v").strip())
+                    if value is None:
+                        continue
+                    if value != mm.group("v").strip():
+                        line = f"- {mm.group('k')}: {value}\n"
                 new_block.append(line)
             lines[r["start"]:r["end"] + 1] = new_block
             with open(path, "w", encoding="utf-8") as f:
@@ -867,6 +1159,22 @@ def number_body(body, rng=None):
 
 # ----- commands -----
 
+def summary_note(summary):
+    """A nudge, never a refusal. The summary is the ONE line that search results, the SessionStart
+    injection and the per-prompt recall show; the median had drifted to 185 characters, which is a
+    paragraph, and every surface that lists memories fits fewer of them because of it."""
+    try:
+        limit = int(os.environ.get("MEM_SUMMARY_WARN", "120"))
+    except (TypeError, ValueError):
+        limit = 120
+    n = len(summary or "")
+    if limit <= 0 or n <= limit:
+        return ""
+    return (f"note: the summary is {n} chars. It is the one line search results and the injection "
+            f"show — lead with the searchable fact, leave detail to the body "
+            f"(aim for <= {limit}; mute: MEM_SUMMARY_WARN=0).")
+
+
 def cmd_add(a):
     if a.type not in TYPES:
         sys.exit(f"invalid type: {a.type} (choose from {', '.join(TYPES)})")
@@ -908,6 +1216,7 @@ def cmd_add(a):
         protected="true" if getattr(a, "protected", False) else None,
         tier=getattr(a, "tier", None),
         supersedes=getattr(a, "supersedes", None),
+        digest_of=getattr(a, "digest_of", None), when=getattr(a, "when", None),
         session=(getattr(a, "session", None) or current_session()),
         on_supersede=lambda done, skipped, older: retired.extend(
             [("retired", i) for i in done] + [("protected", i) for i in skipped]
@@ -931,6 +1240,8 @@ def cmd_add(a):
             print(f"  note: {old} is a protected status for {a.scope} and stays live — "
                   f"two live statuses now, resolve by hand", file=sys.stderr)
     sys.stdout.flush()
+    if summary_note(summary):
+        print(summary_note(summary), file=sys.stderr)
     if dup_warn:
         print("note: a very similar memory of this type already exists — supersede instead of duplicating?",
               file=sys.stderr)
@@ -1022,6 +1333,8 @@ def cmd_list(a):
             "last_accessed": access_times.get(r["id"]),
             "superseded_by": r["meta"].get("superseded-by"),
             "priority": r["meta"].get("priority"),
+            "mirrored_in": r["meta"].get("mirrored-in"),
+            "when": r["meta"].get("when"), "digest_of": r["meta"].get("digest-of"),
             "related_to": r["meta"].get("related-to"),
             "blocked_by": r["meta"].get("blocked-by"),
             "files": r["meta"].get("files"),
@@ -1072,11 +1385,19 @@ def build_index():
         con.close()
         os.remove(tmp)
         return False
+    # A plain table beside the full-text one: the scope of each record and the files it is
+    # anchored to. brief.py asks for these after every tool call, and the store cannot answer at
+    # that rate -- parsing 3,300 records takes 200 ms.
+    con.execute("CREATE TABLE meta (id TEXT PRIMARY KEY, scope TEXT, status TEXT, files TEXT, "
+                "trig TEXT)")
     for r in all_records():
         files = r["meta"].get("files", "")
         body = r["body"] + (("\nfiles: " + files) if files else "")  # make file paths searchable
         con.execute("INSERT INTO mem (id, summary, body) VALUES (?, ?, ?)",
                     (r["id"], record_summary(r), body))
+        con.execute("INSERT OR REPLACE INTO meta (id, scope, status, files, trig) VALUES (?, ?, ?, ?, ?)",
+                    (r["id"], r["meta"].get("scope", ""), r["meta"].get("status", "active"), files,
+                     r["meta"].get("when", "")))
     con.commit()
     con.close()
     os.replace(tmp, idx)
@@ -1167,7 +1488,19 @@ def cmd_search(a):
         if getattr(a, "dedup", False):
             hits, dropped = dedup_near(hits)   # ranked order: the most relevant of a cluster survives
         _print_mode(mode, len(hits))
+        # Terms are OR-ed, so an ordinary query matches most of the store: 1166 "hits" was a normal
+        # answer, and the caller piped it through `head`. Bounded here instead, which also makes
+        # "what was shown" a fact that can be logged -- the MCP search always logged its hits, the
+        # CLI never did, and three reads in four go through the CLI.
+        limit = getattr(a, "limit", 10)
+        total = len(hits)
+        if limit and limit > 0:
+            hits = hits[:limit]
         _print_hits(hits)
+        if total > len(hits):
+            print(f"(showing the top {len(hits)} of {total} — `--limit N` for more, `--limit 0` for all)")
+        log_access([r["id"] for r in hits], "search", current_session())
+        log_search(a.query, total, len(hits), mode, "cli", current_session())
         if dropped:
             # Never silently: this is the user's own store, and a hidden hit reads as a lost memory.
             print(f"\n({len(dropped)} near-duplicate{'s' if len(dropped) > 1 else ''} suppressed: "
@@ -1195,6 +1528,7 @@ def cmd_search(a):
                 hits.append(r)
     _print_mode("substring", len(hits))
     _print_hits(hits)
+    log_search(q, len(hits), len(hits), "substring", "cli", current_session())
 
 
 # ----- optional semantic layer: embeddings in a SEPARATE derived db (.embed.db) -----
@@ -1225,6 +1559,11 @@ def embed_index(force=False):
     # transaction open across the per-record Ollama HTTP calls and block a concurrent embed run.
     con = sqlite3.connect(embed_path(), isolation_level=None)
     con.execute("CREATE TABLE IF NOT EXISTS emb (id TEXT PRIMARY KEY, hash TEXT, vec BLOB)")
+    if force:
+        # --force is how a change of embedding model is applied; the vectors kept aside for an undo
+        # (see `_vectors_aside`) came from the model being replaced, and one put back later would
+        # sit among the new ones looking current, since nothing but the text's hash is recorded
+        con.execute("DROP TABLE IF EXISTS emb_aside")
     have = {row[0]: row[1] for row in con.execute("SELECT id, hash FROM emb")}
     recs = [r for r in all_records() if r["meta"].get("status", "active") == "active"]
     ids = {r["id"] for r in recs}
@@ -1247,6 +1586,7 @@ def embed_index(force=False):
         os.chmod(embed_path(), 0o666)
     except OSError:
         pass
+    sim_sync()   # the pairs follow the vectors: the Duplicates page then opens on a table already built
     return (n, len(recs))
 
 
@@ -1273,6 +1613,570 @@ def _float_env(key, default):
         return v if v == v and v not in (float("inf"), float("-inf")) else float(default)
     except (TypeError, ValueError):
         return float(default)
+
+
+# ----- duplicates: memories that say the same thing twice -----
+#
+# What the Duplicates page and `mem.py dups` read. Likeness comes from the vectors already in
+# .embed.db; nothing in this section calls an embedder.
+
+SIM_FLOOR = 0.60   # pairs less alike than this are not kept: nothing asks for them
+_SIM_SCHEMA = ("CREATE TABLE IF NOT EXISTS sim (a TEXT, b TEXT, s REAL, PRIMARY KEY (a, b)) WITHOUT ROWID",
+               "CREATE INDEX IF NOT EXISTS sim_b ON sim (b)",
+               "CREATE TABLE IF NOT EXISTS sim_seen (id TEXT PRIMARY KEY, hash TEXT)")
+# math.sumprod (Python 3.12+) is about five times the generator; the result is the same number.
+_dot = getattr(math, "sumprod", None) or (lambda a, b: sum(x * y for x, y in zip(a, b)))
+
+
+def sim_sync(budget=None):
+    """Bring the table of alike pairs in step with the vectors in .embed.db.
+
+    Every pair of vectors is compared once and the result kept, so a page that asks "which memories
+    say the same thing" reads a small table instead of redoing n*n/2 dot products on every load --
+    which is what made the Links page take half a minute and look only at its first 1,500 vectors.
+    A vector is compared when it is new or when its text changed (the `hash` stored beside it),
+    against every vector compared before it; a vector that is gone takes its pairs with it.
+
+    `budget` is a number of seconds after which the work stops where it is, to be picked up by the
+    next call; None finishes. Returns (compared now, still waiting). Never raises: this is derived
+    data, and a caller that only wanted to show a page must still get its page."""
+    p = embed_path()
+    if not os.path.exists(p):
+        return (0, 0)
+    t0 = time.monotonic()
+    done = waiting = 0
+    con = None
+    try:
+        con = sqlite3.connect(p, timeout=5)
+        for stmt in _SIM_SCHEMA:
+            con.execute(stmt)
+        have = dict(con.execute("SELECT id, hash FROM emb"))
+        seen = dict(con.execute("SELECT id, hash FROM sim_seen"))
+        for i in [i for i in seen if i not in have or have[i] != seen[i]]:
+            # gone, or re-embedded because its text changed: what was known about it is about
+            # another text, and keeping it would offer two memories for what one of them used to say
+            con.execute("DELETE FROM sim WHERE a = ? OR b = ?", (i, i))
+            con.execute("DELETE FROM sim_seen WHERE id = ?", (i,))
+            del seen[i]
+        con.commit()
+        todo = [i for i in have if i not in seen]
+        waiting = len(todo)
+        if not todo:
+            return (0, 0)
+        vecs = {}
+        for i, blob in con.execute("SELECT id, vec FROM emb"):
+            v = struct.unpack("<" + f"{len(blob) // 4}f", blob)
+            n = math.sqrt(_dot(v, v))
+            if n:
+                vecs[i] = [x / n for x in v]
+        compared = [i for i in seen if i in vecs]
+        for i in todo:
+            if budget is not None and done and time.monotonic() - t0 > budget:
+                break
+            vi, rows = vecs.get(i), []
+            if vi is not None:
+                for j in compared:
+                    vj = vecs[j]
+                    if len(vj) != len(vi):
+                        continue   # two embedding models in one table: not comparable
+                    s = _dot(vi, vj)
+                    if s >= SIM_FLOOR:
+                        rows.append((i, j, s) if i < j else (j, i, s))
+                compared.append(i)
+            con.executemany("INSERT OR REPLACE INTO sim (a, b, s) VALUES (?, ?, ?)", rows)
+            con.execute("INSERT OR REPLACE INTO sim_seen (id, hash) VALUES (?, ?)", (i, have[i]))
+            done += 1
+            waiting -= 1
+            if done % 50 == 0:
+                con.commit()   # an interrupted first build keeps what it has done
+        con.commit()
+    except sqlite3.Error:
+        pass
+    finally:
+        if con is not None:
+            con.close()
+    return (done, waiting)
+
+
+def duplicates_threshold():
+    """How alike two memories must be to be offered as duplicates (MEM_DUPS_THRESHOLD, 0.80)."""
+    return max(SIM_FLOOR, min(_float_env("MEM_DUPS_THRESHOLD", "0.80"), 0.99))
+
+
+def _apart_pairs(records, raw=None):
+    """The pairs someone looked at and said are not duplicates (`distinct-from`, read both ways).
+
+    A retired memory stands for the one that replaced it: if A was judged distinct from B and A was
+    later revised into A2, the judgement is about what A says, and A2 says it now.
+
+    `raw`, when given a dict, is filled with the ids each pair is written on -- A and B above, not
+    A2 -- which is what taking the judgement back has to edit."""
+    by = {r["id"]: r for r in records}
+
+    def current(i):
+        walked = set()
+        while i in by and i not in walked:
+            walked.add(i)
+            m = by[i]["meta"]
+            nxt = (m.get("superseded-by", "") or "").strip()
+            if m.get("status", "active") != "superseded" or not nxt:
+                break
+            i = nxt
+        return i
+
+    out = set()
+    for r in by.values():
+        for other in _list_meta(r, "distinct-from"):
+            a, b = current(r["id"]), current(other)
+            if a != b:
+                pair = (a, b) if a < b else (b, a)
+                out.add(pair)
+                if raw is not None:
+                    raw.setdefault(pair, set()).update((r["id"], other))
+    return out
+
+
+def duplicate_groups(threshold=None, records=None):
+    """Active memories of one type that say the same thing, as groups, the most alike first.
+
+    A group is what a chain of alike pairs connects: five versions of one gotcha come out as one
+    group of five, not as ten pairs. Each group is {"sim": its closest pair's likeness, "type": ...,
+    "members": [records, newest first]}.
+
+    Left out on purpose: a retired memory (it is settled already), a digest (it repeats its sources
+    by design), two memories of different types (a decision and the status that reports it read
+    alike and are not copies of each other), and a pair the user marked as distinct."""
+    th = duplicates_threshold() if threshold is None else max(SIM_FLOOR, min(float(threshold), 0.99))
+    p = embed_path()
+    if not os.path.exists(p):
+        return []
+    try:
+        con = sqlite3.connect(p, timeout=5)
+        try:
+            rows = con.execute("SELECT a, b, s FROM sim WHERE s >= ?", (th,)).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return []
+    recs = {r["id"]: r for r in (records if records is not None else all_records())}
+
+    def offered(i):
+        r = recs.get(i)
+        return bool(r) and r["meta"].get("status", "active") == "active" and not r["meta"].get("when")
+
+    apart = _apart_pairs(recs.values())
+    parent, edges = {}, []
+
+    def find(x):
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for a, b, s in rows:
+        if not offered(a) or not offered(b):
+            continue
+        if recs[a]["meta"].get("type") != recs[b]["meta"].get("type"):
+            continue
+        if (a, b) in apart:
+            continue
+        edges.append((a, b, s))
+        parent[find(a)] = find(b)
+    groups = {}
+    for a, b, s in edges:
+        g = groups.setdefault(find(a), {"sim": 0.0, "ids": set()})
+        g["ids"].update((a, b))
+        g["sim"] = max(g["sim"], s)
+    out = []
+    for g in groups.values():
+        members = sorted((recs[i] for i in g["ids"]),
+                         key=lambda r: (r["meta"].get("created", ""), r["id"]), reverse=True)
+        out.append({"sim": g["sim"], "type": members[0]["meta"].get("type", ""), "members": members})
+    out.sort(key=lambda g: (-g["sim"], g["members"][0]["id"]))
+    return out
+
+
+@_locked_write
+def mark_distinct(ids):
+    """Record that these memories are not duplicates of one another, so they are not offered as a
+    group again. Returns the number of pairs written.
+
+    Written as `distinct-from` on the memories themselves: the judgement is the user's and belongs
+    with the store, in git, not in a cache that a rebuild forgets. `updated` is left alone --
+    deciding that two memories differ changes neither of them, and a status must not look
+    freshly touched because someone compared it with another."""
+    ids = list(dict.fromkeys(i for i in ids if i))
+    known = {r["id"] for r in all_records()}
+    missing = [i for i in ids if i not in known]
+    if missing:
+        raise ValueError(f"id not found: {', '.join(missing)}")
+    if len(ids) < 2:
+        raise ValueError("it takes at least two memories to be distinct from one another")
+    n = 0
+    for x in range(len(ids)):
+        for y in range(x + 1, len(ids)):
+            a, b = sorted((ids[x], ids[y]))
+            _edit_list_meta(a, "distinct-from", add=[b], touch=False)
+            n += 1
+    return n
+
+
+@_locked_write
+def unmark_distinct(ids):
+    """Take `mark_distinct` back for these memories: they may be offered together again."""
+    ids = list(dict.fromkeys(i for i in ids if i))
+    n = 0
+    for x in ids:
+        rec = get_record(x)
+        mine = set(_list_meta(rec, "distinct-from")) & (set(ids) - {x}) if rec else set()
+        if mine:
+            _edit_list_meta(x, "distinct-from", remove=sorted(mine), touch=False)
+            n += len(mine)
+    return n
+
+
+@_locked_write
+def retire_duplicates(keep_id, other_ids):
+    """Retire `other_ids` as copies of `keep_id`. Returns the ids retired.
+
+    Each copy is superseded by the one that stays -- kept in the store, with when and why, so the
+    text is one click away and git has the rest. What a copy was attached to moves to the one that
+    stays: the memories it was related to, what blocked it and, within one scope, the files it was
+    anchored to. Otherwise retiring the copy that happened to carry the anchor would quietly take
+    the knowledge away from the file it is about.
+
+    A critical rule is not retired in favour of a memory that is not one: what a copy was attached
+    to moves, the pin does not, and the rule would stop being given without anything saying so.
+    Keep the rule instead, or unpin it first.
+
+    All or nothing: every id is checked before the first write, so a refusal leaves the store as it
+    was instead of a group retired halfway."""
+    others = [i for i in dict.fromkeys(other_ids) if i and i != keep_id]
+    if not others:
+        raise ValueError("nothing to retire")
+    keep = get_record(keep_id)
+    if not keep:
+        raise ValueError(f"id not found: {keep_id}")
+    if keep["meta"].get("status", "active") != "active":
+        raise ValueError(f"the memory to keep is not active: {keep_id}")
+    copies = []
+    for i in others:
+        r = get_record(i)
+        if not r:
+            raise ValueError(f"id not found: {i}")
+        if r["meta"].get("status", "active") != "active":
+            raise ValueError(f"not active, nothing to retire: {i}")
+        if r["meta"].get("protected", "").strip().lower() in ("true", "yes", "1"):
+            raise ValueError(f"cannot retire protected memory: {i}")
+        if r["meta"].get("priority") == "critical" and keep["meta"].get("priority") != "critical":
+            raise ValueError(f"cannot retire a critical rule in favour of a memory that is not one: {i}")
+        copies.append(r)
+
+    def anchors(r):
+        return [f.strip() for f in (r["meta"].get("files", "") or "").split(",") if f.strip()]
+
+    files, grew = anchors(keep), False
+    for r in copies:
+        for key in ("related-to", "blocked-by"):
+            carried = [v for v in _list_meta(r, key) if v != keep_id and v not in others]
+            if carried:
+                _edit_list_meta(keep_id, key, add=carried)
+        if r["meta"].get("scope") == keep["meta"].get("scope"):   # an anchor is a path inside its scope's project
+            for f in anchors(r):
+                if f not in files:
+                    files.append(f)
+                    grew = True
+    if grew:
+        _set_files(keep_id, ", ".join(files))
+    if set(_list_meta(keep, "related-to")) & set(others):
+        _edit_list_meta(keep_id, "related-to", remove=others)   # a link to its own retired copy says nothing
+    for r in copies:
+        supersede_memory(r["id"], by=keep_id, reason=f"duplicate of {keep_id}")
+    _vectors_aside(others)
+    _note_retirement(keep, copies)
+    return others
+
+
+# ----- taking a retirement back -----
+#
+# A retirement changes more than the copies: the memory that stays may be given links and anchors,
+# may lose the link to its own copy, and gets a fresh `updated`. Taking it back exactly means
+# knowing which of those were the kept memory's own, and the store cannot say -- a link it already
+# had and a link it was given read the same. So each retirement leaves one line in staging/ about
+# what it moved. That line is a note for undo, not knowledge: it stays out of git with the rest of
+# staging/, and a retirement whose note is gone can still be taken back -- the kept memory then
+# simply keeps what it was given.
+
+def dups_journal_path():
+    return os.path.join(DATA, "staging", "dups-undo.jsonl")
+
+
+def _dups_journal():
+    """The notes left by `retire_duplicates`, oldest first. A line that does not parse is skipped."""
+    import json
+    out = []
+    try:
+        with open(dups_journal_path(), encoding="utf-8") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(d, dict) and d.get("keep"):
+                    out.append(d)
+    except OSError:
+        pass
+    return out
+
+
+def _dups_journal_write(entries):
+    """Replace the notes with `entries`, atomically. Best-effort: a staging/ that cannot be written
+    costs a later undo its exactness, never the operation that is running."""
+    import json
+    p = dups_journal_path()
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p + ".tmp", "w", encoding="utf-8") as f:
+            for e in entries:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        os.replace(p + ".tmp", p)
+        return True
+    except OSError:
+        return False
+
+
+def _likeness(ids):
+    """How alike the closest two of these memories are, as the table of alike pairs has it; None
+    when it holds no pair among them (less alike than SIM_FLOOR, or one of them has no vector)."""
+    ids = sorted(set(ids))
+    p = embed_path()
+    if len(ids) < 2 or not os.path.exists(p):
+        return None
+    marks = ",".join("?" * len(ids))
+    try:
+        con = sqlite3.connect(p, timeout=5)
+        try:
+            row = con.execute(f"SELECT max(s) FROM sim WHERE a IN ({marks}) AND b IN ({marks})",
+                              ids + ids).fetchone()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+    return row[0] if row else None
+
+
+_ASIDE_SCHEMA = "CREATE TABLE IF NOT EXISTS emb_aside (id TEXT PRIMARY KEY, hash TEXT, vec BLOB)"
+
+
+def _vectors_aside(ids):
+    """Keep a copy of these memories' vectors as they are retired.
+
+    The next embed run drops the vector of anything no longer active. A retirement taken back
+    after that would return a memory that nothing is compared with until the embedder next runs,
+    so the group it belongs to would not come back with it. Never raises: this is derived data."""
+    p = embed_path()
+    ids = [i for i in ids if i]
+    if not ids or not os.path.exists(p):
+        return
+    try:
+        con = sqlite3.connect(p, timeout=5)
+        try:
+            con.execute(_ASIDE_SCHEMA)
+            con.execute("INSERT OR REPLACE INTO emb_aside (id, hash, vec) SELECT id, hash, vec FROM emb "
+                        f"WHERE id IN ({','.join('?' * len(ids))})", ids)
+            con.commit()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        pass
+
+
+def _vectors_back(records):
+    """Give memories that are active again the vectors kept for them -- when the text is still the
+    text that was embedded, and no vector has taken their place meanwhile. Never raises."""
+    p = embed_path()
+    records = [r for r in records if r]
+    if not records or not os.path.exists(p):
+        return
+    try:
+        con = sqlite3.connect(p, timeout=5)
+        try:
+            con.execute(_ASIDE_SCHEMA)
+            for r in records:
+                row = con.execute("SELECT hash, vec FROM emb_aside WHERE id = ?", (r["id"],)).fetchone()
+                if row and row[0] == _rec_hash(r):
+                    con.execute("INSERT OR IGNORE INTO emb (id, hash, vec) VALUES (?, ?, ?)", (r["id"], row[0], row[1]))
+                con.execute("DELETE FROM emb_aside WHERE id = ?", (r["id"],))
+            con.commit()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        pass
+
+
+def _note_retirement(keep, copies):
+    """Leave the note `restore_duplicates` reads: what this retirement gave the kept memory, which
+    of its links it dropped, and the `updated` stamps it moved. `keep` and `copies` are the records
+    as they were before the first write."""
+    now = {r["id"]: r for r in all_records()}
+    kept = now.get(keep["id"])
+    if not kept:
+        return
+    gone = [r["id"] for r in copies]
+    _dups_journal_write(_dups_journal() + [{
+        "at": now_ts(), "keep": keep["id"], "copies": gone,
+        "moved": {key: [v for v in _list_meta(kept, key) if v not in _list_meta(keep, key)]
+                  for key in ("related-to", "blocked-by", "files")},
+        "unlinked": [v for v in _list_meta(keep, "related-to") if v in gone],
+        "updated": {r["id"]: [r["meta"].get("updated", ""), now[r["id"]]["meta"].get("updated", "")]
+                    for r in [keep] + copies if r["id"] in now},
+        "sim": _likeness([keep["id"]] + gone)}])
+
+
+def _retired_into(keep_id, records):
+    """The memories retired as duplicates of `keep_id`, as `retire_duplicates` leaves them."""
+    why = f"duplicate of {keep_id}"
+    return [r for r in records
+            if r["meta"].get("status") == "superseded"
+            and (r["meta"].get("superseded-by") or "").strip() == keep_id
+            and (r["meta"].get("invalid-reason") or "").strip() == why]
+
+
+@_locked_write
+def restore_duplicates(keep_id):
+    """Take a retirement back: every memory retired as a duplicate of `keep_id` is active again.
+    Returns (the ids brought back, exact).
+
+    The inverse of `retire_duplicates`, for the retirements it made. The copies lose the lines that
+    said when, why and in favour of what they were retired. The kept memory gives back what it was
+    given -- the links and anchors it did not have before -- and gets back the link to its copy
+    if it had one. `updated` returns to what it was on every memory nothing else has touched since,
+    so a status that comes back does not come back looking freshly written.
+
+    `exact` is False when no note of the retirement is left (see `dups_journal_path`): the copies
+    are active again all the same, and the kept memory keeps what it was given.
+
+    Refused, with the store untouched, when nothing is retired in favour of `keep_id`, and when
+    `keep_id` is itself no longer active: its copies were retired as duplicates of what it said,
+    and that has been retired or revised since -- which is the first thing to take back."""
+    keep = get_record(keep_id)
+    if not keep:
+        raise ValueError(f"id not found: {keep_id}")
+    if keep["meta"].get("status", "active") != "active":
+        raise ValueError(f"the memory that was kept is no longer active: {keep_id}")
+    copies = _retired_into(keep_id, all_records())
+    if not copies:
+        raise ValueError(f"nothing is retired as a duplicate of {keep_id}")
+    back = [r["id"] for r in copies]
+    journal = _dups_journal()
+    notes = [e for e in journal if e.get("keep") == keep_id]
+    noted = {i for e in notes for i in e.get("copies") or []}
+    exact = all(i in noted for i in back)
+    # The stamp each memory had before the first of these retirements -- as long as every later
+    # one found the stamp the one before it had left.
+    stamps = {}
+    for e in notes:
+        for i, pair in (e.get("updated") or {}).items():
+            if isinstance(pair, list) and len(pair) == 2:
+                before, after = pair
+                if i in stamps and stamps[i][1] == before:
+                    before = stamps[i][0]
+                stamps[i] = (before, after)
+
+    def stamp_before(r):
+        before, after = stamps.get(r["id"], ("", None))
+        if r["meta"].get("updated", "") != after:
+            return ""          # touched by something else since: that stamp stands
+        return before
+
+    for key in ("related-to", "blocked-by"):
+        given = [v for e in notes for v in (e.get("moved") or {}).get(key) or []]
+        if given:
+            _edit_list_meta(keep_id, key, remove=given, touch=False)
+    given_files = {v for e in notes for v in (e.get("moved") or {}).get("files") or []}
+    if given_files:
+        _set_files(keep_id, ", ".join(f for f in _list_meta(keep, "files") if f not in given_files), touch=False)
+    relink = [v for e in notes for v in e.get("unlinked") or [] if v in back]
+    if relink:
+        _edit_list_meta(keep_id, "related-to", add=relink, touch=False)
+    old = stamp_before(keep)
+    if old and old != keep["meta"].get("updated", ""):
+        _edit_meta_lines(keep_id, lambda k, v: old if k == "updated" else v)
+    for r in copies:
+        stamp = stamp_before(r) or now_ts()
+        _edit_meta_lines(r["id"], lambda k, v, stamp=stamp: (
+            None if k in ("superseded-by", "invalidated", "invalid-reason")
+            else "active" if k == "status" else stamp if k == "updated" else v))
+    _vectors_back([get_record(i) for i in back])
+    if notes:
+        _dups_journal_write([e for e in journal if e.get("keep") != keep_id])
+    return back, exact
+
+
+def resolved_duplicates(records=None):
+    """What has been settled about duplicates and can still be taken back.
+
+    Read off the store itself, so the list is the same after a restart or a week later. Two kinds
+    of row, retirements first (the latest on top):
+      {"kind": "retired", "keep": the memory kept, "members": [its retired copies, newest first],
+       "at": when the last of them was retired, "sim": ..., "type": ...}
+      {"kind": "distinct", "members": [memories judged not to be duplicates, newest first],
+       "ids": [the ids the judgement is written on], "at": "", "sim": ..., "type": ...}
+    `sim` is None where it is not known.
+
+    A retirement is listed while the memory that was kept is active -- that is when
+    `restore_duplicates` takes it back. A judgement is listed while at least two of the memories
+    it is about are active; its `ids` are what `unmark_distinct` wants."""
+    recs = list(records if records is not None else all_records())
+    by = {r["id"]: r for r in recs}
+
+    def active(i):
+        return i in by and by[i]["meta"].get("status", "active") == "active"
+
+    def newest(r):
+        return (r["meta"].get("created", ""), r["id"])
+
+    sims = {}
+    for e in _dups_journal():
+        if isinstance(e.get("sim"), (int, float)):
+            sims[e["keep"]] = max(sims.get(e["keep"], 0.0), e["sim"])
+    retired = {}
+    for r in recs:
+        keep_id = (r["meta"].get("superseded-by") or "").strip()
+        if keep_id and _retired_into(keep_id, [r]):
+            retired.setdefault(keep_id, []).append(r)
+    rows = []
+    for keep_id, copies in retired.items():
+        if not active(keep_id):
+            continue
+        rows.append({"kind": "retired", "keep": by[keep_id], "members": sorted(copies, key=newest, reverse=True),
+                     "at": max(c["meta"].get("invalidated", "") for c in copies),
+                     "sim": sims.get(keep_id), "type": by[keep_id]["meta"].get("type", "")})
+    rows.sort(key=lambda g: (g["at"], g["keep"]["id"]), reverse=True)
+
+    raw, parent = {}, {}
+    apart = [p for p in _apart_pairs(recs, raw) if active(p[0]) and active(p[1])]
+
+    def find(x):
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for a, b in apart:
+        parent[find(a)] = find(b)
+    judged = {}
+    for a, b in apart:
+        g = judged.setdefault(find(a), {"ids": set(), "raw": set()})
+        g["ids"].update((a, b))
+        g["raw"].update(raw[(a, b)])
+    marks = []
+    for g in judged.values():
+        members = sorted((by[i] for i in g["ids"]), key=newest, reverse=True)
+        marks.append({"kind": "distinct", "members": members, "ids": sorted(g["raw"]), "at": "",
+                      "sim": _likeness(g["ids"]), "type": members[0]["meta"].get("type", "")})
+    marks.sort(key=lambda g: newest(g["members"][0]), reverse=True)
+    return rows + marks
 
 
 def _cosine(a, b):
@@ -1411,6 +2315,54 @@ def _project_dir(scope):
     return d if os.path.isdir(d) else None
 
 
+def _repo_root():
+    """The directory that holds the projects: the parent of the data directory."""
+    return os.path.dirname(os.path.abspath(DATA))
+
+
+def _resolve_anchor(proj, rel):
+    """Where an anchor points: (path, where).
+
+    'project'  it exists in the project; `path` is project-relative, an own-name prefix removed
+    'outside'  it exists relative to the repo root instead -- a sibling project, or a root file
+    'absent'   it resolves nowhere; `path` is the project-relative spelling, for the report
+
+    Sessions started at the monorepo root name files from there -- `myproj/lib/auth.php` on a
+    memory scoped to `project:myproj` -- while drift looks inside the project. Read literally,
+    every such anchor is "moved ... now at lib/auth.php": 54 of 64 moved verdicts on a real store
+    were that and nothing else. The prefix is dropped only when the path does not exist as written,
+    so a project that really contains a folder named after itself keeps its anchors."""
+    p = rel.strip().strip("/")
+    if os.path.exists(os.path.join(proj, p)):
+        return p, "project"
+    slug = os.path.basename(proj)
+    inner = p[len(slug) + 1:] if p.startswith(slug + "/") else ""
+    if inner:
+        if os.path.exists(os.path.join(proj, inner)):
+            return inner, "project"
+        return inner, "absent"      # <root>/<slug>/<inner> IS <proj>/<inner>: nowhere else to look
+    if os.path.exists(os.path.join(_repo_root(), p)):
+        return p, "outside"
+    return p, "absent"
+
+
+def normalize_anchors(scope, files):
+    """`files:` as it should be stored: each anchor project-relative, duplicates dropped, order kept.
+
+    The write-side half of `_resolve_anchor`. Only an anchor that resolves INSIDE the project is
+    rewritten; one that points at a sibling project, or at a file that does not exist yet, is kept
+    exactly as typed -- there is nothing better to say about it."""
+    raw = [x.strip() for x in (files or "").split(",") if x.strip()]
+    proj = _project_dir(scope)
+    if not proj:
+        return ", ".join(dict.fromkeys(raw))
+    out = []
+    for x in raw:
+        path, where = _resolve_anchor(proj, x)
+        out.append((path + ("/" if x.endswith("/") else "")) if where == "project" else x)
+    return ", ".join(dict.fromkeys(out))
+
+
 _PATHISH = re.compile(r"\b(?:[\w.-]+/)*[\w.-]+\.(?:py|js|ts|tsx|jsx|php|swift|sh|css|html|json|md|yml|yaml|toml|sql|rs|go|rb|c|h|cpp|java|kt)\b")
 
 
@@ -1428,7 +2380,7 @@ def derive_files(scope, summary, body, limit=6):
         return ""
     seen, out = set(), []
     for m in _PATHISH.finditer(f"{summary}\n{body}"):
-        rel = m.group(0).strip("/")
+        rel = _resolve_anchor(proj, m.group(0))[0]
         if rel in seen:
             continue
         seen.add(rel)
@@ -1483,7 +2435,10 @@ def check_drift(records=None, since_commits=None):
         # <id> <same paths>`) or edit it, which is exactly the "I checked, it still holds" gesture
         # the report otherwise has no way to accept.
         created = ((r["meta"].get("updated") or r["meta"].get("created")) or "")[:19]
-        paths = [x.strip() for x in raw.split(",") if x.strip()]
+        # Every anchor resolved ONCE, to (path, where). A path typed from the monorepo root, or one
+        # that lives in a sibling project, is still the file the memory is about; only what
+        # resolves nowhere is a finding.
+        paths = list(dict.fromkeys(_resolve_anchor(proj, x) for x in raw.split(",") if x.strip()))
         todo.append((proj, r, created, paths))
 
     out_by_id, order = {}, []
@@ -1494,8 +2449,7 @@ def check_drift(records=None, since_commits=None):
         # missing or moved. Keeping them out of the pathspec is not just cheaper: one anchor
         # pointing outside the repo would make the whole batched call fail, and with it the churn
         # signal for every other memory in the project.
-        wanted = sorted({p for _, _, _, paths in group for p in paths
-                         if os.path.exists(os.path.join(proj, p))})
+        wanted = sorted({p for _, _, _, paths in group for p, where in paths if where == "project"})
         commits = _churn_index(proj, min(dates), wanted) if dates and wanted else {}
         basenames = None                       # built only if some anchored path has gone missing
 
@@ -1519,13 +2473,22 @@ def check_drift(records=None, since_commits=None):
                         sym_gone.setdefault(rid, []).append((s, sha))
         for _, r, created, paths in group:
             findings = []
-            for rel in paths:
-                if not os.path.exists(os.path.join(proj, rel)):
+            for rel, where in paths:
+                if where == "outside":
+                    continue               # present, in another project: its history is not ours
+                if where == "absent":
                     if basenames is None:
                         basenames = _basename_index(proj)
-                    alt = basenames.get(os.path.basename(rel))
-                    if alt and alt != rel:
-                        findings.append((rel, "moved", f"now at {alt}"))
+                    alts = basenames.get(os.path.basename(rel), [])
+                    # "moved" is a claim about ONE file. With several candidates, the first one the
+                    # walk happened to meet is a guess, and a guess printed as "now at ..." sends
+                    # the reader to the wrong file -- lib/map/lib.php was reported as lib/ssl/lib.php.
+                    if len(alts) == 1:
+                        findings.append((rel, "moved", f"now at {alts[0]}"))
+                    elif alts:
+                        findings.append((rel, "missing",
+                                         f"no such file; {len(alts)} files named "
+                                         f"{os.path.basename(rel)} exist, cannot tell which"))
                     else:
                         findings.append((rel, "missing", "no such file in the project"))
                     continue
@@ -1667,36 +2630,42 @@ def _churn_index(proj, since, paths=()):
 
 
 def _basename_index(proj):
-    """{basename: first relative path found} — one walk, so N missing anchors cost one traversal."""
+    """{basename: [every relative path with that name]} — one walk, so N missing anchors cost one
+    traversal. Every path, not the first: see the 'moved' verdict in check_drift."""
     found = {}
     for dirpath, dirnames, filenames in os.walk(proj):
         dirnames[:] = [d for d in dirnames if d not in (".git", "node_modules", "__pycache__")]
         for name in filenames:
-            found.setdefault(name, os.path.relpath(os.path.join(dirpath, name), proj))
+            found.setdefault(name, []).append(os.path.relpath(os.path.join(dirpath, name), proj))
     return found
 
 
 @_locked_write
-def _set_files(rec_id, files):
+def _set_files(rec_id, files, touch=True):
     """In-place meta edit of the `files:` anchor. Line-level like _set_priority and _set_tier, so
-    nothing else about the record is rewritten."""
+    nothing else about the record is rewritten.
+
+    `touch=False` leaves `updated` alone. Churn is measured from `updated`, so re-anchoring is how a
+    reader says "I checked, it still holds" -- a mechanical respelling of the same paths must not
+    say that on their behalf."""
     for path in store_files():
         for r in parse_file(path):
             if r["id"] != rec_id:
                 continue
             with open(path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
-            new_block = []
+            new_block, body_at = [], _body_start(lines, r)
+            slot = _meta_slot(lines, r, body_at)
             for k in range(r["start"], r["end"] + 1):
                 line = lines[k]
-                mm = META_RE.match(line.rstrip("\n"))
+                if files and k == slot:
+                    new_block.append(f"- files: {files}\n")
+                mm = META_RE.match(line.rstrip("\n")) if k < body_at else None
                 if mm and mm.group("k") == "files":
-                    continue   # drop the old anchor; re-added below unless clearing
-                if mm and mm.group("k") == "updated":
+                    continue   # drop the old anchor; rewritten at the slot unless clearing
+                if touch and mm and mm.group("k") == "updated":
                     line = f"- updated: {now_ts()}\n"
                 new_block.append(line)
-                if files and mm and mm.group("k") == "status":
-                    new_block.append(f"- files: {files}\n")
             lines[r["start"]:r["end"] + 1] = new_block
             with open(path, "w", encoding="utf-8") as f:
                 f.writelines(lines)
@@ -1717,9 +2686,10 @@ def cmd_anchor(a):
         rel = _set_files(a.id, None)
         print(f"{a.id} — anchor cleared  in {rel}")
         return
-    paths = [x.strip() for x in a.files.split(",") if x.strip()]
-    proj = _project_dir(rec["meta"].get("scope", ""))
-    missing = [p for p in paths if proj and not os.path.exists(os.path.join(proj, p))]
+    scope = rec["meta"].get("scope", "")
+    paths = [p for p in normalize_anchors(scope, a.files).split(", ") if p]
+    proj = _project_dir(scope)
+    missing = [p for p in paths if proj and _resolve_anchor(proj, p)[1] == "absent"]
     rel = _set_files(a.id, ", ".join(paths))
     print(f"{a.id} -> files: {', '.join(paths)}  in {rel}")
     if missing:
@@ -1892,6 +2862,7 @@ def cmd_get(a):
     print(record_summary(rec))
     print()
     print(number_body(rec.get("body", ""), rng))
+    log_access(rec["id"], "get", current_session())
 
 
 @_locked_write
@@ -1903,17 +2874,18 @@ def _set_priority(rec_id, priority):
                 continue
             with open(path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
-            new_block = []
+            new_block, body_at = [], _body_start(lines, r)
+            slot = _meta_slot(lines, r, body_at)
             for k in range(r["start"], r["end"] + 1):
                 line = lines[k]
-                mm = META_RE.match(line.rstrip("\n"))
+                if priority and k == slot:
+                    new_block.append(f"- priority: {priority}\n")
+                mm = META_RE.match(line.rstrip("\n")) if k < body_at else None
                 if mm and mm.group("k") == "priority":
-                    continue  # drop the existing priority line; re-added below if pinning
+                    continue  # drop the existing priority line; rewritten at the slot if pinning
                 if mm and mm.group("k") == "updated":
                     line = f"- updated: {now_ts()}\n"
                 new_block.append(line)
-                if priority and mm and mm.group("k") == "status":
-                    new_block.append(f"- priority: {priority}\n")
             lines[r["start"]:r["end"] + 1] = new_block
             with open(path, "w", encoding="utf-8") as f:
                 f.writelines(lines)
@@ -1932,22 +2904,370 @@ def _set_tier(rec_id, tier):
                 continue
             with open(path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
-            new_block = []
+            new_block, body_at = [], _body_start(lines, r)
+            slot = _meta_slot(lines, r, body_at)
             for k in range(r["start"], r["end"] + 1):
                 line = lines[k]
-                mm = META_RE.match(line.rstrip("\n"))
+                if tier and tier != "open" and k == slot:
+                    new_block.append(f"- tier: {tier}\n")
+                mm = META_RE.match(line.rstrip("\n")) if k < body_at else None
                 if mm and mm.group("k") == "tier":
-                    continue   # drop the existing tier line; re-added below unless clearing
+                    continue   # drop the existing tier line; rewritten at the slot unless clearing
                 if mm and mm.group("k") == "updated":
                     line = f"- updated: {now_ts()}\n"
                 new_block.append(line)
-                if tier and tier != "open" and mm and mm.group("k") == "status":
-                    new_block.append(f"- tier: {tier}\n")
             lines[r["start"]:r["end"] + 1] = new_block
             with open(path, "w", encoding="utf-8") as f:
                 f.writelines(lines)
             return os.path.relpath(path, DATA)
     return None
+
+
+@_locked_write
+def _set_mirrored(rec_id, where):
+    """In-place meta edit: record (or clear) that a rule's full text also lives in an instruction
+    file the agent always loads. Line-level, like its siblings above."""
+    for path in store_files():
+        for r in parse_file(path):
+            if r["id"] != rec_id:
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            new_block, body_at = [], _body_start(lines, r)
+            slot = _meta_slot(lines, r, body_at)
+            for k in range(r["start"], r["end"] + 1):
+                line = lines[k]
+                if where and k == slot:
+                    new_block.append(f"- mirrored-in: {where}\n")
+                mm = META_RE.match(line.rstrip("\n")) if k < body_at else None
+                if mm and mm.group("k") == "mirrored-in":
+                    continue
+                if mm and mm.group("k") == "updated":
+                    line = f"- updated: {now_ts()}\n"
+                new_block.append(line)
+            lines[r["start"]:r["end"] + 1] = new_block
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            return os.path.relpath(path, DATA)
+    return None
+
+
+def parse_when(spec):
+    """A digest's `when:` line, parsed: {"always": bool, "paths": [glob], "commands": regex or None}.
+
+    Clauses are separated by ';'. `always` -- at every session start. `paths=<glob>, <glob>` -- when
+    a tool touches a matching file; the path is matched from the repo root, so `*.css` and
+    `*/design/*` both work. `commands=<regex>` -- when a shell command matches.
+
+    Raises ValueError on a clause it does not know or a regex that does not compile. That is for
+    the write paths: a digest that silently can never fire is worse than one that is refused."""
+    out = {"always": False, "paths": [], "commands": None}
+    for clause in (spec or "").split(";"):
+        clause = clause.strip()
+        if not clause:
+            continue
+        if clause == "always":
+            out["always"] = True
+        elif clause.startswith("paths="):
+            out["paths"] = [g.strip() for g in clause[6:].split(",") if g.strip()]
+        elif clause.startswith("commands="):
+            try:
+                out["commands"] = re.compile(clause[9:].strip())
+            except re.error as e:
+                raise ValueError(f"when: the commands= regex does not compile ({e})")
+        else:
+            raise ValueError(f"when: unknown clause {clause!r} (use always, paths=..., commands=...)")
+    return out
+
+
+@_locked_write
+def set_digest(rec_id, when=None, digest_of=None):
+    """In-place meta edit: what makes a record a digest. `when` is the moment it is given (see
+    parse_when), `digest_of` the memories it distils. None leaves a line alone, "" removes it.
+    Returns the relpath written, or None if the id is not found. Raises on a `when` that does not
+    parse.
+
+    Only the meta block is touched. A digest's body is a list, and a list item can look exactly
+    like a meta line ("- when: the build is green"); the blank line that ends the meta is the
+    boundary the parser uses, so it is the one used here."""
+    new = {}
+    if when is not None:
+        when = " ".join(str(when).split())
+        if when:
+            parse_when(when)
+        new["when"] = when
+    if digest_of is not None:
+        new["digest-of"] = ", ".join(i.strip() for i in str(digest_of).split(",") if i.strip())
+    for path in store_files():
+        for r in parse_file(path):
+            if r["id"] != rec_id:
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            block, in_meta, seen_meta = [], True, False
+            slot = _meta_slot(lines, r, _body_start(lines, r))
+            for k in range(r["start"], r["end"] + 1):
+                line = lines[k]
+                if k == slot:
+                    block += [f"- {key}: {val}\n" for key, val in new.items() if val]
+                mm = META_RE.match(line.rstrip("\n")) if in_meta else None
+                if in_meta and seen_meta and line.strip() == "":
+                    in_meta = False
+                seen_meta = seen_meta or bool(mm)
+                if mm and mm.group("k") in new:
+                    continue
+                if mm and mm.group("k") == "updated":
+                    line = f"- updated: {now_ts()}\n"
+                block.append(line)
+            lines[r["start"]:r["end"] + 1] = block
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            return os.path.relpath(path, DATA)
+    return None
+
+
+def digest_report(records=None):
+    """([(digest, sources, {"retired": [...], "changed": [...]})], uncovered) -- what each digest
+    needs before it can be trusted again.
+
+    A digest restates other memories, so it goes stale the way any summary does: without a sound.
+    Three things can be checked mechanically. A memory it cites was retired. A memory it cites was
+    rewritten after the digest was. And a preference exists, in a scope that has digests, that no
+    digest cites -- the rule that was added after the page was written."""
+    records = all_records() if records is None else records
+    by_id = {r["id"]: r for r in records}
+    digests = [r for r in records if (r["meta"].get("when") or "").strip()
+               and r["meta"].get("status", "active") in ("active", "working")]
+    out, cited = [], set()
+    for d in digests:
+        sources = _list_meta(d, "digest-of")
+        cited.update(sources)
+        stamp = (d["meta"].get("updated") or d["meta"].get("created") or "")[:19]
+        retired = [i for i in sources
+                   if i not in by_id or by_id[i]["meta"].get("status", "active") != "active"]
+        changed = [i for i in sources if i in by_id and i not in retired
+                   and (by_id[i]["meta"].get("updated") or "")[:19] > stamp]
+        out.append((d, sources, {"retired": retired, "changed": changed}))
+    scopes = {d["meta"].get("scope") for d in digests}
+    uncovered = [r["id"] for r in records
+                 if r["meta"].get("type") == "preference" and r["meta"].get("scope") in scopes
+                 and r["meta"].get("status", "active") == "active" and r["id"] not in cited]
+    return out, uncovered
+
+
+def cmd_digest(a):
+    """List the digests with what each needs, or make a record a digest (`<id> --when ...`)."""
+    if a.id:
+        if a.when is None and a.digest_of is None:
+            sys.exit("error: give --when and/or --of (or no id, for the report)")
+        try:
+            rel = set_digest(a.id, when=a.when, digest_of=a.digest_of)
+        except ValueError as e:
+            sys.exit(f"error: {e}")
+        if not rel:
+            sys.exit(f"no record with id {a.id}")
+        print(f"digest {a.id} updated  in {rel}")
+        return
+    rows, uncovered = digest_report()
+    if not rows:
+        print("(no digests: a digest is a record with a `when:` line -- `mem.py digest <id> --when always`)")
+        return
+    print(f"DIGESTS ({len(rows)})")
+    for d, sources, issues in rows:
+        print(f"  {d['id']}  {d['meta'].get('status', 'active'):7s}  {len(sources):3d} sources  "
+              f"{record_summary(d)[:60]}\n      when: {d['meta'].get('when')}")
+        if issues["retired"]:
+            print(f"      {len(issues['retired'])} source(s) retired since: {', '.join(issues['retired'])}")
+        if issues["changed"]:
+            print(f"      {len(issues['changed'])} source(s) rewritten since: {', '.join(issues['changed'])}")
+    print(f"\npreferences no digest cites: {len(uncovered)}"
+          + ("" if not uncovered or getattr(a, "verbose", False) else "   (--verbose lists them)"))
+    if getattr(a, "verbose", False):
+        by_id = {r["id"]: r for r in all_records()}
+        for i in uncovered:
+            print(f"  {i}  {record_summary(by_id[i])[:90]}")
+
+
+def stale_statuses(days=None, records=None, scope=None):
+    """Active statuses nobody has touched for `days`: [(record, age in days)], oldest first.
+
+    This is the list of what the session-start injection steps over. Getting old retires nothing:
+    every record here is active and searchable, and a project's latest status still comes with
+    that project's brief. The list exists so that stepping over is not the same as forgetting."""
+    import datetime as _dt
+    if days is None:
+        try:
+            days = int(os.environ.get("MEM_INJECT_STATUS_DAYS", "60"))
+        except ValueError:
+            days = 60
+    today = _dt.date.today()
+    out = []
+    for r in (all_records() if records is None else records):
+        m = r["meta"]
+        if m.get("type") != "status" or m.get("status", "active") != "active":
+            continue
+        if scope and m.get("scope") != scope:
+            continue
+        try:
+            stamp = _dt.date.fromisoformat((m.get("updated") or m.get("created") or "")[:10])
+        except ValueError:
+            continue
+        age = (today - stamp).days
+        if days <= 0 or age > days:
+            out.append((r, age))
+    out.sort(key=lambda t: -t[1])
+    return out
+
+
+@_locked_write
+def keep_status(rec_id):
+    """"It still stands": stamp a record as looked at today, and change nothing else in it.
+    Returns the relpath written, or None if the id is not found."""
+    for path in store_files():
+        for r in parse_file(path):
+            if r["id"] != rec_id:
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            in_meta, seen_meta, stamped, last_meta = True, False, False, None
+            for k in range(r["start"], r["end"] + 1):
+                mm = META_RE.match(lines[k].rstrip("\n")) if in_meta else None
+                if in_meta and seen_meta and lines[k].strip() == "":
+                    in_meta = False             # the page below is not ours to touch
+                seen_meta = seen_meta or bool(mm)
+                if mm:
+                    last_meta = k
+                if mm and mm.group("k") == "updated":
+                    lines[k] = f"- updated: {now_ts()}\n"
+                    stamped = True
+            if not stamped and last_meta is not None:
+                # A record written by hand may carry no such line. Without this the stamp would
+                # land nowhere, and the keep would be reported all the same.
+                lines.insert(last_meta + 1, f"- updated: {now_ts()}\n")
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            return os.path.relpath(path, DATA)
+    return None
+
+
+def cmd_dups(a):
+    """List the groups of memories that say the same thing, or settle one."""
+    if a.undo:
+        try:
+            back, exact = restore_duplicates(a.undo)
+        except ValueError as e:
+            sys.exit(str(e))
+        print(f"active again: {', '.join(back)}  (no longer retired as duplicate{'s' if len(back) != 1 else ''} of {a.undo})")
+        if not exact:
+            print(f"no note was left of what {a.undo} was given at the time: it keeps those links and anchors")
+        return
+    if a.distinct:
+        try:
+            n = mark_distinct(a.distinct)
+        except ValueError as e:
+            sys.exit(str(e))
+        print(f"marked as distinct: {', '.join(a.distinct)} ({n} pair{'s' if n != 1 else ''}); "
+              "they are not offered together again")
+        return
+    if a.keep or a.retire:
+        if not (a.keep and a.retire):
+            sys.exit("give both: --keep ID --retire ID [ID ...]")
+        try:
+            gone = retire_duplicates(a.keep, a.retire)
+        except ValueError as e:
+            sys.exit(str(e))
+        print(f"kept {a.keep}; retired as its duplicate{'s' if len(gone) != 1 else ''}: {', '.join(gone)}"
+              "  (superseded, not deleted)")
+        return
+    sim_sync()
+    groups = duplicate_groups(a.threshold)
+    dest = getattr(a, "dest", None) or DEST_LOCAL
+    shown = []
+    for g in groups:
+        members = [(r, emit_for(r, dest)[0]) for r in g["members"]]
+        members = [(r, s) for r, s in members if s is not None]   # private never leaves for a model
+        if len(members) > 1:
+            shown.append((g, members))
+    th = duplicates_threshold() if a.threshold is None else max(SIM_FLOOR, min(float(a.threshold), 0.99))
+    if getattr(a, "json", False):
+        import json
+        print(json.dumps([{"sim": round(g["sim"], 4), "type": g["type"],
+                           "members": [{"id": r["id"], "scope": r["meta"].get("scope"),
+                                        "created": r["meta"].get("created"), "summary": s}
+                                       for r, s in members]}
+                          for g, members in shown], ensure_ascii=False, indent=1))
+        return
+    if not shown:
+        if not load_embeddings():
+            print("(no vectors yet: likeness comes from the semantic index — run `mem.py embed`)")
+        else:
+            print(f"(no two active memories of one type are at least {th:.0%} alike)")
+        return
+    print(f"MEMORIES THAT SAY THE SAME THING (same type, at least {th:.0%} alike): {len(shown)} group"
+          f"{'s' if len(shown) != 1 else ''}")
+    for g, members in shown:
+        scopes = list(dict.fromkeys(r["meta"].get("scope", "?") for r, _ in members))
+        print(f"\n  {g['sim']:.0%}  {g['type']} · {', '.join(scopes)}")
+        for r, s in members:
+            print(f"    {r['id']}  {r['meta'].get('created', '')[:10]}  {s[:92]}")
+    print("\nNothing is retired by listing.\n"
+          "Keep one:      mem.py dups --keep <id> --retire <id> [<id> ...]   (the others are superseded by it,\n"
+          "               not deleted; what they were linked or anchored to moves to the one kept)\n"
+          "Not the same:  mem.py dups --distinct <id> <id> [<id> ...]        (they are not offered together again)\n"
+          "Take it back:  mem.py dups --undo <kept id>                       (its retired copies are active again)")
+
+
+def cmd_stale(a):
+    """List the statuses the session start no longer lists, or mark some as still standing."""
+    if a.keep:
+        for rid in a.keep:
+            rel = keep_status(rid)
+            print(f"kept {rid}: stamped today, nothing else changed  in {rel}" if rel else f"no record with id {rid}")
+        return
+    try:
+        days = a.days if a.days is not None else int(os.environ.get("MEM_INJECT_STATUS_DAYS", "60"))
+    except ValueError:
+        days = 60
+    rows = stale_statuses(days, scope=a.scope)
+    if not rows:
+        print(f"(no active status is older than {days} days)")
+        return
+    print(f"STATUSES NOT LISTED AT SESSION START (older than {days} days): {len(rows)}")
+    by_scope = {}
+    for r, age in rows:
+        by_scope.setdefault(r["meta"].get("scope", "?"), []).append((r, age))
+    for sc in sorted(by_scope, key=lambda s: (s != "global", s)):
+        print(f"  {sc}")
+        for r, age in by_scope[sc]:
+            print(f"    {r['id']}  {age:4d} d  {record_summary(r)[:92]}")
+    print("\nNothing here was retired: each is active and searchable, and a project's latest still "
+          "comes with\nthat project's brief.\n"
+          "Still stands:  mem.py stale --keep <id> [<id> ...]   (stamps it as looked at today)\n"
+          "Moved on:      mem.py supersede <id> --reason \"...\"   (retires that one; a new status for a\n"
+          "               scope retires only the latest one before it)")
+
+
+def cmd_mirror(a):
+    """Say that a critical rule's full text also lives in an always-loaded instruction file.
+
+    The SessionStart hook then names the rule instead of repeating it. Exists because the hook's
+    output is capped per hook, and three of five critical rules on the store this was built for
+    were verbatim duplicates of CLAUDE.md -- paid for twice, in the one place where room is scarce.
+    It is a statement about ONE reader: agents that do not load that file (anything on MCP) still
+    get the full text, since `mcp.py` ignores the field. And it is only as true as the file: remove
+    the rule from there and this must be cleared, or the rule shrinks to its summary line."""
+    rec = get_record(a.id)
+    if not rec:
+        sys.exit(f"id not found: {a.id}")
+    where = "" if a.where.strip() == "-" else _sanitize_summary(a.where.strip())
+    rel = _set_mirrored(a.id, where or None)
+    if not where:
+        print(f"{a.id} — no longer marked mirrored  in {rel}")
+        return
+    print(f"{a.id} -> mirrored-in: {where}  in {rel}")
+    if rec["meta"].get("priority") != "critical":
+        print("  note: only critical rules are injected with their body, so this changes nothing "
+              "until the memory is pinned", file=sys.stderr)
 
 
 def cmd_tier(a):
@@ -1980,9 +3300,13 @@ def _list_meta(rec, key):
 
 
 @_locked_write
-def _edit_list_meta(rec_id, key, add=(), remove=()):
+def _edit_list_meta(rec_id, key, add=(), remove=(), touch=True):
     """In-place add/remove of ids in a comma-separated meta list field. Drops the line
-    when the list becomes empty. Returns (relpath, new_list)."""
+    when the list becomes empty. Returns (relpath, new_list).
+
+    `touch=False` leaves `updated` alone, for a field that says something about the pair rather
+    than about this record (`distinct-from`): a status must not look freshly looked-at, and step
+    back into the session-start list, because someone compared it with another."""
     for path in store_files():
         for r in parse_file(path):
             if r["id"] != rec_id:
@@ -1994,17 +3318,18 @@ def _edit_list_meta(rec_id, key, add=(), remove=()):
             cur = [i for i in cur if i not in set(remove)]
             with open(path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
-            new_block = []
+            new_block, body_at = [], _body_start(lines, r)
+            slot = _meta_slot(lines, r, body_at)
             for k in range(r["start"], r["end"] + 1):
                 line = lines[k]
-                mm = META_RE.match(line.rstrip("\n"))
+                if cur and k == slot:
+                    new_block.append(f"- {key}: {', '.join(cur)}\n")
+                mm = META_RE.match(line.rstrip("\n")) if k < body_at else None
                 if mm and mm.group("k") == key:
-                    continue  # drop existing; re-added after status if non-empty
-                if mm and mm.group("k") == "updated":
+                    continue  # drop existing; rewritten at the slot if non-empty
+                if touch and mm and mm.group("k") == "updated":
                     line = f"- updated: {now_ts()}\n"
                 new_block.append(line)
-                if cur and mm and mm.group("k") == "status":
-                    new_block.append(f"- {key}: {', '.join(cur)}\n")
             lines[r["start"]:r["end"] + 1] = new_block
             with open(path, "w", encoding="utf-8") as f:
                 f.writelines(lines)
@@ -2274,8 +3599,10 @@ def cmd_log_access(a):
         sys.exit("error: missing --ids (comma-separated list of IDs)")
     ids = [i.strip() for i in a.ids.split(",") if i.strip()]
     action = a.action or "inject"
-    for rid in ids:
-        log_access(rid, action)
+    session = (getattr(a, "session", None) or "").strip() or None
+    if getattr(a, "reset", False):
+        mark_session_reset(session)      # before the rows below, so they count as "since the reset"
+    log_access(ids, action, session)
     print(f"logged {action} access for {len(ids)} record(s)")
 
 
@@ -2574,6 +3901,9 @@ def main():
                          "until `mem.py promote <id>`")
     pa.add_argument("--supersedes", metavar="ID",
                     help="id of the memory this one revises — retired in the same write (never deleted)")
+    pa.add_argument("--when", help="makes it a digest: always | paths=<glob>, <glob> | commands=<regex>")
+    pa.add_argument("--digest-of", dest="digest_of", metavar="IDS",
+                    help="comma-separated ids of the memories a digest distils")
     pa.add_argument("--tier", choices=TIERS,
                     help="egress class: open (default) | redacted (summary only reaches an agent) "
                          "| private (never reaches an agent; still yours to search and read)")
@@ -2610,6 +3940,8 @@ def main():
                     help="only memories ANCHORED to this path (the files: field, not a text match); trailing slash = directory")
     ps.add_argument("--dedup", action="store_true",
                     help="suppress near-duplicate hits (opt-in: see `dedup_near` for why not by default)")
+    ps.add_argument("--limit", type=int, default=10,
+                    help="how many ranked hits to show (default 10; 0 = all)")
     ps.set_defaults(func=cmd_search)
 
     pp = sub.add_parser("supersede", help="mark a memory as superseded (records when + why; never deletes)")
@@ -2664,6 +3996,42 @@ def main():
     pn = sub.add_parser("pin", help="mark a memory as a critical rule (always injected, first)")
     pn.add_argument("id")
     pn.set_defaults(func=cmd_pin)
+
+    pmi = sub.add_parser("mirror", help="a critical rule's full text also lives in an instruction file "
+                                         "(the hook names it instead of repeating it)")
+    pmi.add_argument("id")
+    pmi.add_argument("where", help="the file, e.g. CLAUDE.md; '-' clears the mark")
+    pmi.set_defaults(func=cmd_mirror)
+
+    pdg = sub.add_parser("digest", help="digests: list them with what each needs, or make a record one")
+    pdg.add_argument("id", nargs="?", help="a record to make (or change as) a digest")
+    pdg.add_argument("--when", help="always | paths=<glob>, <glob> | commands=<regex>   (';' between clauses)")
+    pdg.add_argument("--of", dest="digest_of", metavar="IDS",
+                     help="comma-separated ids of the memories it distils")
+    pdg.add_argument("--verbose", action="store_true", help="list the preferences no digest cites")
+    pdg.set_defaults(func=cmd_digest)
+
+    pst = sub.add_parser("stale", help="statuses too old to be listed at session start (nothing is retired)")
+    pst.add_argument("--days", type=int, help="age limit in days (default: MEM_INJECT_STATUS_DAYS, 60)")
+    pst.add_argument("--scope", help="only this scope")
+    pst.add_argument("--keep", nargs="+", metavar="ID",
+                     help="it still stands: stamp these as looked at today, change nothing else")
+    pst.set_defaults(func=cmd_stale)
+
+    pdu = sub.add_parser("dups", help="memories that say the same thing twice: list the groups, keep one, "
+                                      "or mark them distinct (nothing is deleted)")
+    pdu.add_argument("--threshold", type=float, help="how alike, 0.60-0.99 (default: MEM_DUPS_THRESHOLD, 0.80)")
+    pdu.add_argument("--json", action="store_true", help="machine-readable output")
+    pdu.add_argument("--dest", choices=(DEST_LOCAL, DEST_AGENT), default=DEST_LOCAL,
+                     help="who reads the output: 'agent' leaves private memories out")
+    pdu.add_argument("--keep", metavar="ID", help="the memory that stays (with --retire)")
+    pdu.add_argument("--retire", nargs="+", metavar="ID",
+                     help="its copies: superseded by the kept one, not deleted")
+    pdu.add_argument("--distinct", nargs="+", metavar="ID",
+                     help="these are not duplicates: do not offer them together again")
+    pdu.add_argument("--undo", metavar="ID",
+                     help="take a retirement back: the copies retired in favour of this memory are active again")
+    pdu.set_defaults(func=cmd_dups)
 
     pf = sub.add_parser("unpin", help="remove the critical-rule mark")
     pf.add_argument("id")
@@ -2727,7 +4095,10 @@ def main():
 
     pla = sub.add_parser("log-access", help="log an access event for a memory")
     pla.add_argument("--ids", required=True, help="comma-separated list of memory IDs")
-    pla.add_argument("--action", default="inject", help="inject|get|search")
+    pla.add_argument("--action", default="inject", help="inject|prompt|brief|file|digest|get|search")
+    pla.add_argument("--session", help="the session the access happened in")
+    pla.add_argument("--reset", action="store_true",
+                     help="the session's context was rebuilt (compaction, /clear) before this")
     pla.set_defaults(func=cmd_log_access)
 
     pco = sub.add_parser("consolidate", help="consolidate duplicate memories on a branch")

@@ -66,10 +66,14 @@ git init "$MEM_DATA_DIR"
 ## Tests
 
 ```bash
-python3 tests/test_guards.py             # 34 checks, isolated store, ~30s
+python3 tests/test_guards.py             # 400 checks, isolated store, ~30s
 python3 tests/test_guards.py --canary    # removes each guard in turn; the suite must notice
 tools/bench_recall.py                    # retrieval quality: Recall@k + MRR, no LLM judge
 ```
+
+The canary runs the whole suite once per mutation — 174 of them, so over an hour. Run one thing
+at a time: two runs of the suite share a port and a folder in the temp dir, and collide into
+failures that are not there.
 
 If you add a guard for a rule that must hold, add it to `MUTATIONS` in `tests/test_guards.py` as
 well. A check that still passes when the thing it checks is deleted reports green and protects

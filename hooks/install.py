@@ -20,9 +20,18 @@ import time
 
 HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
 SESSION_START = os.path.join(HOOK_DIR, "session_start.py")
+PROMPT_RECALL = os.path.join(HOOK_DIR, "prompt_recall.py")
+TOOL_RECALL = os.path.join(HOOK_DIR, "tool_recall.py")
 CAPTURE = os.path.join(HOOK_DIR, "capture.py")
 PY = sys.executable or "python3"
 SIG = HOOK_DIR  # signature used to recognize our own entries
+# A tool call that fails fires PostToolUseFailure INSTEAD of PostToolUse -- a shell command that
+# exits non-zero, for one. That is when a project's gotchas are worth the most.
+TOOL_EVENTS = ("PostToolUse", "PostToolUseFailure")
+EVENTS = ("SessionStart", "UserPromptSubmit") + TOOL_EVENTS + ("PreCompact", "SessionEnd")
+sys.path.insert(0, HOOK_DIR)
+from session_start import PARTS  # noqa: E402  -- one list of parts, not a copy that can fall behind
+from tool_recall import MATCHER  # noqa: E402  -- likewise: the tools the hook is written for
 
 
 def settings_path(target):
@@ -44,13 +53,20 @@ def strip_ours(arr):
             if not any(SIG in hh.get("command", "") for hh in e.get("hooks", []))]
 
 
-def set_event(hooks, event, command, matcher=None):
+def set_event(hooks, event, commands, timeout=30, matcher=None):
+    """Replace OUR handlers for `event` with `commands` (a list: Claude Code runs the handlers of
+    one event in parallel and caps each one's output separately, which is the point of having
+    several). No commands = just remove ours. `matcher` narrows a tool event to the tools named."""
     arr = strip_ours(hooks.get(event, []))
-    entry = {"hooks": [{"type": "command", "command": command, "timeout": 30}]}
-    if matcher is not None:
-        entry["matcher"] = matcher
-    arr.append(entry)
-    hooks[event] = arr
+    if commands:
+        entry = {"hooks": [{"type": "command", "command": c, "timeout": timeout} for c in commands]}
+        if matcher:
+            entry = {"matcher": matcher, **entry}
+        arr.append(entry)
+    if arr:
+        hooks[event] = arr
+    else:
+        hooks.pop(event, None)
 
 
 def main():
@@ -58,6 +74,10 @@ def main():
     ap.add_argument("--target", choices=["user", "project"], default="user")
     ap.add_argument("--uninstall", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--no-prompt-recall", action="store_true",
+                    help="do not register the per-prompt recall hook (UserPromptSubmit)")
+    ap.add_argument("--no-tool-recall", action="store_true",
+                    help="do not register the project-brief hook (PostToolUse, PostToolUseFailure)")
     a = ap.parse_args()
 
     path = settings_path(a.target)
@@ -65,18 +85,24 @@ def main():
     hooks = cfg.setdefault("hooks", {})
 
     if a.uninstall:
-        for ev in ("SessionStart", "PreCompact", "SessionEnd"):
-            if ev in hooks:
-                hooks[ev] = strip_ours(hooks[ev])
-                if not hooks[ev]:
-                    del hooks[ev]
+        for ev in EVENTS:
+            set_event(hooks, ev, [])
         action = "uninstalled"
     else:
         # quote both paths so spaces (Windows: "C:\Program Files\...\python.exe" or a username with a
         # space) don't break the command; the HOOK_DIR signature is still a substring for uninstall.
-        set_event(hooks, "SessionStart", f'"{PY}" "{SESSION_START}"')  # all sources
-        set_event(hooks, "PreCompact", f'"{PY}" "{CAPTURE}"')
-        set_event(hooks, "SessionEnd", f'"{PY}" "{CAPTURE}"')
+        # SessionStart: one handler per part, each with its own 10,000-character ceiling.
+        set_event(hooks, "SessionStart", [f'"{PY}" "{SESSION_START}" --part {p}' for p in PARTS])
+        # A short timeout: this one sits between the user pressing Enter and the model starting.
+        set_event(hooks, "UserPromptSubmit",
+                  [] if a.no_prompt_recall else [f'"{PY}" "{PROMPT_RECALL}"'], timeout=10)
+        # Shorter still: this one runs after every tool call the matcher names, and nearly always
+        # has nothing to say.
+        for ev in TOOL_EVENTS:
+            set_event(hooks, ev, [] if a.no_tool_recall else [f'"{PY}" "{TOOL_RECALL}"'],
+                      timeout=5, matcher=MATCHER)
+        set_event(hooks, "PreCompact", [f'"{PY}" "{CAPTURE}"'])
+        set_event(hooks, "SessionEnd", [f'"{PY}" "{CAPTURE}"'])
         action = "installed"
 
     blob = json.dumps(cfg, indent=2, ensure_ascii=False)

@@ -83,7 +83,9 @@ def _instructions(client=""):
     except OSError:
         base = ("mem0ry4ai durable memory. Call memory_search to recall gotchas/decisions/facts/"
                 "preferences BEFORE answering; memory_get to load a record by id; memory_resume for "
-                "a 'where was I' briefing. Save durable knowledge with memory_add (if enabled).")
+                "a 'where was I' briefing. Save durable knowledge with memory_add (if enabled). "
+                "A memory records what was true when it was written: if it names a file, function "
+                "or flag, check that it still exists before relying on it.")
     if "claude" in (client or "").lower():   # Claude Code's SessionStart hook already pushes these
         return base
     ess = _essentials()
@@ -147,13 +149,13 @@ def t_search(a):
                and (not typ or by[i]["meta"].get("type") == typ)
                and mem._match_anchor(by[i], files)]
     hits = matched[:limit]
+    # Before the early return: a search that found nothing is the one most worth knowing about.
+    mem.log_search(q or f"files:{files}", len(matched), len(hits), mode, "mcp", mem.current_session())
     if not hits:
         return f"(no matches for {q or files!r})"
     
-    # Log access for search hits
-    for r in hits:
-        mem.log_access(r["id"], "search")
-        
+    mem.log_access([r["id"] for r in hits], "search", mem.current_session())
+
     head = f"{len(hits)} match(es) [{mode}]"
     if len(matched) > len(hits):   # never truncate silently — tell the caller more exist
         head += f" — showing top {len(hits)} of {len(matched)}; pass a higher `limit` for the rest"
@@ -173,9 +175,8 @@ def t_get(a):
         return (f"(record {rid} is classified private: it stays on the user's machine and is never "
                 f"sent to a model. They can read it with `mem.py get {rid}`.)")
     
-    # Log access for get
-    mem.log_access(r["id"], "get")
-    
+    mem.log_access(r["id"], "get", mem.current_session())
+
     m = r["meta"]
     st = m.get("status", "active")
     head = f"[{r['id']}] {m.get('type', '?')} · {m.get('scope', '?')}" + ("" if st == "active" else f" ({st})")
@@ -264,6 +265,8 @@ def t_add(a):
                     "supersede it if not.")
         if not supersedes:   # already linked -> the duplicate warning would be noise
             out += _dup_note(rtype, summary, body, rid)
+        if mem.summary_note(summary):
+            out += "\n" + mem.summary_note(summary)
         return out
     except Exception as e:
         return f"error: {e}"
@@ -431,7 +434,7 @@ def resources_list():
 def resource_templates_list():
     return {"resourceTemplates": [
         {"uriTemplate": "mem0ry4ai://resume/{scope}", "name": "Where was I (one scope)",
-         "description": "Briefing for a single scope, e.g. mem0ry4ai://resume/project:vyos-webui "
+         "description": "Briefing for a single scope, e.g. mem0ry4ai://resume/project:my-app "
                         "or mem0ry4ai://resume/global.",
          "mimeType": "text/markdown"},
     ]}
@@ -454,11 +457,11 @@ PROMPTS = [
     {"name": "recall",
      "description": "Pull the memories relevant to a question into the conversation before answering.",
      "arguments": [{"name": "query", "description": "what to recall about", "required": True},
-                   {"name": "scope", "description": "limit to one scope, e.g. project:vyos-webui",
+                   {"name": "scope", "description": "limit to one scope, e.g. project:my-app",
                     "required": False}]},
     {"name": "resume",
      "description": "Load the 'where was I' briefing for a project: status, open todos, recent knowledge.",
-     "arguments": [{"name": "scope", "description": "e.g. project:vyos-webui (default: all)",
+     "arguments": [{"name": "scope", "description": "e.g. project:my-app (default: all)",
                     "required": False}]},
 ]
 

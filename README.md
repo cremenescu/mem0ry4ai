@@ -27,7 +27,7 @@ agentmemory, the official MCP memory server). Recurring failure modes shaped thi
 
 | Common failure | mem0ry4ai answer |
 |---|---|
-| Model forgets to call save/recall tools | **Deterministic hooks** inject at SessionStart; the agent is *instructed* to write proactively |
+| Model forgets to call save/recall tools | **Deterministic hooks** push memory at session start, on the prompt, and the first time a session touches a project or a file; the agent is *instructed* to write proactively |
 | Vector DB fragility (Chroma/Qdrant = #1 source of real bug reports) | **Markdown + git is the source of truth**; SQLite FTS5 index is *derived and disposable* |
 | Memory rots (stale facts, contradictions) | **Supersede, never delete** — old records keep history; git keeps everything |
 | Auto-extraction noise (small LLMs are over-confident: ~1.0 confidence on everything — we measured) | **Trust-gated writes**: the in-context agent writes directly; batch LLM extraction goes through a human review queue |
@@ -62,6 +62,9 @@ smaller than the raw numbers; this is one user's setup, not a controlled study.*
 Claude Code session
   ├─ SessionStart hook ─► injects relevant memories (global + current project;
   │                       from a monorepo root: a capped index of ALL projects)
+  ├─ UserPromptSubmit hook ─► the few memories a prompt's own words point at
+  ├─ PostToolUse hook ─► the first time the session works in a project: its brief;
+  │                      the first time it touches a file: the memories anchored to it
   ├─ [work] the agent proactively writes durable findings ─► mem.py add
   └─ SessionEnd + PreCompact hook ─► transcript pointer to staging/ + auto-commit of the store +
                                     auto-embed of new memories, at EACH boundary (end-of-session and
@@ -74,6 +77,169 @@ store/*.md   ◄── SOURCE OF TRUTH (markdown + git: audit, diff, rollback, s
    ├─► mem.py            (CLI: add/list/search/supersede/ready/resume/link/embed/... — stdlib only)
    └─► mem.py mcp        (MCP server — ANY agent pulls on demand: Gemini CLI, Cursor, OpenCode, …)
 ```
+
+## What the agent gets, and when
+
+Session start is the wrong moment to decide what a session will need: all it knows is the working
+directory. So memory is pushed at several moments, each keyed on something the session has
+actually done:
+
+| Moment | What is added to the context | Switch |
+|---|---|---|
+| Session start — and again after compaction or `/clear` | your profile, the critical rules, the digests marked `always`, then an index of memories (global + the current project) | — |
+| A prompt | the few memories its own words point at, one line each | `MEM_PROMPT_RECALL` |
+| The first tool call inside a project | that project's **brief** | `MEM_BRIEF` |
+| The first touch of a file | the memories **anchored** to it (`files:`) | `MEM_FILE_RECALL` |
+| A file or a command a digest was written for | that **digest** | `MEM_DIGEST` |
+
+All of this writes into the context unasked, so three rules hold everywhere:
+
+- **Once.** A brief, a file's memories and a digest are given once per session, and whatever the
+  session was already shown is left out of what comes later. After compaction or `/clear` the
+  context is gone, so they may come again. A subagent is counted apart from the session that
+  started it.
+- **Visible.** Each push also prints one line for *you* — at start how much was loaded, afterwards
+  which memories and from which project — so a wrong recall is something you see, not something
+  the model quietly carries. `MEM_RECALL_NOTICE=0` drops the line and keeps the recall.
+- **Silent when unsure.** Most prompts and nearly every tool call add nothing, and any error in
+  the prompt and tool hooks ends in exit 0 with no output: a prompt must never fail to send, nor a
+  tool call fail, over a memory.
+
+Every one of them goes through the same `emit_for` choke point as the rest
+([Egress tiers](#egress-tiers--what-a-memory-may-tell-a-model)), so a `private` memory is in none.
+
+### Recall on the prompt
+
+The working directory says little when sessions start at a monorepo root; the prompt says a lot:
+"do it like in billing-api", "it goes through the bastion", "we solved this before". The
+`UserPromptSubmit` hook looks the prompt's own words up in the full-text index and offers at most
+`MEM_PROMPT_MAX` memories, one line each (id, type, project, summary); the agent opens the ones it
+needs with `mem.py get <id>`.
+
+It is keyword-only on purpose — it runs on every prompt and must work with no embedder — and it
+prefers silence to a guess. A memory is offered only when at least two words that are *rare in
+your store* match its title; one, plus a second match anywhere, is enough when the prompt itself
+says a memory is expected ("as before", "we already…") or names that memory's project. Which rare
+words are talk rather than topic is learned from your own prompts: a word that turns up across a
+large share of your sessions stops counting. `python3 recall.py learn` warms that table from the
+transcripts already on disk. Slash commands, the turns the harness starts by itself and prompts
+shorter than `MEM_PROMPT_MIN_CHARS` are skipped.
+
+```bash
+python3 recall.py "the ledger import fails on the second batch"   # what this prompt would bring; logs nothing
+```
+
+### Project briefs and anchored memories
+
+On a monorepo most sessions start at the root, where "the current project" means nothing. The
+brief waits until the session shows where it works: the first time a tool call names a path inside
+a project — a file read or edited, a search, a shell command's working directory or the paths it
+names — the agent is given that project's latest status, the todos nothing blocks, its
+preferences, and the knowledge that has been opened most in recent months. A command that walks
+several projects at once (`du -sh a b c`) briefs nobody.
+
+A project is a top-level folder, beside the others, that has memories under `project:<folder>`;
+when a folder and its scope are named differently, `MEM_SCOPE_ALIASES=folder=slug, other=slug`
+maps them. A prompt that names a project in full ("continue with billing-api") brings its brief
+before any tool runs. "Do it like in billing-api" does not: that is a reference, not the place of
+the work.
+
+The first touch of a file brings the newest memories whose `files:` names it, with a pointer to
+the rest (`mem.py list --files <path>`). Inside its own project an anchor may be a bare file name;
+from another scope, `global` included, it has to spell the path from the root.
+
+```bash
+python3 brief.py billing-api                           # the brief that project would get; marks and logs nothing
+python3 brief.py --file /path/to/billing-api/src/auth.py   # what touching this file would bring
+```
+
+**One limit to know about.** "The folder that holds the projects" is the parent of the data
+directory. In a git-clone install the data sits in the clone, so the projects are the clone's
+siblings — the monorepo layout this was built for. In a plugin install the data sits in
+`~/.mem0ry4ai`, so that folder is your home directory, and a project at `~/code/web-shop` is not a
+top-level folder of it: it gets no first-touch brief. Put the data next to the projects instead —
+move `~/.mem0ry4ai` to `~/code/.mem0ry4ai` and set `MEM_DATA_DIR` to it in the environment Claude
+Code runs in. Session start is not affected either way: started inside a project's folder, it
+loads that project's memories.
+
+### Digests — standing preferences, delivered at their moment
+
+Preferences pile up as dozens of small memories, far more than a start list has room for, and the
+ones about, say, git only matter when a commit is about to happen. A **digest** is one page that
+distils a theme, each line citing the memories it comes from. The memories stay the source; the
+digest is the form in which they reach the agent. Any record with a `when:` line is one — by
+convention a `procedural` titled "Digest: <theme>" — and `when:` says at which moment it is given:
+
+| `when:` clause | The digest is given |
+|---|---|
+| `always` | at every session start, whole, under "House rules" |
+| `paths=*.css, */design/*` | the first time a tool touches a path the glob matches (the path is taken from the folder that holds the projects) |
+| `commands=git (commit\|push)` | the first time a shell command matches the regex |
+
+Clauses are joined with `;` (a literal `;` inside a regex is written `\x3b`). A digest in `global`
+is for every session; one in a project only for work in that project. An unknown clause or a regex
+that does not compile is refused when the digest is written, not discovered when it never fires.
+An `always` digest that has outgrown its part of the start injection is not cut: a note takes its
+place, saying it no longer fits.
+
+```bash
+./mem.py add --working --type procedural --scope global \
+    --summary "Digest: Git and releases" --when "commands=git (commit|push|tag)" \
+    --digest-of "<id>, <id>" --body "- one distilled line per rule [<id>]"
+./mem.py digest                      # every digest: draft or active, its moment, sources retired or rewritten since
+./mem.py digest --verbose            # ... and the preferences no digest cites yet
+./mem.py promote <id>                # a draft is given to nobody until it is promoted
+```
+
+Written with `--working`, a digest is a draft: it sits on the **Working notes** page and reaches
+no session until promoted. Leave `--working` out and it is active at once. Nothing in the code
+stops an agent from promoting a draft — that a person reads the page first is a convention you
+keep, not a lock.
+
+### Measuring it
+
+Whether any of this helps is a question with a number, so the hooks keep count — in
+`store/.access.db`, a local database that is git-ignored and sent nowhere:
+
+- which memory ids were pushed, at which moment, and which ones the agent then went and opened;
+- the agent's own search queries, secret-redacted and cut short (`MEM_SEARCH_LOG=0` turns this off);
+- for each prompt: its length, how many candidates it had and what happened — **never its text**;
+- which words *that already occur in the store* a session's prompts used, which is what tells talk
+  from topic.
+
+```bash
+python3 recall.py eval --build       # pick a benchmark from your own transcripts, once
+python3 recall.py eval               # score the per-prompt recall on it
+```
+
+The benchmark needs no labelling. A *lookup* is a prompt after which the agent opened a memory
+that already existed — its own next move says the memory was needed. A *quiet* prompt is one after
+which it opened nothing. The report gives two numbers that pull against each other: how often the
+recall would have offered the memory before the agent had to look for it, and how often it stays
+silent when nothing was needed. A change that raises the first by lowering the second has only
+become louder. The benchmark file holds pointers (transcript, message id, memory ids), never a
+prompt's text, and is written to `eval/` in the data directory.
+
+**If your data directory was created before 0.21.0** by a plugin install or through `MEM_DATA_DIR`,
+its `.gitignore` names the derived databases one by one and misses the access log, so the
+session-end checkpoint has been committing `store/.access.db` to that local repository. New data
+directories ignore every database under `store/`; an existing one is left as it is, and three
+lines fix it (shown for the plugin's `~/.mem0ry4ai`):
+
+```bash
+cd ~/.mem0ry4ai
+echo 'store/.*.db*' >> .gitignore
+git rm --cached store/.access.db && git commit -m "stop tracking the access log"
+```
+
+### Keeping the start list honest
+
+A project's `status` is the first thing a returning session reads, and a status nobody has touched
+in months is the one most likely to be wrong. One untouched for `MEM_INJECT_STATUS_DAYS` is left
+out of the start list — not retired: it stays active and searchable, the list says how many were
+left out, and the project you started in always shows its own. `mem.py stale` lists them, and
+`mem.py stale --keep <id>` says "still true" for one. Titles in the start list are cut at
+`MEM_INJECT_TITLE` characters; the full text is one `mem.py get` away.
 
 ## Use from any agent (MCP)
 
@@ -165,11 +331,13 @@ claude plugin marketplace add cremenescu/mem0ry4ai
 claude plugin install mem0ry4ai@mem0ry4ai
 ```
 
-Restart Claude Code — hooks (inject at start, capture + git checkpoint at end) register
-automatically and the web UI starts with your first session. In plugin installs your data
+Restart Claude Code — hooks (inject at start, recall on the prompt and at the first touch of a
+project or a file, capture + git checkpoint at end) register automatically and the web UI starts
+with your first session. In plugin installs your data
 lives in **`~/.mem0ry4ai`** (its own git repo, created on first write), so plugin updates
 never touch your memories. The injected context header shows the exact `mem.py` path to
-use from inside a session.
+use from inside a session. (First-touch project briefs look for projects next to the data
+directory — see [the one limit](#project-briefs-and-anchored-memories) if yours live elsewhere.)
 
 ### Option B — git clone (data stays in your clone)
 
@@ -189,11 +357,22 @@ cd mem0ry4ai
 # 2. Web UI (pure-Python stdlib server — no PHP, no Apache)
 ./mem.py serve                    # -> http://127.0.0.1:8841/  (Windows: py mem.py serve)
 
-# 3. Claude Code integration (hooks: inject at start + capture at end)
+# 3. Claude Code integration (hooks: inject at start, recall on the prompt and at the
+#    first touch of a project or file, capture at end)
 python3 hooks/install.py --dry-run        # preview what would be written
 python3 hooks/install.py --target user    # ~/.claude/settings.json (all projects)
 # restart Claude Code (or /clear) to load the hooks
 ```
+
+Two of the hooks run often — one on every prompt, one after every file, search or shell tool call
+— and each can be left out at install time: `--no-prompt-recall`, `--no-tool-recall`. Installed,
+they can still be switched off without touching the registration (`MEM_PROMPT_RECALL=0`,
+`MEM_BRIEF=0`, `MEM_FILE_RECALL=0`, `MEM_DIGEST=0`).
+
+After updating a clone to a new version, run `hooks/install.py` again: it replaces its own entries
+instead of adding to them, and it is what registers the hooks a new version brings (in 0.21.0 the
+prompt and tool hooks, and a session start split in four parts). A plugin install reads them from
+the plugin's own `hooks/hooks.json`.
 
 The SessionStart hook also auto-starts the web server, so the UI is always up while you work.
 
@@ -377,7 +556,17 @@ A few optional fields make records sharper and history honest:
   typed by hand does not get typed (`mem.py backfill-anchors --write` fills in records written
   before). Ask it the other way round with `--files` on `search`/`list`, or `files` on the
   `memory_search` tool — *what do I already know about the file I am about to edit?* Matching is on
-  whole path components, never substrings; a trailing slash matches a whole directory.
+  whole path components, never substrings; a trailing slash matches a whole directory. In Claude
+  Code the question is asked for you: the first time a session touches an anchored file, its
+  memories arrive next to that tool call's result.
+- **`when`** / **`digest-of`** — make a record a
+  [digest](#digests--standing-preferences-delivered-at-their-moment): the moment it is given, and
+  the memories it distils.
+- **`mirrored-in`** — on a critical rule whose full text also lives in an instruction file the
+  agent always loads (`mem.py mirror <id> CLAUDE.md`): session start then names the rule instead of
+  repeating it, while MCP clients, which do not load that file, still get it in full.
+- **`distinct-from`** — two memories that read alike and were judged *not* to be duplicates, so
+  the pair is not offered again (see [Duplicates](#duplicates)).
 - **`tier`** — `open` (default), `redacted` or `private`: what this memory is allowed to tell a
   model. See [Egress tiers](#egress-tiers--what-a-memory-may-tell-a-model).
 - **`protected`** — refuse in-place edit, delete and supersede, for the handful of standing rules
@@ -450,6 +639,33 @@ available — it never *requires* a model:
 Vectors live in their own derived file (`store/.embed.db`), separate from the text index and never
 the source of truth — delete it any time and `mem.py embed` rebuilds it.
 
+## Duplicates
+
+The add-time warning catches a duplicate as it is being written; this finds the ones already in
+the store. `mem.py dups`, and the **Duplicates** page of the web UI, group *active* memories of the
+same type that are at least `MEM_DUPS_THRESHOLD` alike, the most alike first. A chain is one
+group: five versions of one gotcha come out as a group of five, not as ten pairs. Likeness comes
+from the vectors `mem.py embed` builds, so with no vectors there is nothing to compare, and the
+command says so.
+
+Left out on purpose: retired memories, working notes, digests (they repeat their sources by
+design), memories of different types, and pairs already marked `distinct-from`.
+
+```bash
+./mem.py dups                                  # the groups
+./mem.py dups --keep <id> --retire <id> <id>   # one stays, its copies are retired in its favour
+./mem.py dups --distinct <id> <id>             # they read alike and are not the same thing
+./mem.py dups --undo <kept-id>                 # take that back: the copies are active again
+```
+
+Retiring is a supersede, so nothing is deleted. Each copy is stamped `invalid-reason: duplicate of
+<id>`, and what pointed at it — links, blockers and, within the same scope, file anchors — moves
+to the one that stays. It happens whole or not at all, and it refuses to retire a `protected`
+memory, or a critical rule in favour of an ordinary one. The page takes one group at a time, from
+the keyboard: `J`/`K` move between groups, `S` changes which memory stays, `Enter` retires the
+others, `N` marks them not duplicates, `E` opens the one that stays for editing first — and every
+retirement has an **Undo**.
+
 ## Critical rules and the injection budget
 
 A memory system has a failure mode nobody talks about: **the more it remembers, the longer the
@@ -468,6 +684,13 @@ to**:
   ./mem.py pin <id>            # or: ./mem.py add ... --critical
   ```
   Critical rules are injected **always, first, with their full body**, regardless of budget.
+- **Four hooks, not one.** Claude Code caps the output of each hook separately, so session start
+  is registered as four — your profile, the critical rules, the `always` digests, the index of
+  memories — and each part keeps itself under its own limit. A long profile can no longer push a
+  rule past the cut. If the rules together outgrow their part, the longest give way first and the
+  injection says so in a line the dashboard's health check turns red on: shorten one, unpin one,
+  or mark one as mirrored (`mem.py mirror <id> CLAUDE.md` — a rule whose full text already sits in
+  a file the agent always loads is then named instead of repeated).
 - **`MEM_INJECT_BUDGET`** (default 8000 bytes) — everything else fills the budget in relevance
   order (current project's status/todo first, then global knowledge, then recently-touched
   projects), and **every cut is announced** in the injection itself:
@@ -530,15 +753,16 @@ to a model along with everything else.
 ## Tests
 
 ```bash
-python3 tests/test_guards.py             # 43 checks, isolated store, stdlib only
+python3 tests/test_guards.py             # 400 checks, isolated store, stdlib only
 python3 tests/test_guards.py --canary    # remove each guard in turn; the suite must notice
 tools/crawl_ui.py http://127.0.0.1:8841  # reachability, broken links, URL state — no LLM needed
 ```
 
 The suite covers the rules that must not quietly break: secret redaction (each pattern is fed
 something it *must* catch), the injection scan, record-delimiter forgery, the one-live-`status`
-invariant, `protected`, egress across every surface, and — after that class of bug shipped three
-times — that no link in the web UI drops the filters you are looking at.
+invariant, `protected`, egress across every surface, what each hook pushes and when it must stay
+silent, the duplicate groups and their undo, and — after that class of bug shipped three times —
+that no link in the web UI drops the filters you are looking at.
 
 `--canary` is the part worth stealing. It deletes each guard from a scratch copy and requires the
 suite to go red — because a check that passes while the thing it checks is gone reports green and
@@ -637,7 +861,13 @@ Bilingual (English default, Romanian via the EN/RO switch in the top bar).
 - **Links** (`/links`): semantic suggested links (confirm/dismiss) above a force-directed graph
   of all `related-to` / `blocked-by` edges (dependency-free SVG) + a grouped text list — see how
   memories connect at a glance.
-- **"What Claude sees"**: renders the exact SessionStart injection, with its size in bytes/tokens.
+- **Duplicates** (`/duplicates`): groups of memories that say the same thing, one group at a
+  time, with keep / retire / not-duplicates and an undo — see [Duplicates](#duplicates).
+- **Working notes** (`/working`): scratch notes and digest drafts, each with Promote and Dismiss.
+- **"What Claude sees"**: renders the exact SessionStart injection, part by part, each with its
+  size against the per-hook limit.
+- **Settings** (`/settings`): the switches from [Configuration](#configuration) as a form, saved to
+  `.mem-local.env` in the data directory; a value exported in your shell wins over the file.
 - **Review queue**: candidates extracted by the optional local LLM wait here for human approval.
 - **Git history**: the store's timeline — commits touching `store/` with colored per-commit
   diffs and a commit-from-the-UI button (store files only).
@@ -657,13 +887,30 @@ python3 consolidate.py --write       # queue candidates -> review in the web UI
 
 ## Configuration
 
-Everything is overridable via environment variables — no config file needed:
+Everything is overridable via environment variables — no config file needed. The web UI's
+Settings page writes the common ones to `.mem-local.env` in the data directory, which the hooks,
+the CLI and the MCP server all read:
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `MEM_DATA_DIR` | next to the code; `~/.mem0ry4ai` in plugin installs | where `store/`, `staging/` and `.mem-local.env` live — point it at a scratch dir and both data and settings are isolated |
 | `MEM_REDACT` | `1` | set `0` to disable secret redaction on write paths |
 | `MEM_INJECT_BUDGET` | `8000` | max bytes injected at SessionStart (critical rules always fit; cuts are announced) |
+| `MEM_INJECT_STATUS_DAYS` | `60` | a `status` untouched for this many days is left out of the start list — never retired (`0` lists them all) |
+| `MEM_INJECT_TITLE` | `120` | characters of a title shown in the start list (`0` = whole) |
+| `MEM_PROMPT_RECALL` | `1` | recall on the prompt; `0` turns it off |
+| `MEM_PROMPT_MAX` | `5` | the most memories one prompt can bring |
+| `MEM_PROMPT_MIN_CHARS` | `12` | prompts shorter than this are skipped |
+| `MEM_BRIEF` | `1` | the project brief at the first touch of a project |
+| `MEM_BRIEF_ON_PROMPT` | `1` | also brief a project when a prompt names it in full |
+| `MEM_BRIEF_MAX_CHARS` | `3500` | size limit of one brief; its last line counts what was left out |
+| `MEM_FILE_RECALL` | `1` | the memories anchored to a file, at its first touch |
+| `MEM_FILE_RECALL_MAX` | `4` | how many of them — the newest |
+| `MEM_SCOPE_ALIASES` | empty | `folder=slug, other=slug`, for a project whose folder and scope are named differently |
+| `MEM_DIGEST` | `1` | digests that wait for a file or a command (`always` digests come with session start) |
+| `MEM_RECALL_NOTICE` | `1` | the one line *you* are shown whenever memories are pushed |
+| `MEM_SEARCH_LOG` | `1` | keep the agent's search queries, redacted, in the local access log |
+| `MEM_DUPS_THRESHOLD` | `0.80` | how alike two memories must be to be grouped as duplicates (0.60–0.99) |
 | `MEM_WEB_PORT` | `8841` | web UI port (`mem.py serve`) |
 | `MEM_UI_LANG` | `en` | default web UI language (`ro` for Romanian; per-user EN/RO switch overrides) |
 | `MEM_RECENCY_WEIGHT` | `1.5` | how much fresher memories are nudged up in ranking (0 = pure bm25) |

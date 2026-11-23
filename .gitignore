@@ -7,6 +7,10 @@ store/.access.db*
 # Raw episodic staging (captured by hooks, pre-consolidation)
 staging/
 
+# Recall benchmark built from your own transcripts (recall.py eval --build):
+# it holds their paths and message ids, so it stays on the machine
+eval/
+
 # Standalone web server runtime
 .web-server.pid
 .web-server.log

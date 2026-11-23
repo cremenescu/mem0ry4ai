@@ -1,13 +1,63 @@
 {
-  "description": "mem0ry4ai hooks: inject scoped memories at SessionStart (also auto-starts the web UI), capture transcript pointer + per-scope git checkpoint at PreCompact/SessionEnd. In plugin installs the data lives in ~/.mem0ry4ai (own git repo), so plugin updates never touch your memories.",
+  "description": "mem0ry4ai hooks: inject scoped memories at SessionStart, one handler per part (profile, rules, digests, knowledge; also auto-starts the web UI); offer the memories a prompt is about at UserPromptSubmit; give a project's brief and a file's anchored memories the first time a tool touches them (PostToolUse, PostToolUseFailure); capture transcript pointer + per-scope git checkpoint at PreCompact/SessionEnd. In plugin installs the data lives in ~/.mem0ry4ai (own git repo), so plugin updates never touch your memories.",
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/session_start.py\"",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/session_start.py\" --part profile",
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/session_start.py\" --part rules",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/session_start.py\" --part digests",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/session_start.py\" --part knowledge",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/prompt_recall.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Read|Edit|Write|MultiEdit|NotebookEdit|Bash|Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/tool_recall.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Read|Edit|Write|MultiEdit|NotebookEdit|Bash|Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/tool_recall.py\"",
+            "timeout": 5
           }
         ]
       }

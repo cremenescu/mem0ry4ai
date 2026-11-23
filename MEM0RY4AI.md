@@ -25,6 +25,12 @@ markdown+git store. Reach it through these MCP tools:
   messages of earlier sessions), NOT the curated store. Use when `memory_search` comes up short and you
   need "what did we actually discuss/decide weeks ago?". Returns real message snippets at zero LLM cost.
 
+## Reading a memory
+A memory records what was true when it was written. It reads just as confident a year later, after
+the file was renamed or the flag removed. So if it names a file, function, flag, host or version,
+check that it still exists before relying on it — and when one turns out wrong, supersede it rather
+than work around it.
+
 There is **no edit and no delete tool** — to revise a record's content, *supersede* the old one and *add*
 a new one (`mem.py supersede <id> --by <new>`, or the web UI `/memories`). The store is markdown+git, so
 nothing is ever lost. (`memory_promote` only flips a working note's status; it does not edit content.)
@@ -36,6 +42,8 @@ Save only what you'd want to know **next session** — durable and generalizable
 - **fact** — a stable fact (IP, path, port, version, deploy target, name).
 - **command** — a reusable command/sequence.
 - **preference** — how the user wants you to work (style, conventions, what NOT to do); corrections always.
+  Also an approach the user explicitly confirmed when it was not the obvious choice and it worked —
+  what went right is as reusable as what went wrong. Not routine steps, and not a polite "ok".
 - **procedural / todo / status** — a reusable procedure / next steps / where a project stands.
 
 Do **not** save ephemeral steps ("did X today"), thanks, speculation, or anything true only this session.

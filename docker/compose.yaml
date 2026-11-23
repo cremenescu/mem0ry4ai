@@ -12,8 +12,8 @@ services:
       args:
         # Pin a release rather than tracking main: this container commits to your store, and an
         # unattended rebuild should never be the first time new code touches it.
-        VERSION: v0.20.0
-    image: mem0ry4ai:v0.20.0
+        VERSION: v0.21.0
+    image: mem0ry4ai:v0.21.0
     container_name: mem0ry4ai
     restart: unless-stopped
     # tini as PID 1. The application does not reap the orphans it inherits, and a PID 1 that does
